@@ -1,0 +1,6 @@
+id = "Aphrodine-wq/example-pulse"
+scene_name = "pulse"
+struct_name = "Pulse"
+description = "breathing radial rings on black"
+themes = ["classic", "ember", "ice", "mono"]
+repo = "https://github.com/Aphrodine-wq/termpaper"

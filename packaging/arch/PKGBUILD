@@ -1,0 +1,40 @@
+# Build on Arch Linux from a local clone:
+#   cd packaging/arch
+#   makepkg -si
+#
+# Or set TERMPAPER_SRC to the repo root before makepkg.
+
+pkgname=termpaper
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Wallpaper Engine for the terminal — animated truecolor scenes"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Aphrodine-wq/termpaper"
+license=('MIT')
+depends=()
+makedepends=('cargo' 'git')
+options=('!strip')
+source=("git+${url}.git#tag=v${pkgver}")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd termpaper
+    git describe --long --tags 2>/dev/null | sed 's/\([^-]*-g\)/r\1/;s/-/./g' || echo "$pkgver"
+}
+
+build() {
+    cd termpaper
+    cargo build --release --locked
+}
+
+check() {
+    cd termpaper
+    cargo test --lib --locked
+}
+
+package() {
+    cd termpaper
+    install -Dm755 target/release/termpaper "$pkgdir/usr/bin/termpaper"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/termpaper/README.md"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/termpaper/LICENSE"
+}
