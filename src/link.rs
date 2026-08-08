@@ -144,11 +144,26 @@ fn libc_getuid() -> u32 {
         .unwrap_or(1000)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn libc_getuid() -> u32 {
+    unsafe { libc::getuid() }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn libc_getuid() -> u32 {
     1000
 }
 
+#[cfg(target_os = "macos")]
+fn pid_alive(pid: u32) -> bool {
+    // kill(pid, 0): 0 = alive & ours, EPERM = alive but not ours, ESRCH = dead
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(target_os = "macos"))]
 fn pid_alive(pid: u32) -> bool {
     PathBuf::from(format!("/proc/{pid}")).exists()
 }
@@ -638,6 +653,12 @@ mod tests {
             drop(g);
             assert!(!dir.join(format!("inst-{pid}.json")).exists());
         });
+    }
+
+    #[test]
+    fn pid_alive_detects_self_and_rejects_bogus() {
+        assert!(pid_alive(std::process::id()));
+        assert!(!pid_alive(0x7FFF_FFFF));
     }
 
     #[test]

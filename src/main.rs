@@ -182,6 +182,25 @@ fn entropy_rng() -> StdRng {
     StdRng::from_rng(&mut rand::rng())
 }
 
+/// Fallback quality profile when neither CLI nor config sets one.
+/// macOS (MacBook thermal/battery headroom) defaults to half-res pixels
+/// and 0.5x particle counts; explicit --detail/--pixels/config always win.
+fn platform_default_detail() -> Detail {
+    if cfg!(target_os = "macos") {
+        Detail::Low
+    } else {
+        Detail::default()
+    }
+}
+
+fn platform_default_pixels() -> Pixels {
+    if cfg!(target_os = "macos") {
+        Pixels::Half
+    } else {
+        Pixels::default()
+    }
+}
+
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
 
@@ -252,7 +271,7 @@ fn main() -> std::io::Result<()> {
         .as_deref()
         .or(cfg.detail.as_deref())
         .and_then(Detail::parse)
-        .unwrap_or_default();
+        .unwrap_or_else(platform_default_detail);
     let scene_name = args
         .scene
         .clone()
@@ -275,7 +294,7 @@ fn main() -> std::io::Result<()> {
         .as_deref()
         .or(cfg.pixels.as_deref())
         .and_then(Pixels::parse)
-        .unwrap_or_default();
+        .unwrap_or_else(platform_default_pixels);
     let keymap = config::KeyMap::new(&cfg);
     let theme = args
         .theme
@@ -458,8 +477,8 @@ fn apply_defaults(
 ) {
     config::reset_stored_defaults(&mut settings.cfg, scene_name);
 
-    settings.pixels = Pixels::default();
-    settings.detail = Detail::default();
+    settings.pixels = platform_default_pixels();
+    settings.detail = platform_default_detail();
     settings.theme = None;
     settings.filters.clear();
     settings.text_scale = None;

@@ -201,6 +201,11 @@ lowest-pid instance in the group re-publishes the current scene every 15s
 as a sync anchor — identical re-publishes are skipped silently, so no
 visible restarts.
 
+Linking works on macOS too (iTerm2, Terminal.app, …): without
+`$XDG_RUNTIME_DIR` the registry lives in `/tmp/termpaper-$UID`. Only the
+video wall's *auto* window-geometry mode is Linux/Hyprland-only — manual
+`--wall COLSxROWS:INDEX` tiling works everywhere.
+
 ## Video wall
 
 Linked terminals with known window positions act as viewports onto one
@@ -245,6 +250,12 @@ pixels per cell:
   reads almost like a bitmap, at the cost of per-cell color fidelity.
 
 Glyph scenes (bump) keep their characters in every mode.
+
+**macOS default profile**: on macOS, an unconfigured launch defaults to
+`pixels = "half"` + `detail = "low"` (half-resolution, color-true pixels
+and 0.5× particle counts) to stay cool on MacBook thermals/battery. The
+scenes are unchanged — set `pixels`/`detail` explicitly (CLI, config, or
+the menu) to override.
 
 ## Filters
 
