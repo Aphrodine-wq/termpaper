@@ -3,11 +3,12 @@
 //! whites and gray undersides. Themes: night (cool moon), sunset (low warm
 //! sun over a dark ember horizon), storm (steel clouds, distant lightning).
 
-use super::{noise::fbm, Scene};
-use crate::canvas::{ease_smooth, glow, lerp, scale, Canvas};
+use super::{noise::fbm, Detail, Scene};
+use crate::canvas::{glow, lerp, scale, Canvas};
 
 pub struct Clouds {
     t: f32,
+    detail: Detail,
     seed: u32,
     sky_a: (u8, u8, u8),
     sky_b: (u8, u8, u8),
@@ -42,7 +43,7 @@ fn bilerp(g: &[f32], r0: usize, r1: usize, ix: usize, tx: f32, ty: f32) -> f32 {
 }
 
 impl Clouds {
-    pub fn new(mut rng: rand::rngs::StdRng, theme: Option<&str>) -> Self {
+    pub fn new(mut rng: rand::rngs::StdRng, theme: Option<&str>, detail: Detail) -> Self {
         use rand::RngExt;
         let (sky_a, sky_b, cloud_hi, cloud_lo, star_tint, stars, storm, moon) = match theme {
             Some("sunset") => (
@@ -79,6 +80,7 @@ impl Clouds {
         };
         Clouds {
             t: 0.0,
+            detail,
             seed: rng.random::<u32>(),
             sky_a,
             sky_b,
@@ -102,14 +104,32 @@ impl Clouds {
         }
     }
 
+    /// fBm octaves per layer, scaled by detail: more octaves means finer
+    /// billow structure. `STEP` deliberately stays fixed at 4 — it is fused to
+    /// the `>> 2` / `& 3` shifts and the `[f32; STEP]` table in the upsample
+    /// loop, and clouds runs against a 1.5ms/frame budget.
+    fn octaves(&self, layer: usize) -> usize {
+        let base = if layer == 0 { 4 } else { 3 };
+        match self.detail {
+            Detail::Low => base - 1,
+            Detail::Medium => base,
+            Detail::High => base + 1,
+        }
+    }
+
     /// Cloud density at canvas position for a layer, drifting over time.
     fn density(&self, x: f32, y: f32, layer: usize) -> f32 {
         match layer {
-            0 => fbm((x + self.xoff0) * 0.014, y * 0.045, 4, self.seed),
+            0 => fbm(
+                (x + self.xoff0) * 0.014,
+                y * 0.045,
+                self.octaves(0),
+                self.seed,
+            ),
             _ => fbm(
                 (x + self.xoff1) * 0.024,
                 y * 0.06,
-                3,
+                self.octaves(1),
                 self.seed.wrapping_add(4242),
             ),
         }
@@ -206,7 +226,6 @@ impl Scene for Clouds {
 
         // storm-only: distant lightning backlights the deck with a
         // double-strike flicker that dies out (payoff -> decay)
-        let mut flash_env = 0.0;
         if self.storm {
             self.next_flash -= dt;
             if self.next_flash <= 0.0 {
@@ -217,7 +236,7 @@ impl Scene for Clouds {
             self.flash = (self.flash - dt).max(0.0);
             if self.flash > 0.0 {
                 let e = 1.0 - self.flash / 0.9;
-                flash_env = (e * 18.0).sin().abs() * (1.0 - e).powi(2);
+                let flash_env = (e * 18.0).sin().abs() * (1.0 - e).powi(2);
                 let fx = self.flash_x * w as f32;
                 let spread = w as f32 * 0.45;
                 let x0 = ((fx - spread).ceil() as i32).max(0);
@@ -309,10 +328,11 @@ impl Scene for Clouds {
             let (thresh, soft) = if layer == 0 { (0.52, 0.22) } else { (0.55, 0.18) };
             let gw = w / STEP + 2;
             let gh = h / STEP + 2;
-            let (sx, sy, oct, seed, drift) = if layer == 0 {
-                (0.014, 0.045, 4, self.seed, 5.0)
+            let oct = self.octaves(layer);
+            let (sx, sy, seed, drift) = if layer == 0 {
+                (0.014, 0.045, self.seed, 5.0)
             } else {
-                (0.024, 0.06, 3, self.seed.wrapping_add(4242), 13.0)
+                (0.024, 0.06, self.seed.wrapping_add(4242), 13.0)
             };
             let xoff = self.t * drift;
             self.grid.resize(gw * gh, 0.0);
@@ -324,6 +344,7 @@ impl Scene for Clouds {
                 }
             }
             let grid = &self.grid;
+            let (cloud_hi, cloud_lo) = (self.cloud_hi, self.cloud_lo);
             // STEP is a power of two and coords are integers, so the bilinear
             // cell/fraction come from shifts — bit-exact, no float floor/fract.
             const FRACT: [f32; STEP] = [0.0, 0.25, 0.5, 0.75];
@@ -343,10 +364,13 @@ impl Scene for Clouds {
                         continue;
                     }
                     let cov = ((d - thresh) / soft).min(1.0);
+                    // per-theme cloud colouring: these were previously
+                    // hardcoded, so sunset's warm tops and storm's steel decks
+                    // never actually reached the clouds
                     let body = if bilerp(grid, b0, b1, ix, tx, ty2) <= thresh {
-                        (176, 182, 196) // gray underside
+                        cloud_lo // shaded underside
                     } else {
-                        (248, 250, 252) // billowy white
+                        cloud_hi // lit, billowy top
                     };
                     let sky = canvas.get(x as i32, y as i32).color;
                     canvas.set(x as i32, y as i32, lerp(sky, body, 0.35 + 0.65 * cov));

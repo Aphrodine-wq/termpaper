@@ -1,8 +1,7 @@
 # Contributing to termpaper
 
-termpaper is an open-source terminal art engine. The best way to add your own
-work is to implement a new **scene** — a self-contained animation module — and
-register it in the scene catalog.
+termpaper is open-source terminal cinema. The best way to add your voice is a
+**scene** — a self-contained animation module — registered in the catalog.
 
 ## Quick start
 
@@ -83,8 +82,15 @@ Follow the polish bar used across the catalog:
 - **Detail scaling** — use `detail.scale(count, min)` so low/medium/high modes matter
 - **Edge-to-edge** — fill the canvas; no borders or unused margins
 
-Reuse helpers from `canvas.rs` (`lerp`, `scale`, `glow`, `ease_smooth`,
+Reuse helpers from `canvas.rs` (`lerp`, `scale`, `glow`, `disc`, `ease_smooth`,
 `density_for`), `scene/noise.rs` (`fbm`), and `physics.rs` (`spring_damper`).
+
+Use `disc()` for round shapes rather than a `dx*dx + dy*dy <= r*r` test — it
+antialiases the rim, which matters at the 1–4 cell radii scenes actually use.
+Note that `density_for(w, h)` **already contains a `w * h` term**, so
+`(w * h / K) as f32 * density_for(w, h)` is quadratic in area: on a normal
+terminal it lands under the count floor, and `detail.scale`'s low/high split
+then collapses onto that floor and does nothing. Pick one area term, not two.
 
 ## Post-processing
 
@@ -102,25 +108,6 @@ Available filters live in `src/filter.rs`. To add one:
 
 Global hue / saturation / contrast is applied in `src/color_grade.rs` after
 scene render and before dim/smooth. Scenes do not need to know about it.
-
-## Scene Marketplace (share on GitHub)
-
-For scenes you want to share **without** a PR to the core catalog, use the
-[Scene Marketplace](marketplace/README.md):
-
-1. Copy `marketplace/template/` into a new public GitHub repo
-2. Implement `scene.rs` using the same `Scene` trait as above (`use super::{Detail, Scene}`)
-3. Fill in `scene.toml`
-4. Open a PR adding an entry to `marketplace/index.json`
-
-Users install with:
-
-```sh
-termpaper marketplace install your-user/your-scene-id
-termpaper your_scene
-```
-
-Run `termpaper marketplace publish` for the full checklist.
 
 ## Pull requests
 

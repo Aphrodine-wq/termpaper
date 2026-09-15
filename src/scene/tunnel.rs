@@ -4,7 +4,7 @@
 //! (anticipation -> payoff -> a white kiss as they pass), speed surges ease
 //! in and out, and debris chunks tumble by with a hot rim.
 
-use super::Scene;
+use super::{Detail, Scene};
 use crate::canvas::{ease_out, ease_smooth, hsv, lerp, scale, Canvas};
 use rand::{rngs::StdRng, RngExt};
 
@@ -55,6 +55,11 @@ impl PolarTable {
     }
 }
 
+/// Upper bound on simultaneous light gates. The per-pixel loop reads them from
+/// a fixed-size array, so this sizes that array; `gate_cap()` picks how many are
+/// actually allowed to live at the current detail level.
+const MAX_GATES: usize = 7;
+
 /// A light gate: a bright ring fixed at texture-v, carried outward by the
 /// flight offset until it sweeps past the camera.
 struct Gate {
@@ -64,6 +69,7 @@ struct Gate {
 
 pub struct Tunnel {
     rng: StdRng,
+    detail: Detail,
     t: f32,
     hue0: f32,
     sat: f32,
@@ -84,7 +90,7 @@ pub struct Tunnel {
 }
 
 impl Tunnel {
-    pub fn new(rng: StdRng, theme: Option<&str>) -> Self {
+    pub fn new(rng: StdRng, theme: Option<&str>, detail: Detail) -> Self {
         let (hue0, sat) = match theme {
             Some("inferno") => (0.02, 0.9),
             Some("mono") => (0.0, 0.15),
@@ -92,6 +98,7 @@ impl Tunnel {
         };
         Tunnel {
             rng,
+            detail,
             hue0,
             sat,
             t: 0.0,
@@ -103,10 +110,40 @@ impl Tunnel {
             dist: 0.0,
             rot_a: 0.0,
             gates: Vec::new(),
-            next_gate: 3.5,
             debris: Vec::new(),
-            next_debris: 4.0,
+            // stagger the first gate/debris by detail too, not just their
+            // steady-state rate: at high detail the tunnel should read as busy
+            // straight away rather than only after the first few seconds
+            next_gate: match detail {
+                Detail::Low => 5.0,
+                Detail::Medium => 3.5,
+                Detail::High => 1.2,
+            },
+            next_debris: match detail {
+                Detail::Low => 6.0,
+                Detail::Medium => 4.0,
+                Detail::High => 1.4,
+            },
             table: None,
+        }
+    }
+}
+
+impl Tunnel {
+    /// Concurrent gates allowed, and the debris spawn interval, by detail.
+    fn gate_cap(&self) -> usize {
+        match self.detail {
+            Detail::Low => 2,
+            Detail::Medium => 4,
+            Detail::High => MAX_GATES,
+        }
+    }
+
+    fn debris_gap(&self) -> (f32, f32) {
+        match self.detail {
+            Detail::Low => (5.0, 11.0),
+            Detail::Medium => (3.0, 8.0),
+            Detail::High => (1.2, 3.6),
         }
     }
 }
@@ -154,7 +191,8 @@ impl Scene for Tunnel {
         let rot = self.rot_a + (t * 0.11).sin() * 1.2;
 
         // light gates: spawn deep, race outward, blaze, fade before the edge
-        if surge_fired && self.gates.len() < 4 {
+        let gate_cap = self.gate_cap();
+        if surge_fired && self.gates.len() < gate_cap {
             self.gates.push(Gate {
                 v: vfly + 9.0,
                 amp: 1.2,
@@ -163,7 +201,7 @@ impl Scene for Tunnel {
         self.next_gate -= dt;
         if self.next_gate <= 0.0 {
             self.next_gate = self.rng.random_range(4.0..7.0);
-            if self.gates.len() < 4 {
+            if self.gates.len() < gate_cap {
                 self.gates.push(Gate {
                     v: vfly + 9.0,
                     amp: self.rng.random_range(0.7..1.0),
@@ -205,10 +243,10 @@ impl Scene for Tunnel {
         );
         // loop-invariant gate envelope: grow in from the core, blaze as it
         // nears the camera, fade just before the edge so it never pops off
-        let mut gate_pv = [(0.0f32, 0.0f32); 4];
+        let mut gate_pv = [(0.0f32, 0.0f32); MAX_GATES];
         let mut n_gates = 0usize;
         for g in &self.gates {
-            if n_gates >= 4 {
+            if n_gates >= gate_cap {
                 break;
             }
             let ahead = g.v - vfly;
@@ -300,7 +338,8 @@ impl Scene for Tunnel {
         // lifecycle envelope so chunks grow in and fade out — no popping
         self.next_debris -= dt;
         if self.next_debris <= 0.0 {
-            self.next_debris = self.rng.random_range(3.0..8.0);
+            let (lo, hi) = self.debris_gap();
+            self.next_debris = self.rng.random_range(lo..hi);
             self.debris.push((
                 self.rng.random_range(0.0..std::f32::consts::TAU),
                 1.0,
@@ -344,7 +383,7 @@ mod tests {
 
     #[test]
     fn tunnel_is_nonuniform_and_dark_at_center() {
-        let mut t = Tunnel::new(StdRng::seed_from_u64(2), None);
+        let mut t = Tunnel::new(StdRng::seed_from_u64(2), None, Detail::Medium);
         let mut c = Canvas::new(60, 30);
         t.update(1.0 / 30.0, &mut c);
         let colors: HashSet<_> = (0..60)

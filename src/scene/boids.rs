@@ -5,7 +5,7 @@
 //! boids; periodic murmuration swirls brighten the whole flock.
 
 use super::{Detail, Scene};
-use crate::canvas::{density_for, ease_smooth, glow, lerp, scale, Canvas};
+use crate::canvas::{density_for, dot, ease_smooth, glow_f, lerp, scale, Canvas};
 use rand::{rngs::StdRng, RngExt};
 
 const MAX_SPEED: f32 = 34.0;
@@ -238,10 +238,6 @@ impl Boids {
         self.prev = prev;
     }
 
-    fn color(&self, tint: f32, bright: f32) -> (u8, u8, u8) {
-        let base = lerp(self.c_a, self.c_b, tint);
-        scale(base, bright)
-    }
 }
 
 impl Scene for Boids {
@@ -329,11 +325,7 @@ impl Scene for Boids {
                     let tf = i as f32 / 5.0;
                     let tx = b.px + (b.x - b.px) * tf;
                     let ty = b.py + (b.y - b.py) * tf;
-                    canvas.add(
-                        tx as i32,
-                        ty as i32,
-                        scale(base, 0.35 * (1.0 - tf) * shimmer * boost),
-                    );
+                    dot(canvas, tx, ty, base, 0.35 * (1.0 - tf) * shimmer * boost);
                 }
             }
             // heading-oriented body: nose + two wing pixels
@@ -341,20 +333,24 @@ impl Scene for Boids {
             let (dx, dy) = (b.vx / s, b.vy / s);
             let (pxv, pyv) = (-dy, dx); // perpendicular
             let core = lerp(base, (255, 255, 255), 0.25);
-            canvas.set_f(b.x, b.y, scale(core, shimmer * boost.min(1.2)));
-            canvas.set_f(
+            dot(canvas, b.x, b.y, core, shimmer * boost.min(1.2));
+            dot(
+                canvas,
                 b.x - dx * 1.4 + pxv,
                 b.y - dy * 1.4 + pyv,
-                scale(base, 0.7 * shimmer * boost.min(1.4)),
+                base,
+                0.7 * shimmer * boost.min(1.4),
             );
-            canvas.set_f(
+            dot(
+                canvas,
                 b.x - dx * 1.4 - pxv,
                 b.y - dy * 1.4 - pyv,
-                scale(base, 0.7 * shimmer * boost.min(1.4)),
+                base,
+                0.7 * shimmer * boost.min(1.4),
             );
             // foreground accents: a few leaders carry a soft glow
             if b.leader {
-                glow(canvas, b.x as i32, b.y as i32, 1, base, 0.18 * shimmer);
+                glow_f(canvas, b.x, b.y, 1.0, base, 0.18 * shimmer);
             }
         }
 
@@ -376,11 +372,10 @@ impl Scene for Boids {
             if *px < -15.0 || *px > w as f32 + 15.0 {
                 self.predator = None;
             } else {
-                let (ix, iy) = (px.round() as i32, py.round() as i32);
-                glow(canvas, ix, iy, 2, (255, 60, 50), 0.35);
-                canvas.set(ix, iy, (255, 55, 45));
-                canvas.add(ix + 1, iy, (90, 20, 15));
-                canvas.add(ix - 1, iy, (90, 20, 15));
+                glow_f(canvas, *px, *py, 2.0, (255, 60, 50), 0.35);
+                dot(canvas, *px, *py, (255, 55, 45), 1.0);
+                dot(canvas, *px + 1.0, *py, (90, 20, 15), 1.0);
+                dot(canvas, *px - 1.0, *py, (90, 20, 15), 1.0);
             }
         }
     }

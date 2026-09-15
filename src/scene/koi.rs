@@ -4,7 +4,7 @@
 
 use super::{Detail, Scene};
 use crate::physics;
-use crate::canvas::{density_for, lerp, scale, Canvas};
+use crate::canvas::{density_for, ease_smooth, lerp, scale, Canvas};
 use rand::{rngs::StdRng, RngExt};
 
 struct Koi {
@@ -38,7 +38,14 @@ struct Pellet {
     x: f32,
     y: f32,
     age: f32,
+    /// set once a koi has been dispatched, so only one is sent
+    sent: bool,
 }
+
+/// Seconds a pellet sits on the surface before a koi notices it.
+const PELLET_WAIT: f32 = 1.1;
+/// A pellet nobody reaches dissolves after this long.
+const PELLET_LIFE: f32 = 9.0;
 
 struct Pad {
     x: f32,
@@ -256,19 +263,58 @@ impl Scene for KoiPond {
             self.next_ripple = self.rng.random_range(0.6..1.8);
         }
 
-        // feeding: a koi darts to a point, bursts ripples and bubbles
+        // feeding, in three beats: a pellet lands (anticipation), the nearest
+        // koi notices and darts up (payoff), the gulp bursts ripples/bubbles.
         self.next_feed -= dt;
-        if self.next_feed <= 0.0 && !self.koi.is_empty() {
+        if self.next_feed <= 0.0 && self.pellet.is_none() && !self.koi.is_empty() {
             self.next_feed = self.rng.random_range(6.0..12.0);
-            let ki = self.rng.random_range(0..self.koi.len());
             let (fx, fy) = (
                 self.rng.random_range(w as f32 * 0.2..w as f32 * 0.8),
                 self.rng.random_range(h as f32 * 0.15..h as f32 * 0.5),
             );
-            self.koi[ki].feeding = Some((fx, fy, 3.0));
+            // the landing itself makes a small ring — the cue that something hit
+            self.ripples.push(Ripple {
+                x: fx,
+                y: fy,
+                r: 0.5,
+                max_r: 3.5,
+            });
+            self.pellet = Some(Pellet {
+                x: fx,
+                y: fy,
+                age: 0.0,
+                sent: false,
+            });
+        }
+        // after the anticipation beat, the *nearest* koi is dispatched: a fish
+        // noticing reads far better than a random one being teleported a target
+        if let Some(p) = &mut self.pellet {
+            p.age += dt;
+            if !p.sent && p.age >= PELLET_WAIT && !self.koi.is_empty() {
+                p.sent = true;
+                let (px, py) = (p.x, p.y);
+                let ki = self
+                    .koi
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| {
+                        let da = (a.x - px).powi(2) + (a.y - py).powi(2);
+                        let db = (b.x - px).powi(2) + (b.y - py).powi(2);
+                        da.total_cmp(&db)
+                    })
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                self.koi[ki].feeding = Some((px, py, 3.0));
+            }
+            if p.age > PELLET_LIFE {
+                self.pellet = None;
+            }
         }
 
-        let mut feed_events: Vec<(f32, f32)> = Vec::new();
+        // reuse the scratch buffer across frames instead of allocating a fresh
+        // Vec every update, which is what the field was always for
+        let mut feed_events = std::mem::take(&mut self.feed_events);
+        feed_events.clear();
         // koi movement + wakes
         for k in self.koi.iter_mut() {
             // smooth wandering with inertia: target turn rate, damped
@@ -302,13 +348,18 @@ impl Scene for KoiPond {
                     diff += std::f32::consts::TAU;
                 }
                 k.heading += diff * 5.0 * dt;
-                speed *= 2.4;
+                // ramp into the dart rather than snapping to 2.4x
+                k.dart = (k.dart + dt * 4.0).min(1.0);
                 let dist = ((*fx - k.x).powi(2) + (*fy - k.y).powi(2)).sqrt();
                 if dist < 2.0 || *left <= 0.0 {
                     k.feeding = None;
                     feed_events.push((k.x, k.y));
                 }
+            } else {
+                // and coast back down afterwards, so the gulp has a settle
+                k.dart = (k.dart - dt * 1.6).max(0.0);
             }
+            speed *= 1.0 + 1.4 * ease_smooth(k.dart);
             k.x = (k.x + k.heading.cos() * speed * dt).clamp(1.0, w as f32 - 1.0);
             k.y = (k.y + k.heading.sin() * speed * dt).clamp(1.0, h as f32 - 1.0);
             k.wake_t -= dt;
@@ -323,7 +374,11 @@ impl Scene for KoiPond {
             }
         }
 
-        for (fx, fy) in feed_events {
+        if !feed_events.is_empty() {
+            // the pellet is gone the moment a mouth reaches it
+            self.pellet = None;
+        }
+        for (fx, fy) in feed_events.drain(..) {
             // mouth-break: pale ring where the mouth breaks the surface
             for i in 0..10 {
                 let a = i as f32 / 10.0 * std::f32::consts::TAU;
@@ -451,6 +506,23 @@ impl Scene for KoiPond {
             }
             true
         });
+
+        // hand the scratch buffer back with its capacity intact
+        self.feed_events = feed_events;
+
+        // the pellet itself: a pale speck bobbing on the surface, fading in on
+        // landing and dimming as it goes stale
+        if let Some(p) = &self.pellet {
+            let fade = ease_smooth(p.age / 0.35)
+                * (1.0 - ease_smooth((p.age - (PELLET_LIFE - 2.0)) / 2.0));
+            let bob = (t * 2.3).sin() * 0.4;
+            canvas.set_f(p.x, p.y + bob, scale((214, 198, 150), fade));
+            canvas.add(
+                p.x as i32,
+                (p.y + bob) as i32 - 1,
+                scale((90, 84, 62), fade * 0.5),
+            );
+        }
 
         // koi bodies: shadow first, then anatomy
         for (ki, k) in self.koi.iter().enumerate() {

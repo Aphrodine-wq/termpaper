@@ -169,7 +169,14 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 fn atomic_write(path: &PathBuf, contents: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
+    // pid-suffixed temp name: concurrent publishers to the same target
+    // (control.json) must never share a temp file, or interleaved writes
+    // can rename torn JSON into place
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".into());
+    let tmp = path.with_file_name(format!(".{}.{}.tmp", name, std::process::id()));
     std::fs::write(&tmp, contents)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
@@ -208,6 +215,20 @@ pub struct Guard {
     rows: usize,
     geo: Option<(i32, i32, i32, i32)>,
     pad: (i32, i32),
+    /// (inode, mtime) of control.json at the last poll that read it —
+    /// lets per-frame polling stop at a stat when nothing changed
+    ctrl_seen: Option<(u64, SystemTime)>,
+}
+
+#[cfg(unix)]
+fn file_ino(m: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    m.ino()
+}
+
+#[cfg(not(unix))]
+fn file_ino(_m: &std::fs::Metadata) -> u64 {
+    0
 }
 
 impl Guard {
@@ -228,6 +249,7 @@ impl Guard {
             rows: 0,
             geo: None,
             pad: (0, 0),
+            ctrl_seen: None,
         };
         g.write()?;
         Some(g)
@@ -286,8 +308,18 @@ impl Guard {
     }
 
     /// Check control.json for a message newer than `last` (and not ours).
-    pub fn poll_control(&self, last: Stamp) -> Option<Control> {
+    ///
+    /// Cheap when idle: a stat per call, and the file is only read (and
+    /// parsed) when its (inode, mtime) differ from the last read —
+    /// atomic_write renames a fresh inode into place on every publish.
+    pub fn poll_control(&mut self, last: Stamp) -> Option<Control> {
         let path = self.dir.join("control.json");
+        let meta = std::fs::metadata(&path).ok()?;
+        let sig = (file_ino(&meta), meta.modified().ok()?);
+        if self.ctrl_seen == Some(sig) {
+            return None;
+        }
+        self.ctrl_seen = Some(sig);
         let text = std::fs::read_to_string(path).ok()?;
         parse_control(&text).filter(|c| {
             c.from_pid != self.pid
@@ -487,11 +519,13 @@ pub fn parse_instance(text: &str) -> Option<InstanceInfo> {
     })
 }
 
-/// Remove registry files whose pids are dead.
+/// Remove registry files whose pids are dead, temp-file orphans from
+/// crashed publishers, and a control.json left behind by a dead group.
 pub fn reap_stale(dir: &PathBuf) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
+    let mut any_live_inst = false;
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         if let Some(rest) = name.strip_prefix("inst-") {
@@ -499,8 +533,33 @@ pub fn reap_stale(dir: &PathBuf) {
                 if let Ok(pid) = pid_s.parse::<u32>() {
                     if pid != std::process::id() && !pid_alive(pid) {
                         let _ = std::fs::remove_file(e.path());
+                    } else {
+                        any_live_inst = true;
                     }
                 }
+            }
+        } else if name.ends_with(".tmp") {
+            let old = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age.as_secs() > 60);
+            if old {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    // a control file with no living publisher and no live peers is a relic
+    // of a dead session; drop it so it can't confuse the next launch
+    if !any_live_inst {
+        let ctrl = dir.join("control.json");
+        if let Ok(text) = std::fs::read_to_string(&ctrl) {
+            let publisher_dead = json_get(&text, "from_pid")
+                .and_then(|v| v.parse::<u32>().ok())
+                .is_none_or(|pid| !pid_alive(pid));
+            if publisher_dead {
+                let _ = std::fs::remove_file(ctrl);
             }
         }
     }
@@ -687,18 +746,87 @@ mod tests {
                 "{\"scene\":\"fire\",\"theme\":\"frost\",\"epoch\":100,\"seq\":1,\"from_pid\":12345,\"seed\":42,\"t0_ms\":90}",
             )
             .unwrap();
+            let msg = "{\"scene\":\"fire\",\"theme\":\"frost\",\"epoch\":100,\"seq\":1,\"from_pid\":12345,\"seed\":42,\"t0_ms\":90}";
             let c = g.poll_control(Stamp::default()).expect("should see it");
             assert_eq!(c.scene, "fire");
             assert_eq!(c.theme.as_deref(), Some("frost"));
             assert_eq!(c.seed, 42);
             assert_eq!(c.t0_ms, 90);
-            // older-or-equal stamp ignored
+            // unchanged file: the (ino, mtime) gate skips the re-read
+            assert!(g.poll_control(Stamp::default()).is_none(), "unchanged file must not re-apply");
+            // older-or-equal stamp ignored (rewrite so the gate re-reads)
             let applied = Stamp { epoch: 100, seq: 1, from_pid: 12345 };
+            touch_control(&dir, msg);
             assert!(g.poll_control(applied).is_none());
+            touch_control(&dir, msg);
             assert!(g.poll_control(Stamp { from_pid: 99999, ..applied }).is_none());
+            // a stamp taken at launch time filters out any pre-launch relic
+            let launch = Stamp { epoch: epoch_now_ms(), seq: 0, from_pid: 0 };
+            touch_control(&dir, msg);
+            assert!(g.poll_control(launch).is_none(), "pre-launch message must be ignored");
             // own messages ignored
             g.publish("rain", None, 1, 2);
             assert!(g.poll_control(Stamp::default()).is_none(), "own pid must be ignored");
+        });
+    }
+
+    /// Rewrite control.json ensuring its (ino, mtime) signature changes even
+    /// on filesystems with coarse timestamps.
+    fn touch_control(dir: &PathBuf, msg: &str) {
+        let path = dir.join("control.json");
+        let before = std::fs::metadata(&path).ok().map(|m| (file_ino(&m), m.modified().ok()));
+        for _ in 0..1000 {
+            let _ = std::fs::remove_file(&path);
+            std::fs::write(&path, msg).unwrap();
+            let now = std::fs::metadata(&path).ok().map(|m| (file_ino(&m), m.modified().ok()));
+            if now != before {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("could not produce a distinct control.json signature");
+    }
+
+    #[test]
+    fn atomic_write_tmp_is_pid_scoped_and_cleaned() {
+        with_registry(|dir| {
+            std::fs::create_dir_all(&dir).unwrap();
+            let target = dir.join("control.json");
+            atomic_write(&target, "{\"x\":1}").unwrap();
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"x\":1}");
+            // no temp files remain, and the naming is pid-scoped
+            let leftovers: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.ends_with(".tmp"))
+                .collect();
+            assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+        });
+    }
+
+    #[test]
+    fn reap_removes_orphaned_control_of_dead_group() {
+        with_registry(|dir| {
+            std::fs::create_dir_all(&dir).unwrap();
+            // control.json from a dead publisher, no live instances
+            std::fs::write(
+                dir.join("control.json"),
+                "{\"scene\":\"fire\",\"epoch\":1,\"seq\":1,\"from_pid\":99999999,\"seed\":0,\"t0_ms\":0}",
+            )
+            .unwrap();
+            reap_stale(&dir);
+            assert!(!dir.join("control.json").exists(), "orphaned control.json should be reaped");
+
+            // but with a live instance present it must survive
+            let _g = Guard::new("rain", "default").expect("guard");
+            std::fs::write(
+                dir.join("control.json"),
+                "{\"scene\":\"fire\",\"epoch\":1,\"seq\":1,\"from_pid\":99999999,\"seed\":0,\"t0_ms\":0}",
+            )
+            .unwrap();
+            reap_stale(&dir);
+            assert!(dir.join("control.json").exists(), "control.json with live peers must survive");
         });
     }
 

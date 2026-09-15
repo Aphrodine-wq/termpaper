@@ -85,33 +85,8 @@ install_from_dir() {
     grep -q '^name = "termpaper"' "$dir/Cargo.toml" || die "not the termpaper crate: $dir"
     info "building and installing from $dir"
     (cd "$dir" && cargo install --path . --locked --force)
-    persist_source_dir "$dir"
 }
 
-persist_source_dir() {
-    local dir="$1"
-    local data="${XDG_DATA_HOME:-$HOME/.local/share}/termpaper/src"
-    mkdir -p "$(dirname "$data")"
-    if [[ "$(realpath "$dir" 2>/dev/null || echo "$dir")" != "$(realpath "$data" 2>/dev/null || echo "$data")" ]]; then
-        rm -rf "$data"
-        cp -a "$dir" "$data"
-        dir="$data"
-    fi
-    local cfg="${XDG_CONFIG_HOME:-$HOME/.config}/termpaper/marketplace.toml"
-    mkdir -p "$(dirname "$cfg")"
-    if [[ -f "$cfg" ]]; then
-        if grep -q '^source_dir' "$cfg"; then
-            sed -i "s|^source_dir.*|source_dir = \"$dir\"|" "$cfg"
-        else
-            printf '\nsource_dir = "%s"\n' "$dir" >>"$cfg"
-        fi
-    else
-        cat >"$cfg" <<EOF
-index_url = "https://raw.githubusercontent.com/Aphrodine-wq/termpaper/main/marketplace/index.json"
-source_dir = "$dir"
-EOF
-    fi
-}
 
 install_from_git() {
     local tmp
@@ -159,18 +134,15 @@ truecolor_hint() {
 success_msg() {
     cat <<EOF
 
-termpaper installed.
+termpaper is live. Your terminal just got interesting.
 
-  termpaper rain          start the default scene
-  termpaper --list        all scenes + themes
-  termpaper               press ? for the settings menu
+  termpaper rain --fps 120   high-refresh rain on glass
+  termpaper --list            the full catalog
+  termpaper                   press ? — mixing desk
 
-Scene Marketplace — share & install community scenes on GitHub:
-  termpaper marketplace list
-  termpaper marketplace install Aphrodine-wq/example-pulse
-  termpaper marketplace publish
+Tune live:  [ ] fps   , . speed   c color   f filter
 
-Add your own: see CONTRIBUTING.md and marketplace/README.md
+Build your own: CONTRIBUTING.md
 
 EOF
 }

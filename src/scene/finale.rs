@@ -233,7 +233,7 @@ impl Scene for Finale {
                 y,
                 shell,
                 hue,
-                self.detail.factor(),
+                self.detail.density(),
             );
         }
         self.bursts = bursts;

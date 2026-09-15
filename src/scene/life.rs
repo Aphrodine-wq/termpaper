@@ -101,7 +101,7 @@ impl Life {
     }
 
     fn soup_density(&self) -> f32 {
-        0.18 + 0.08 * self.detail.factor().min(1.5)
+        0.18 + 0.08 * self.detail.density().min(1.5)
     }
 
     fn init(&mut self, w: usize, h: usize) {
@@ -114,7 +114,7 @@ impl Life {
         self.age = vec![0; w * h];
         self.hashes.clear();
         self.stagnant = 0;
-        let n = ((6.0 * density_for(w, h) * self.detail.factor()) as usize).clamp(3, 24);
+        let n = ((6.0 * density_for(w, h) * self.detail.density()) as usize).clamp(3, 24);
         self.spores = (0..n)
             .map(|_| Spore {
                 x: self.rng.random_range(0.0..w as f32),

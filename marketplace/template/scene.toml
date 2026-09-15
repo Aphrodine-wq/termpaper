@@ -1,6 +1,0 @@
-id = "your-user/your-scene"
-scene_name = "your_scene"
-struct_name = "YourScene"
-description = "one-line description for --list and the marketplace"
-themes = ["classic", "mono"]
-repo = "https://github.com/your-user/termpaper-scene-your-scene"

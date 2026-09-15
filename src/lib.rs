@@ -7,10 +7,12 @@ pub mod color_wheel;
 pub mod config;
 pub mod filter;
 pub mod link;
-pub mod marketplace;
 pub mod menu;
 pub mod physics;
 pub mod render;
 pub mod scene;
 pub mod transition;
 pub mod wall;
+
+#[cfg(feature = "gpu")]
+pub mod gpu;

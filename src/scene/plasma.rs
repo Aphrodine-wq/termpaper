@@ -114,7 +114,7 @@ impl Plasma {
         }
         self.w = w;
         self.h = h;
-        let n = ((12.0 * density_for(w, h) * self.detail.factor()) as usize).clamp(6, 48);
+        let n = ((12.0 * density_for(w, h) * self.detail.density()) as usize).clamp(6, 48);
         self.motes = (0..n).map(|_| self.spawn_mote(w, h)).collect();
     }
 }

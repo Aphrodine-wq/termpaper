@@ -214,7 +214,7 @@ impl Scene for Inkdrop {
         if self.drop_timer <= 0.0 {
             self.spawn_single();
             let interval = self.rng.random_range(3.2..6.0)
-                / (density_for(w, h) * self.detail.factor());
+                / (density_for(w, h) * self.detail.density());
             self.drop_timer = interval.clamp(1.0, 7.0);
         }
 

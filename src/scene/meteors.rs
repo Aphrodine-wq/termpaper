@@ -3,7 +3,7 @@
 //! surges, and rare bolides that flash the whole sky.
 
 use super::{Detail, Scene};
-use crate::canvas::{density_for, ease_smooth, glow, lerp, scale, Canvas};
+use crate::canvas::{density_for, dot, ease_smooth, glow_f, lerp, line_f, scale, Canvas};
 use rand::{rngs::StdRng, RngExt};
 
 struct Star {
@@ -376,21 +376,31 @@ impl Scene for Meteors {
             // over the starfield
             let sp = (m.vx * m.vx + m.vy * m.vy).sqrt().max(1.0);
             let (ux, uy) = (m.vx / sp, m.vy / sp);
+            // brightness and tint vary along the streak, so draw it as
+            // short AA segments rather than one line — each segment slides
+            // subcell with the head instead of snapping per sample
             for i in 1..=m.trail {
                 let f = 1.0 - i as f32 / m.trail as f32;
                 let jitter = ((m.x * 13.0 + m.y * 7.0 + i as f32 * 31.0) as i32 % 3) as f32 - 1.0;
                 let tx = m.x - ux * i as f32 * 1.2 + jitter * 0.3;
                 let ty = m.y - uy * i as f32 * 1.2;
-                let c = scale(lerp(m.color, (245, 250, 255), f), f * f * b);
-                canvas.add(tx as i32, ty as i32, c);
+                let c = lerp(m.color, (245, 250, 255), f);
+                line_f(
+                    canvas,
+                    tx,
+                    ty,
+                    tx - ux * 1.2,
+                    ty - uy * 1.2,
+                    c,
+                    f * f * b * 0.5,
+                );
             }
             // head: hot white core with a tinted glow bleed
-            let (ix, iy) = (m.x as i32, m.y as i32);
-            canvas.set(ix, iy, scale((255, 255, 255), b.min(1.0)));
+            dot(canvas, m.x, m.y, (255, 255, 255), b.min(1.0));
             if m.bolide {
-                glow(canvas, ix, iy, 3, (255, 190, 120), 0.55 * env);
+                glow_f(canvas, m.x, m.y, 3.0, (255, 190, 120), 0.55 * env);
             } else {
-                glow(canvas, ix, iy, 2, m.color, 0.3 * env);
+                glow_f(canvas, m.x, m.y, 2.0, m.color, 0.3 * env);
             }
             true
         });

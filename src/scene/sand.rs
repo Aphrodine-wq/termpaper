@@ -82,7 +82,7 @@ impl Sand {
         self.grid = vec![0; w * h];
         // splitter obstacles: V-shaped diverters that split the streams
         self.splitters = (1..=2).map(|i| (w * i / 3, h * i / 3)).collect();
-        let n = ((w as f32 / 18.0) * density_for(w, h) * self.detail.factor())
+        let n = ((w as f32 / 18.0) * density_for(w, h) * self.detail.density())
             .round()
             .clamp(3.0, 22.0) as usize;
         self.motes = (0..n)
@@ -145,7 +145,7 @@ impl Sand {
     fn emit(&mut self) {
         let storm = self.storm_intensity();
         let hue = self.current_hue() + 1;
-        let rate = 0.85 + storm * 0.55 * self.detail.factor().min(1.5);
+        let rate = 0.85 + storm * 0.55 * self.detail.density().min(1.5);
         let gem_p = 0.004 + storm * 0.02; // more gemstones during storm payoff
         for &e in &self.emitters {
             if e < self.w && self.grid[e] == 0 && self.rng.random::<f32>() < rate {

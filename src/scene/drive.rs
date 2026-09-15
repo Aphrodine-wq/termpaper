@@ -379,7 +379,7 @@ impl Scene for Drive {
         }
 
         // side scenery
-        if self.rng.random::<f32>() < 3.0 * dt * self.detail.factor() {
+        if self.rng.random::<f32>() < 3.0 * dt * self.detail.density() {
             self.spawn_side();
         }
         self.side.retain_mut(|o| {

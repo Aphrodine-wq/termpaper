@@ -1,8 +1,8 @@
-//! termpaper — Wallpaper Engine for the terminal.
+//! termpaper — Wallpaper Engine for the terminal. Live truecolor worlds.
 
-use termpaper::{canvas, color_grade, color_wheel, config, filter, link, marketplace, menu, render, scene, transition, wall};
+use termpaper::{canvas, color_grade, color_wheel, config, filter, link, menu, render, scene, transition, wall};
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use menu::{Effect, Menu, MenuCtx};
 use rand::{rngs::StdRng, RngExt, SeedableRng};
@@ -15,12 +15,9 @@ use std::time::{Duration, Instant};
 #[command(
     name = "termpaper",
     version,
-    about = "Wallpaper Engine for the terminal: animated truecolor scenes"
+    about = "Wallpaper Engine for the terminal — 120fps, 22 filters, sync clusters, seamless walls"
 )]
 struct Args {
-    #[command(subcommand)]
-    command: Option<Command>,
-
     /// Scene to run (see --list)
     scene: Option<String>,
 
@@ -35,6 +32,11 @@ struct Args {
     /// Target frames per second
     #[arg(long)]
     fps: Option<u32>,
+
+    /// Throttle to this fps while the terminal is unfocused (needs a
+    /// terminal that reports focus; off unless set)
+    #[arg(long)]
+    idle_fps: Option<u32>,
 
     /// Animation speed multiplier
     #[arg(long)]
@@ -64,6 +66,13 @@ struct Args {
     /// Force 256-color output even on truecolor terminals
     #[arg(long)]
     no_truecolor: bool,
+
+    /// Run the post-processing chain (filters, grading, smoothing and the
+    /// pixels-to-cells packing) on the GPU. Requires a build with
+    /// `--features gpu` and a working Vulkan device; falls back to the CPU
+    /// silently if either is missing.
+    #[arg(long)]
+    gpu: bool,
 
     /// Screensaver mode: any key exits
     #[arg(long)]
@@ -107,71 +116,6 @@ struct Args {
     pad: Option<i32>,
 }
 
-#[derive(Subcommand)]
-enum Command {
-    /// Browse, install, and publish community scenes from GitHub
-    Marketplace {
-        #[command(subcommand)]
-        action: MarketplaceAction,
-    },
-}
-
-#[derive(Subcommand)]
-enum MarketplaceAction {
-    /// List scenes in the marketplace catalog
-    List {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Search the catalog
-    Search {
-        query: String,
-    },
-    /// Show details for a catalog id or scene name
-    Info {
-        id: String,
-    },
-    /// Clone a scene from GitHub and rebuild termpaper
-    Install {
-        id: String,
-        #[arg(long)]
-        no_rebuild: bool,
-    },
-    /// Remove an installed community scene
-    Remove {
-        id: String,
-    },
-    /// List locally installed community scenes
-    Installed,
-    /// Re-download installed scenes from GitHub
-    Update,
-    /// Rebuild termpaper with installed community scenes
-    Rebuild,
-    /// How to publish your own scene on GitHub
-    Publish,
-}
-
-fn run_marketplace(action: MarketplaceAction) -> std::io::Result<()> {
-    let code = match action {
-        MarketplaceAction::List { json } => marketplace::cmd_list(json),
-        MarketplaceAction::Search { query } => marketplace::cmd_search(&query),
-        MarketplaceAction::Info { id } => marketplace::cmd_info(&id),
-        MarketplaceAction::Install { id, no_rebuild } => marketplace::cmd_install(&id, no_rebuild),
-        MarketplaceAction::Remove { id } => marketplace::remove(&id),
-        MarketplaceAction::Installed => marketplace::cmd_installed(),
-        MarketplaceAction::Update => marketplace::cmd_update(),
-        MarketplaceAction::Rebuild => marketplace::rebuild(),
-        MarketplaceAction::Publish => marketplace::cmd_publish(),
-    };
-    match code {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            eprintln!("termpaper: {e}");
-            std::process::exit(1);
-        }
-    }
-}
-
 fn detect_truecolor() -> bool {
     std::env::var("COLORTERM")
         .map(|v| v.contains("truecolor") || v.contains("24bit"))
@@ -203,10 +147,6 @@ fn platform_default_pixels() -> Pixels {
 
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
-
-    if let Some(Command::Marketplace { action }) = args.command {
-        return run_marketplace(action);
-    }
 
     // termpaper is a color-art program: color output is the entire point.
     // crossterm honors NO_COLOR by stripping all colors, which would render
@@ -308,6 +248,7 @@ fn main() -> std::io::Result<()> {
         args.filter.clone()
     };
     let fps = args.fps.or(cfg.fps).unwrap_or(60).clamp(1, 240);
+    let idle_fps = args.idle_fps.or(cfg.idle_fps).map(|f| f.clamp(1, 240));
     let speed = args.speed.or(cfg.speed).unwrap_or(1.0);
     let cycle = args.cycle.or(cfg.cycle).filter(|c| *c > 0.0);
     let hue_shift = cfg.hue_shift.unwrap_or(0.0);
@@ -326,6 +267,7 @@ fn main() -> std::io::Result<()> {
         .or(cfg.group.clone())
         .map(|g| link::sanitize_group(&g))
         .unwrap_or_else(|| "default".into());
+    let cfg_gpu = cfg.gpu.unwrap_or(false);
     let settings = Settings {
         link_enabled,
         link_group,
@@ -343,6 +285,7 @@ fn main() -> std::io::Result<()> {
         pixels,
         filters,
         fps,
+        idle_fps,
         speed,
         cycle,
         hue_shift,
@@ -350,11 +293,16 @@ fn main() -> std::io::Result<()> {
         contrast,
         screensaver: args.screensaver,
         truecolor: detect_truecolor() && !args.no_truecolor,
+        gpu: args.gpu || cfg_gpu,
     };
 
     let mut terminal = ratatui::init();
     terminal.hide_cursor()?;
+    // focus reporting lets unfocused instances skip the pacing spin (and
+    // honor --idle-fps); terminals without support just never send events
+    let _ = crossterm::execute!(std::io::stdout(), event::EnableFocusChange);
     let result = run(&mut terminal, &scene_name, settings);
+    let _ = crossterm::execute!(std::io::stdout(), event::DisableFocusChange);
     ratatui::restore();
     result
 }
@@ -376,6 +324,8 @@ struct Settings {
     pixels: Pixels,
     filters: Vec<String>,
     fps: u32,
+    /// fps cap applied while unfocused (None = no throttle)
+    idle_fps: Option<u32>,
     speed: f32,
     cycle: Option<f64>,
     hue_shift: f32,
@@ -383,9 +333,53 @@ struct Settings {
     contrast: f32,
     screensaver: bool,
     truecolor: bool,
+    gpu: bool,
 }
 
 /// Snapshot the current runtime settings for broadcast.
+/// How long before the frame deadline to stop sleeping and busy-wait.
+/// Sized from `examples/pace_bench.rs` — see the frame loop for the tradeoff.
+const SPIN_TAIL: Duration = Duration::from_micros(100);
+
+/// Largest single simulation step. Bounds physics after a stall.
+const MAX_STEP: f32 = 1.0 / 30.0;
+/// Most catch-up steps per frame, so repaying a hitch never starves render.
+const MAX_CATCHUP: usize = 4;
+/// Debt past this is written off: returning from suspend should not simulate
+/// minutes of scene time to catch up.
+const MAX_DEBT: f32 = 1.5;
+
+/// Linked-switch fast-forward: cap the catch-up target at 30s of sim time
+/// and spend it across frames under a strict per-frame budget, so adopting
+/// a peer's (seed, t0) never freezes a frame.
+const FF_MAX_STEPS: usize = 1800;
+const FF_STEPS_PER_FRAME: usize = 90;
+const FF_FRAME_BUDGET: Duration = Duration::from_millis(2);
+
+/// Spend owed wall time as bounded simulation steps, draining `debt`.
+///
+/// Returns the per-step dt values (already speed-scaled) and how many are live.
+/// Always at least one step so the frame still redraws when nothing is owed.
+fn plan_steps(debt: &mut f32, speed: f32) -> ([f32; MAX_CATCHUP], usize) {
+    let mut step_dt = [0.0f32; MAX_CATCHUP];
+    let spend = debt.min(MAX_CATCHUP as f32 * MAX_STEP);
+    if spend <= 1e-6 {
+        // paused, or nothing owed yet — still redraw the current state
+        return (step_dt, 1);
+    }
+    // split the owed time into EQUAL steps rather than MAX_STEP chunks plus
+    // a small remainder: verlet velocity is displacement-per-previous-step,
+    // so a 1/30 step followed by a 1/300 remainder mis-scales it 10x for a
+    // step — a visible speed pulse in every verlet scene after a hitch
+    let n = ((spend / MAX_STEP).ceil() as usize).clamp(1, MAX_CATCHUP);
+    let s = spend / n as f32;
+    for slot in step_dt.iter_mut().take(n) {
+        *slot = s * speed;
+    }
+    *debt -= spend;
+    (step_dt, n)
+}
+
 fn settings_msg(settings: &Settings, opts: &SceneOptions, quick: &Option<String>) -> link::SettingsMsg {
     link::SettingsMsg {
         pixels: settings.pixels.name().to_string(),
@@ -525,7 +519,14 @@ fn run(
     } else {
         None
     };
-    let mut control_stamp = link::Stamp::default();
+    // start the stamp at launch time so a leftover control.json from an
+    // older session can't override the scene chosen on the command line;
+    // the 15s heartbeat re-publish converges the group soon after anyway
+    let mut control_stamp = link::Stamp {
+        epoch: link::epoch_now_ms(),
+        seq: 0,
+        from_pid: 0,
+    };
     // artwork sync: (seed, t0_ms) for the next scene creation, if any
     let mut sync_params: Option<(u64, u64)> = None;
     // sync params of the scene currently on screen — lets receivers skip
@@ -543,6 +544,9 @@ fn run(
     let mut transition = transition::Transition::new();
     transition.set_fade_secs(settings.fade);
     let mut paused = false;
+    // terminals that report focus keep this current; ones that don't never
+    // send the events, so it stays true and nothing changes for them
+    let mut focused = true;
     let mut quick_filter: Option<String> = None;
     let mut idx = names
         .iter()
@@ -551,12 +555,66 @@ fn run(
     let mut current = scene::create(names[idx], &opts, entropy_rng()).expect("validated");
     let mut canvas = canvas::Canvas::new(1, 1);
     let mut prev_canvas = canvas::Canvas::new(1, 1);
+    // linked-switch fast-forward state: steps still owed, and a persistent
+    // scratch canvas the catch-up updates render into (never shown)
+    let mut ff_remaining = 0usize;
+    let mut ff_scratch = canvas::Canvas::new(1, 1);
+    // Scratch for the CPU fallback while the GPU pipeline is filling. The
+    // fallback must not run in `canvas`: `canvas` holds the raw scene output
+    // that the next GPU submit uploads, and filtering it in place would apply
+    // the chain twice.
+    #[cfg(feature = "gpu")]
+    let mut cpu_scratch = canvas::Canvas::new(1, 1);
+    #[cfg(not(feature = "gpu"))]
+    if settings.gpu {
+        eprintln!(
+            "termpaper: --gpu ignored — this build has no GPU backend \
+             (rebuild with `cargo install termpaper --features gpu`)"
+        );
+    }
+    #[cfg(feature = "gpu")]
+    let mut gpu = if settings.gpu {
+        // dimensions are set by the first `resize` inside the frame loop
+        let g = termpaper::gpu::Gpu::new(1, 1, 1);
+        if g.is_none() {
+            eprintln!("termpaper: --gpu requested but no usable Vulkan device; staying on the CPU");
+        }
+        g
+    } else {
+        None
+    };
     let mut wall_layout: Option<wall::WallLayout> = None;
     let mut wall_refresh = Instant::now() - Duration::from_secs(10);
+    // compositor geometry arrives from a background thread — spawning
+    // hyprctl inside the frame loop stalls the frame it lands on
+    let geo_watcher = if settings.link_enabled || settings.wall_spec.is_some() {
+        Some(wall::GeoWatcher::spawn())
+    } else {
+        None
+    };
+
+    // one registry snapshot shared by the heartbeat, wall layout, and menu.
+    // Scanning the registry means readdir + a /proc stat per entry + a file
+    // read per peer — doing that every frame with the menu open was the
+    // hottest path in the whole loop with many instances up.
+    struct PeerCache {
+        list: Vec<link::InstanceInfo>,
+        menu_lines: Vec<String>,
+        group: String,
+        fetched: Instant,
+    }
+    let mut peers = PeerCache {
+        list: Vec::new(),
+        menu_lines: Vec::new(),
+        group: String::new(),
+        fetched: Instant::now() - Duration::from_secs(10),
+    };
 
     let launch = Instant::now();
     let mut last_switch = Instant::now();
     let mut last_frame = Instant::now();
+    // un-simulated wall time carried forward (see `plan_steps`)
+    let mut sim_debt = 0.0f32;
     let mut last_heartbeat = Instant::now();
     // cached "HH:MM" for the clock overlay (refreshed at most every 10s)
     let mut clock_text = String::new();
@@ -564,14 +622,31 @@ fn run(
 
     loop {
         let now = Instant::now();
-        let raw_dt = (now - last_frame).as_secs_f32().min(1.0 / 30.0);
-        let dt = if paused {
-            0.0 // frozen
-        } else {
-            (now - last_frame).as_secs_f32().min(1.0 / 30.0) * settings.speed
-        };
+        let wall_dt = (now - last_frame).as_secs_f32();
+        // transition fades are cosmetic: clamp and never carry a remainder
+        let raw_dt = wall_dt.min(MAX_STEP);
         last_frame = now;
-        let frame_dur = Duration::from_secs_f64(1.0 / settings.fps as f64);
+
+        // Scene time is owed against the wall clock. Linked instances agree on
+        // a scene only because each simulates `now - t0` worth of time, so any
+        // time the per-step clamp drops has to be carried forward rather than
+        // discarded — otherwise every frame that overruns MAX_STEP leaves this
+        // pane permanently behind its peers, and the 15s heartbeat won't repair
+        // it (peers already holding this (seed, t0) skip the rebuild).
+        let (step_dt, n_steps) = if paused {
+            // frozen: accrue nothing and spend nothing, but still redraw. Note
+            // debt left over from a hitch must not be drained here either, or
+            // the scene would keep creeping forward while paused.
+            ([0.0f32; MAX_CATCHUP], 1)
+        } else {
+            sim_debt = (sim_debt + wall_dt).min(MAX_DEBT);
+            plan_steps(&mut sim_debt, settings.speed)
+        };
+        let fps_target = match settings.idle_fps {
+            Some(idle) if !focused => settings.fps.min(idle),
+            _ => settings.fps,
+        };
+        let frame_dur = Duration::from_secs_f64(1.0 / fps_target as f64);
 
         // scene cycling
         if let Some(secs) = settings.cycle {
@@ -583,6 +658,30 @@ fn run(
             }
         }
 
+        // refresh the shared registry snapshot at most every 2s (1s while
+        // the menu is open so its instance list feels live)
+        if settings.link_enabled {
+            let max_age = if menu.open { Duration::from_secs(1) } else { Duration::from_secs(2) };
+            if peers.fetched.elapsed() > max_age || peers.group != settings.link_group {
+                peers.fetched = Instant::now();
+                peers.group = settings.link_group.clone();
+                peers.list = link::list_instances_in_group(&settings.link_group);
+                peers.menu_lines = peers
+                    .list
+                    .iter()
+                    .map(|i| {
+                        format!(
+                            "pid {:<8} {:<12} up {}s{}",
+                            i.pid,
+                            i.scene,
+                            link::uptime_secs(i.started_at),
+                            if i.pid == std::process::id() { " (you)" } else { "" }
+                        )
+                    })
+                    .collect();
+            }
+        }
+
         // sync heartbeat: the lowest-pid live instance re-publishes the
         // current scene with its ORIGINAL (seed, t0) every 15s — late
         // joiners adopt it and drifted peers re-align, while in-sync
@@ -591,7 +690,8 @@ fn run(
             if now.duration_since(last_heartbeat).as_secs() >= 15 {
                 last_heartbeat = now;
                 if let Some((seed, t0)) = cur_sync {
-                    let leader = link::list_instances_in_group(&settings.link_group)
+                    let leader = peers
+                        .list
                         .iter()
                         .map(|i| i.pid)
                         .min()
@@ -604,8 +704,9 @@ fn run(
             }
         }
 
-        // instance linking: control channel poll (cheap stat per frame)
-        if let Some(g) = &guard {
+        // instance linking: control channel poll — a stat per frame; the
+        // file is only read+parsed when a publish replaced it
+        if let Some(g) = &mut guard {
             if let Some(ctrl) = g.poll_control(control_stamp) {
                 control_stamp = link::Stamp {
                     epoch: ctrl.epoch,
@@ -691,24 +792,39 @@ fn run(
                 None => entropy_rng(),
             };
             current = scene::create(names[idx], &opts, rng).expect("registry");
-            if let Some((_, t0)) = sp {
-                // fast-forward to the publisher's sim time — time-boxed by
-                // WALL CLOCK (a slightly younger scene beats a frozen one)
-                let elapsed_ms = link::epoch_now_ms().saturating_sub(t0);
-                let steps = ((elapsed_ms as f32 / (1000.0 / 60.0)) as usize).min(3600);
-                let mut scratch = canvas::Canvas::new(canvas.width().max(1), canvas.height().max(1));
-                let ff_start = Instant::now();
-                for _ in 0..steps {
-                    current.update(1.0 / 60.0, &mut scratch);
-                    if ff_start.elapsed() > Duration::from_millis(200) {
-                        break; // silently settle slightly younger
-                    }
+            ff_remaining = match sp {
+                Some((_, t0)) => {
+                    // fast-forward to the publisher's sim time — but spread
+                    // across frames (see below) instead of freezing this one.
+                    // Cap at 30s of sim: beyond that "approximately synced"
+                    // is indistinguishable for generative art, and peers
+                    // holding the same (seed, t0) skip rebuilds anyway.
+                    let elapsed_ms = link::epoch_now_ms().saturating_sub(t0);
+                    ff_scratch.resize(canvas.width().max(1), canvas.height().max(1));
+                    ((elapsed_ms as f32 / (1000.0 / 60.0)) as usize).min(FF_MAX_STEPS)
                 }
-            }
+                None => 0,
+            };
             if let Some(g) = &mut guard {
                 g.set_scene(names[idx]);
             }
             last_switch = now;
+        }
+
+        // spend any owed fast-forward: the scene animates (fast) through
+        // the fade-in and converges within ~20 frames instead of freezing
+        // for up to 200ms at the darkest point of the transition
+        if ff_remaining > 0 {
+            let ff_start = Instant::now();
+            let mut spent = 0usize;
+            while ff_remaining > 0
+                && spent < FF_STEPS_PER_FRAME
+                && ff_start.elapsed() < FF_FRAME_BUDGET
+            {
+                current.update(1.0 / 60.0, &mut ff_scratch);
+                ff_remaining -= 1;
+                spent += 1;
+            }
         }
 
         // video wall: refresh layout every 2s from registry geometry
@@ -717,14 +833,15 @@ fn run(
         {
             wall_refresh = Instant::now();
             let (cols, rows) = (terminal.size()?.width as usize, terminal.size()?.height as usize);
-            let geo = wall::own_geo();
+            let geo = geo_watcher.as_ref().and_then(|w| w.latest());
             if let Some(g) = &mut guard {
                 g.set_geometry(cols, rows, geo.map(|g| (g.x, g.y, g.w, g.h)));
             }
             wall_layout = if let Some(spec) = &settings.wall_spec {
                 wall::manual_layout(spec, cols, rows)
             } else if settings.link_enabled {
-                let mut parts: Vec<wall::Participant> = link::list_instances_in_group(&settings.link_group)
+                let mut parts: Vec<wall::Participant> = peers
+                    .list
                     .iter()
                     .filter_map(|i| {
                         i.geo.map(|(x, y, w, h)| wall::Participant {
@@ -781,34 +898,101 @@ fn run(
             if canvas.width() != w || canvas.height() != h2 {
                 canvas.resize(w, h2);
             }
-            current.update(dt, &mut canvas);
-            filter::apply_all(&settings.filters, &mut canvas, launch.elapsed().as_secs_f32());
-            color_grade::apply(
-                &mut canvas,
-                settings.hue_shift,
-                settings.saturation,
-                settings.contrast,
-            );
-            if let Some(qf) = &quick_filter {
-                filter::apply(qf, &mut canvas, launch.elapsed().as_secs_f32());
+            // usually one step; more only when repaying time lost to a hitch
+            for s in step_dt.iter().take(n_steps) {
+                current.update(*s, &mut canvas);
             }
-            canvas::dim(&mut canvas, fade * settings.dim);
-            // temporal smoothing (glyph cells excluded inside smooth_blend)
-            if settings.smooth > 0.001 {
-                canvas.smooth_blend(&prev_canvas, 1.0 - settings.smooth);
-                prev_canvas = canvas.clone_for_smooth();
+            let t = launch.elapsed().as_secs_f32();
+
+            // The GPU runs the same chain in compute shaders and hands back
+            // finished terminal cells. It is one frame behind by design — the
+            // readback never fences — so the first frame or two after startup
+            // and after every resize still come from the CPU below.
+            #[allow(unused_mut)] // only the GPU branch below ever sets this
+            let mut drawn = false;
+            #[cfg(feature = "gpu")]
+            if let Some(g) = gpu.as_mut() {
+                let (cols, rows) = (area.width as usize, area.height as usize);
+                let crop = match wall_layout {
+                    Some(l) => (l.crop_x * pw, l.crop_y * ph),
+                    None => (0, 0),
+                };
+                if termpaper::gpu::Gpu::should_use(w, h2) && cols * rows > 0 {
+                    g.resize(w, h2, cols * rows);
+                    let plan = termpaper::gpu::Plan {
+                        filters: &settings.filters,
+                        quick_filter: quick_filter.as_deref(),
+                        t,
+                        hue_shift: settings.hue_shift,
+                        saturation: settings.saturation,
+                        contrast: settings.contrast,
+                        dim: fade * settings.dim,
+                        smooth: settings.smooth,
+                        pixels: settings.pixels,
+                        cols,
+                        rows,
+                        crop,
+                    };
+                    g.submit(&canvas, &plan);
+                    if let Some(cells) = g.poll_cells(cols, rows) {
+                        termpaper::gpu::blit(
+                            &cells,
+                            &canvas,
+                            crop,
+                            settings.pixels,
+                            area,
+                            f.buffer_mut(),
+                            settings.truecolor,
+                        );
+                        drawn = true;
+                    }
+                }
             }
-            match wall_layout {
-                Some(l) => render::draw_crop(
-                    &canvas,
-                    l.crop_x as i32 * pw as i32,
-                    l.crop_y as i32 * ph as i32,
-                    area,
-                    f.buffer_mut(),
-                    settings.truecolor,
-                    settings.pixels,
-                ),
-                None => render::draw(&canvas, area, f.buffer_mut(), settings.truecolor, settings.pixels),
+
+            if !drawn {
+                // The CPU chain. When the GPU owns `canvas` this runs on a copy,
+                // because `canvas` must stay as the raw scene output for the next
+                // submit; otherwise it filters in place as it always has.
+                #[cfg(feature = "gpu")]
+                let work = if gpu.is_some() {
+                    canvas.snapshot_into(&mut cpu_scratch);
+                    &mut cpu_scratch
+                } else {
+                    &mut canvas
+                };
+                #[cfg(not(feature = "gpu"))]
+                let work = &mut canvas;
+
+                filter::apply_all(&settings.filters, work, t);
+                color_grade::apply(
+                    work,
+                    settings.hue_shift,
+                    settings.saturation,
+                    settings.contrast,
+                );
+                if let Some(qf) = &quick_filter {
+                    filter::apply(qf, work, t);
+                }
+                canvas::dim(work, fade * settings.dim);
+                // temporal smoothing (glyph cells excluded inside smooth_blend)
+                if settings.smooth > 0.001 {
+                    work.smooth_blend(&prev_canvas, 1.0 - settings.smooth);
+                    // reuse the snapshot buffer: allocating a fresh canvas every
+                    // frame churned the allocator at the frame rate
+                    work.snapshot_into(&mut prev_canvas);
+                }
+                match wall_layout {
+                    Some(l) => render::draw_crop(
+                        work,
+                        l.crop_x as i32 * pw as i32,
+                        l.crop_y as i32 * ph as i32,
+                        area,
+                        f.buffer_mut(),
+                        settings.truecolor,
+                        settings.pixels,
+                    ),
+                    None => render::draw(work, area, f.buffer_mut(), settings.truecolor, settings.pixels),
+                }
             }
 
             // bottom-left hint, fading out over its last second
@@ -876,18 +1060,7 @@ fn run(
                     truecolor: settings.truecolor,
                     filters: settings.filters.clone(),
                     instances: if settings.link_enabled {
-                        link::list_instances_in_group(&settings.link_group)
-                            .iter()
-                            .map(|i| {
-                                format!(
-                                    "pid {:<8} {:<12} up {}s{}",
-                                    i.pid,
-                                    i.scene,
-                                    link::uptime_secs(i.started_at),
-                                    if i.pid == std::process::id() { " (you)" } else { "" }
-                                )
-                            })
-                            .collect()
+                        peers.menu_lines.clone()
                     } else {
                         vec!["linking disabled (solo art)".into()]
                     },
@@ -919,7 +1092,12 @@ fn run(
         })?;
 
         // steady pacing: coarse sleep to ~1ms before the deadline, then
-        // spin-wait the tail; input is processed whenever it arrives
+        // Sleep (inside the event poll) to just before the deadline, then spin
+        // the last SPIN_TAIL for steady timing. See examples/pace_bench.rs: at
+        // 240fps a 1ms tail costs ~22% of a core per instance purely spinning,
+        // and several instances pacing on one machine then starve each other
+        // into dropped frames. 100us holds jitter at ~0.025ms — 0.6% of a
+        // 240fps frame — for ~1% CPU.
         let deadline = last_frame + frame_dur;
         loop {
             let now2 = Instant::now();
@@ -927,14 +1105,26 @@ fn run(
                 break;
             }
             let remaining = deadline - now2;
-            let coarse = remaining.saturating_sub(Duration::from_millis(1));
+            let coarse = remaining.saturating_sub(SPIN_TAIL);
             let has_event = if coarse.is_zero() {
                 event::poll(Duration::ZERO)?
             } else {
                 event::poll(coarse)?
             };
             if has_event {
-                if let Event::Key(key) = event::read()? {
+                let ev = event::read()?;
+                match ev {
+                    Event::FocusGained => {
+                        focused = true;
+                        continue;
+                    }
+                    Event::FocusLost => {
+                        focused = false;
+                        continue;
+                    }
+                    _ => {}
+                }
+                if let Event::Key(key) = ev {
                 if key.kind == KeyEventKind::Press {
                     let km = &settings.keymap;
 
@@ -1296,15 +1486,167 @@ fn run(
                         if let Some(g) = &mut guard {
                             g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                         }
+                    } else if km.matches("fps_up", key.code) {
+                        settings.fps = menu::fps_step(settings.fps, true);
+                        if let Some(g) = &mut guard {
+                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                        }
+                        persist(&mut settings, names[idx], &opts);
+                    } else if km.matches("fps_down", key.code) {
+                        settings.fps = menu::fps_step(settings.fps, false);
+                        if let Some(g) = &mut guard {
+                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                        }
+                        persist(&mut settings, names[idx], &opts);
+                    } else if km.matches("speed_up", key.code) {
+                        settings.speed = menu::speed_step(settings.speed, true);
+                        if let Some(g) = &mut guard {
+                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                        }
+                        persist(&mut settings, names[idx], &opts);
+                    } else if km.matches("speed_down", key.code) {
+                        settings.speed = menu::speed_step(settings.speed, false);
+                        if let Some(g) = &mut guard {
+                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                        }
+                        persist(&mut settings, names[idx], &opts);
                     }
                 }
+                }
+                // event handled: keep polling until the deadline so every
+                // queued key drains this frame — a held key used to feed
+                // through at one press per frame, backing up the terminal
+                // buffer and replaying long after release
+                continue;
             }
-            }
-            // spin the tail for steady frame timing
-            while Instant::now() < deadline {
-                std::hint::spin_loop();
+            // spin the tail for steady frame timing — but only while
+            // focused: an unfocused wallpaper trades ~1ms of pacing jitter
+            // for not burning a spinning core per instance
+            if focused {
+                while Instant::now() < deadline {
+                    std::hint::spin_loop();
+                }
             }
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::*;
+
+    /// A normal frame simulates exactly the wall time that passed.
+    #[test]
+    fn steady_frame_spends_all_its_time() {
+        let mut debt = 1.0 / 120.0;
+        let (dts, n) = plan_steps(&mut debt, 1.0);
+        assert_eq!(n, 1);
+        assert!((dts[0] - 1.0 / 120.0).abs() < 1e-6);
+        assert!(debt < 1e-6, "steady frames must leave nothing owed");
+    }
+
+    /// The core sync property: over many frames, simulated time tracks wall
+    /// time even when individual frames overrun MAX_STEP. Before the catch-up
+    /// the clamp silently discarded the overrun and the pane fell behind.
+    #[test]
+    fn hitches_are_repaid_so_sim_time_tracks_wall_time() {
+        let mut debt = 0.0f32;
+        let mut simulated = 0.0f32;
+        let mut wall = 0.0f32;
+        // 200 good frames at 120fps with a 150ms stall every 20th
+        for i in 0..200 {
+            let frame = if i % 20 == 19 { 0.150 } else { 1.0 / 120.0 };
+            wall += frame;
+            debt = (debt + frame).min(MAX_DEBT);
+            let (dts, n) = plan_steps(&mut debt, 1.0);
+            simulated += dts.iter().take(n).sum::<f32>();
+        }
+        // whatever is still owed is bounded by one frame's worth of steps
+        let drift = (wall - simulated - debt).abs();
+        assert!(drift < 1e-3, "sim time drifted from wall time by {drift}s");
+        assert!(
+            debt < MAX_CATCHUP as f32 * MAX_STEP,
+            "debt should stay bounded, got {debt}"
+        );
+    }
+
+    /// No single step may exceed MAX_STEP, or a stall would blow up physics.
+    #[test]
+    fn no_single_step_exceeds_the_clamp() {
+        let mut debt = 5.0; // absurd stall
+        let (dts, n) = plan_steps(&mut debt, 1.0);
+        for s in dts.iter().take(n) {
+            assert!(*s <= MAX_STEP + 1e-6, "step {s} exceeds MAX_STEP");
+        }
+        assert_eq!(n, MAX_CATCHUP, "a big stall should use the full budget");
+    }
+
+    /// Debt is capped, so resuming from suspend does not simulate minutes.
+    #[test]
+    fn debt_is_capped_for_suspend() {
+        let mut debt = 0.0f32;
+        debt = (debt + 3600.0).min(MAX_DEBT);
+        assert_eq!(debt, MAX_DEBT);
+        let mut total = 0.0;
+        // draining is bounded: a handful of frames, not an hour of simulation
+        for _ in 0..20 {
+            let (dts, n) = plan_steps(&mut debt, 1.0);
+            total += dts.iter().take(n).sum::<f32>();
+        }
+        assert!(total <= MAX_DEBT + 1e-3, "drained {total}s, cap is {MAX_DEBT}");
+        assert!(debt < 1e-6, "cap should fully drain within 20 frames");
+    }
+
+    /// Nothing owed still yields one redraw step (the paused path in the frame
+    /// loop bypasses `plan_steps` entirely so leftover debt is not drained).
+    #[test]
+    fn idle_still_yields_a_redraw_step() {
+        let mut debt = 0.0f32;
+        let (dts, n) = plan_steps(&mut debt, 1.0);
+        assert_eq!(n, 1);
+        assert_eq!(dts[0], 0.0);
+    }
+
+    /// Pausing must not spend debt carried in from a hitch.
+    #[test]
+    fn pausing_preserves_outstanding_debt() {
+        let mut debt = 0.5f32;
+        let before = debt;
+        // the loop's paused branch: no accrual, no plan_steps call
+        let (dts, n) = ([0.0f32; MAX_CATCHUP], 1);
+        assert_eq!(n, 1);
+        assert_eq!(dts[0], 0.0);
+        assert_eq!(debt, before, "paused frames must leave debt untouched");
+        // and it is still there to repay on resume
+        let (dts, n) = plan_steps(&mut debt, 1.0);
+        assert!(dts.iter().take(n).sum::<f32>() > 0.0);
+    }
+
+    /// Catch-up steps are equal-sized: a hitch must never emit a big step
+    /// followed by a tiny remainder, or verlet velocity (displacement per
+    /// previous step) mis-scales for one step and the scene visibly pulses.
+    #[test]
+    fn catchup_steps_are_equal_sized() {
+        let mut debt = MAX_STEP + MAX_STEP / 10.0; // just past one step
+        let (dts, n) = plan_steps(&mut debt, 1.0);
+        assert_eq!(n, 2);
+        assert!(
+            (dts[0] - dts[1]).abs() < 1e-6,
+            "steps should be equal, got {} and {}",
+            dts[0],
+            dts[1]
+        );
+        assert!((dts[0] + dts[1] - (MAX_STEP + MAX_STEP / 10.0)).abs() < 1e-6);
+    }
+
+    /// `--speed` scales simulated time without changing the debt accounting.
+    #[test]
+    fn speed_scales_steps_only() {
+        let mut debt = 1.0 / 60.0;
+        let (dts, n) = plan_steps(&mut debt, 4.0);
+        assert_eq!(n, 1);
+        assert!((dts[0] - 4.0 / 60.0).abs() < 1e-6);
+        assert!(debt < 1e-6);
     }
 }

@@ -68,13 +68,33 @@ fn lum(c: (u8, u8, u8)) -> u32 {
 
 /// Split a block of pixels into (fg mask bits, fg color, bg color) by a
 /// luminance threshold. Bits are set for pixels *above* the average.
+///
+/// Called once per terminal cell per frame, so it is kept to two passes with
+/// nothing recomputed: luminances are cached from the first pass rather than
+/// re-derived, and the whole-block channel means (the fallback when every pixel
+/// lands on one side of the average) are accumulated up front instead of
+/// re-scanning the block once per channel.
 fn split(pixels: &[(u8, u8, u8)]) -> (u8, (u8, u8, u8), (u8, u8, u8)) {
-    let avg: u32 = pixels.iter().map(|c| lum(*c)).sum::<u32>() / pixels.len() as u32;
+    // Braille is the widest block at 2x4
+    const MAX: usize = 8;
+    let n = pixels.len().min(MAX);
+    let mut lums = [0u32; MAX];
+    let mut lsum = 0u32;
+    let mut tot = [0u32; 3];
+    for (i, c) in pixels.iter().take(n).enumerate() {
+        let l = lum(*c);
+        lums[i] = l;
+        lsum += l;
+        tot[0] += c.0 as u32;
+        tot[1] += c.1 as u32;
+        tot[2] += c.2 as u32;
+    }
+    let avg = lsum / n as u32;
     let mut mask = 0u8;
     let (mut fg, mut bg) = ([0u32; 3], [0u32; 3]);
     let (mut wf, mut wb) = (0u32, 0u32);
-    for (i, c) in pixels.iter().enumerate() {
-        let l = lum(*c);
+    for (i, c) in pixels.iter().take(n).enumerate() {
+        let l = lums[i];
         if l > avg {
             mask |= 1 << i;
             // weight by distance above the average: bright pixels dominate
@@ -91,16 +111,14 @@ fn split(pixels: &[(u8, u8, u8)]) -> (u8, (u8, u8, u8), (u8, u8, u8)) {
             wb += wgt;
         }
     }
-    let total = |i: usize| {
-        pixels
-            .iter()
-            .map(|c| [c.0, c.1, c.2][i] as u32)
-            .sum::<u32>()
-            / pixels.len() as u32
-    };
-    let avg3 = |a: [u32; 3], n: u32| match n {
-        0 => (total(0) as u8, total(1) as u8, total(2) as u8),
-        _ => ((a[0] / n) as u8, (a[1] / n) as u8, (a[2] / n) as u8),
+    let nn = n as u32;
+    let avg3 = |a: [u32; 3], w: u32| match w {
+        0 => (
+            (tot[0] / nn) as u8,
+            (tot[1] / nn) as u8,
+            (tot[2] / nn) as u8,
+        ),
+        _ => ((a[0] / w) as u8, (a[1] / w) as u8, (a[2] / w) as u8),
     };
     (mask, avg3(fg, wf), avg3(bg, wb))
 }

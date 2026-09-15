@@ -5,7 +5,7 @@
 //! painted window-edge vignette keeps the pane reading as glass.
 
 use super::{Detail, Scene};
-use crate::canvas::{density_for, ease_smooth, glow, lerp, scale, Canvas};
+use crate::canvas::{approach, density_for, dot, ease_smooth, glow_f, lerp, scale, Canvas};
 use rand::{rngs::StdRng, RngExt};
 
 struct Drop {
@@ -154,7 +154,7 @@ impl Rain {
             if d.y - d.trail as f32 > h as f32 {
                 if d.near && rng.random::<f32>() < 0.7 + gust_splash * 0.25 {
                     // impact flash on the gutter where the drop lands
-                    glow(canvas, d.x as i32, h as i32 - 1, 1, colors.0, 0.30);
+                    glow_f(canvas, d.x, h as f32 - 1.0, 1.0, colors.0, 0.30);
                     let n = rng.random_range(2..5) + (gust_splash * 3.0) as usize;
                     for _ in 0..n {
                         splashes.push(Splash {
@@ -199,23 +199,18 @@ impl Rain {
                 }
                 let f = (1.0 - i as f32 / d.trail as f32).powi(2) * d.bright;
                 // head of a near drop gets a bright glint; lightning backlights it
-                let c = if i == 0 && d.near {
-                    lerp(scale(base, f), (235, 245, 255), 0.55 + flash * 0.35)
+                if i == 0 && d.near {
+                    // the head bead glides subcell instead of snapping
+                    // column to column as the wobble sways it
+                    let c = lerp(scale(base, f), (235, 245, 255), 0.55 + flash * 0.35);
+                    dot(canvas, xw, yy, c, 1.0);
                 } else {
-                    scale(base, f * (1.0 + flash * 0.5))
-                };
-                canvas.set(xw as i32, yy as i32, c);
+                    canvas.set(xw as i32, yy as i32, scale(base, f * (1.0 + flash * 0.5)));
+                }
             }
             // soft halo around near-drop heads so they read as beads on glass
             if d.near && d.y >= 0.0 && d.y < h as f32 {
-                glow(
-                    canvas,
-                    xw as i32,
-                    d.y as i32,
-                    1,
-                    base,
-                    0.20 * d.bright + flash * 0.25,
-                );
+                glow_f(canvas, xw, d.y, 1.0, base, 0.20 * d.bright + flash * 0.25);
             }
             true
         });
@@ -237,7 +232,7 @@ impl Scene for Rain {
         if w != self.w || h != self.h {
             self.w = w;
             self.h = h;
-            let f = self.detail.factor();
+            let f = self.detail.density();
             let dens = density_for(w, h);
             self.far = (0..((w / 2 + 12) as f32 * f * dens) as usize + 6)
                 .map(|_| spawn(&mut self.rng, w, false))
@@ -285,7 +280,7 @@ impl Scene for Rain {
             } else {
                 -1.6
             };
-            self.gust += (target * (0.4 + peak) - self.gust) * dt * 1.8;
+            self.gust = approach(self.gust, target * (0.4 + peak), 1.8, dt);
         } else {
             self.gust *= 1.0 - dt.min(1.0);
             self.gust_splash = (self.gust_splash - dt * 1.5).max(0.0);
@@ -312,7 +307,7 @@ impl Scene for Rain {
 
         // static drops slowly re-form on the glass
         let static_cap =
-            ((w / 2 + 14) as f32 * self.detail.factor() * density_for(w, h)) as usize + 12;
+            ((w / 2 + 14) as f32 * self.detail.density() * density_for(w, h)) as usize + 12;
         self.static_timer += dt;
         if self.static_timer > 0.35 && self.statics.len() < static_cap {
             self.static_timer = 0.0;
@@ -388,11 +383,13 @@ impl Scene for Rain {
             let col = scale(self.near_c, s.bright * 0.55);
             canvas.set(s.x as i32, s.y as i32, col);
             if s.radius > 1.15 {
-                glow(
+                // fractional radius: the swell grows smoothly instead of
+                // stepping when it crosses an integer
+                glow_f(
                     canvas,
-                    s.x as i32,
-                    s.y as i32,
-                    1,
+                    s.x,
+                    s.y,
+                    s.radius.min(2.5),
                     self.near_c,
                     (s.radius - 1.0) * 0.35 * s.bright,
                 );
@@ -429,7 +426,7 @@ impl Scene for Rain {
             }
             if s.life > 0.0 && s.y < h as f32 {
                 let b = (s.life * 90.0) as u8;
-                canvas.add(s.x as i32, s.y as i32, (b / 2, b / 2 + b / 4, b));
+                dot(canvas, s.x, s.y, (b / 2, b / 2 + b / 4, b), 1.0);
                 true
             } else {
                 false

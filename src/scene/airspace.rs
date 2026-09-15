@@ -568,7 +568,7 @@ impl Scene for Airspace {
 
         // spawn traffic
         let max_trail = self.detail.scale(40.0, 12);
-        let rate = cfg.traffic_rate * self.detail.factor() * density_for(w, h);
+        let rate = cfg.traffic_rate * self.detail.density() * density_for(w, h);
         self.spawn_acc += dt * rate * 0.35;
         while self.spawn_acc >= 1.0 {
             self.spawn_acc -= 1.0;

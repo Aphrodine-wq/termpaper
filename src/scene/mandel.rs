@@ -93,7 +93,7 @@ impl Mandel {
         }
         self.w = w;
         self.h = h;
-        let n = ((18.0 * density_for(w, h) * self.detail.factor()) as usize).clamp(8, 56);
+        let n = ((18.0 * density_for(w, h) * self.detail.density()) as usize).clamp(8, 56);
         self.dust = (0..n)
             .map(|_| Dust {
                 x: self.rng.random_range(0.0..1.0),

@@ -134,7 +134,7 @@ impl Canopy {
     fn shed_burst(&mut self, count: usize, blossom: bool) {
         let (w, _h) = (self.w, self.h);
         let mut shed = 0usize;
-        let want = (count as f32 * self.detail.factor()) as usize;
+        let want = (count as f32 * self.detail.density()) as usize;
         for i in 0..self.grid.len() {
             if shed >= want {
                 break;

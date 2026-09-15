@@ -10,7 +10,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Compact logo for the menu header strip (~34 cols).
 pub const LOGO_COMPACT: &[&str] = &[
     "┏━━━ termpaper ━━━━━━━━━━━━━━━━━━━┓",
-    "┃  wallpaper engine for the tty   ┃",
+    "┃  120fps · 22 filters · your tty  ┃",
     "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛",
 ];
 
@@ -79,6 +79,30 @@ fn term_name() -> String {
     std::env::var("TERM").unwrap_or_else(|_| "unknown".into())
 }
 
+/// One-line header for tabs that need maximum body space (Settings, Keybinds, …).
+pub fn minimal_header(stats: &MenuStats) -> Vec<Line<'static>> {
+    let theme = stats.theme.unwrap_or("default");
+    let link = if stats.link_enabled {
+        format!("link {}", stats.link_group)
+    } else {
+        "solo".into()
+    };
+    vec![Line::from(vec![
+        Span::styled(
+            format!("termpaper {VERSION} · "),
+            Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "{} · {}fps · {:.2}x · {} · {} · {theme} · {link}",
+                stats.scene, stats.fps, stats.speed, stats.pixels,
+                if stats.truecolor { "truecolor" } else { "256" },
+            ),
+            Style::new().fg(Color::DarkGray),
+        ),
+    ])]
+}
+
 /// Header strip shown on every menu tab (logo + stat rows).
 pub fn compact_lines(stats: &MenuStats) -> Vec<Line<'static>> {
     let mut out = Vec::new();
@@ -135,7 +159,7 @@ pub fn about_lines(stats: &MenuStats) -> Vec<Line<'static>> {
         Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
     )));
     out.push(Line::from(dim(
-        "Animated truecolor scenes · link groups · video wall",
+        "Up to 120fps · 22 filters · sync clusters · seamless walls",
     )));
     out.push(Line::from(""));
     out.push(label("version", VERSION));
@@ -171,8 +195,8 @@ pub fn about_lines(stats: &MenuStats) -> Vec<Line<'static>> {
         },
     ));
     out.push(Line::from(""));
-    out.push(Line::from(dim("MIT license · open source")));
-    out.push(Line::from(dim("add scenes — see CONTRIBUTING.md")));
+    out.push(Line::from(dim("MIT · open source · ship your own scenes")));
+    out.push(Line::from(dim("CONTRIBUTING.md — join the catalog")));
     out.push(Line::from(""));
     out.push(Line::from(dim("press 0 to reset all settings to defaults")));
     out

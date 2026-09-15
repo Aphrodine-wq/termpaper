@@ -14,6 +14,9 @@ pub struct Config {
     pub cycle: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
+    /// fps cap while the terminal is unfocused (unset = no throttle)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_fps: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speed: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -34,6 +37,9 @@ pub struct Config {
     pub fade: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clock: Option<bool>,
+    /// run post-processing on the GPU (needs a build with `--features gpu`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pad: Option<i32>,
     /// global hue rotation in degrees (0 = off)
@@ -130,6 +136,10 @@ pub const ACTIONS: &[&str] = &[
     "pause",
     "color",
     "reset",
+    "fps_up",
+    "fps_down",
+    "speed_up",
+    "speed_down",
 ];
 
 pub fn default_key(action: &str) -> &'static str {
@@ -143,6 +153,10 @@ pub fn default_key(action: &str) -> &'static str {
         "pause" => "space",
         "color" => "c",
         "reset" => "0",
+        "fps_up" => "]",
+        "fps_down" => "[",
+        "speed_up" => ".",
+        "speed_down" => ",",
         _ => "",
     }
 }

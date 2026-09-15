@@ -140,33 +140,19 @@ pub fn cool(canvas: &mut Canvas) {
 }
 
 fn shift(canvas: &mut Canvas, r: f32, g: f32, b: f32) {
-    let (w, h) = (canvas.width(), canvas.height());
-    for y in 0..h {
-        for x in 0..w {
-            let c = canvas.get(x as i32, y as i32).color;
-            canvas.set(
-                x as i32,
-                y as i32,
-                (
-                    (c.0 as f32 * r).clamp(0.0, 255.0) as u8,
-                    (c.1 as f32 * g).clamp(0.0, 255.0) as u8,
-                    (c.2 as f32 * b).clamp(0.0, 255.0) as u8,
-                ),
-            );
-        }
-    }
+    canvas.map_colors(|c| {
+        (
+            (c.0 as f32 * r).clamp(0.0, 255.0) as u8,
+            (c.1 as f32 * g).clamp(0.0, 255.0) as u8,
+            (c.2 as f32 * b).clamp(0.0, 255.0) as u8,
+        )
+    });
 }
 
 /// Rotate every pixel's hue by `deg` degrees.
 pub fn hue(canvas: &mut Canvas, deg: f32) {
-    let (w, h) = (canvas.width(), canvas.height());
     let rot = deg / 360.0;
-    for y in 0..h {
-        for x in 0..w {
-            let c = canvas.get(x as i32, y as i32).color;
-            canvas.set(x as i32, y as i32, hue_rotate(c, rot));
-        }
-    }
+    canvas.map_colors(|c| hue_rotate(c, rot));
 }
 
 fn hue_rotate(c: (u8, u8, u8), rot: f32) -> (u8, u8, u8) {
@@ -296,22 +282,14 @@ pub fn bloom(canvas: &mut Canvas) {
 /// Duotone: luminance mapped onto a black → accent gradient.
 pub fn duotone(canvas: &mut Canvas) {
     const ACCENT: (u8, u8, u8) = (120, 180, 255);
-    let (w, h) = (canvas.width(), canvas.height());
-    for y in 0..h {
-        for x in 0..w {
-            let c = canvas.get(x as i32, y as i32).color;
-            let l = (c.0 as u32 * 2 + c.1 as u32 * 3 + c.2 as u32) as f32 / (6.0 * 255.0);
-            canvas.set(
-                x as i32,
-                y as i32,
-                (
-                    (ACCENT.0 as f32 * l) as u8,
-                    (ACCENT.1 as f32 * l) as u8,
-                    (ACCENT.2 as f32 * l) as u8,
-                ),
-            );
-        }
-    }
+    canvas.map_colors(|c| {
+        let l = (c.0 as u32 * 2 + c.1 as u32 * 3 + c.2 as u32) as f32 / (6.0 * 255.0);
+        (
+            (ACCENT.0 as f32 * l) as u8,
+            (ACCENT.1 as f32 * l) as u8,
+            (ACCENT.2 as f32 * l) as u8,
+        )
+    });
 }
 
 /// Pixelate: 3x3 mosaic, each block becomes its average color.
@@ -462,53 +440,44 @@ pub fn warp(canvas: &mut Canvas, t: f32) {
 }
 
 pub fn invert(canvas: &mut Canvas) {
-    let (w, h) = (canvas.width(), canvas.height());
-    for y in 0..h {
-        for x in 0..w {
-            let c = canvas.get(x as i32, y as i32).color;
-            canvas.set(x as i32, y as i32, (255 - c.0, 255 - c.1, 255 - c.2));
-        }
-    }
+    canvas.map_colors(|c| (255 - c.0, 255 - c.1, 255 - c.2));
 }
 
 pub fn sepia(canvas: &mut Canvas) {
-    let (w, h) = (canvas.width(), canvas.height());
-    for y in 0..h {
-        for x in 0..w {
-            let (r, g, b) = canvas.get(x as i32, y as i32).color;
-            let rf = r as f32;
-            let gf = g as f32;
-            let bf = b as f32;
-            canvas.set(
-                x as i32,
-                y as i32,
-                (
-                    (rf * 0.393 + gf * 0.769 + bf * 0.189).min(255.0) as u8,
-                    (rf * 0.349 + gf * 0.686 + bf * 0.168).min(255.0) as u8,
-                    (rf * 0.272 + gf * 0.534 + bf * 0.131).min(255.0) as u8,
-                ),
-            );
-        }
+    canvas.map_colors(|(r, g, b)| {
+        let (rf, gf, bf) = (r as f32, g as f32, b as f32);
+        (
+            (rf * 0.393 + gf * 0.769 + bf * 0.189).min(255.0) as u8,
+            (rf * 0.349 + gf * 0.686 + bf * 0.168).min(255.0) as u8,
+            (rf * 0.272 + gf * 0.534 + bf * 0.131).min(255.0) as u8,
+        )
+    });
+}
+
+/// Build a 256-entry channel lookup table from a per-value function.
+///
+/// Every per-channel filter here maps a `u8` to a `u8` independently of
+/// position, so the whole mapping is 256 values wide. Computing it once per
+/// frame instead of per channel per pixel removes the float math (and, for
+/// `gamma`, a `powf`) from the hot loop entirely.
+fn channel_lut(f: impl Fn(u8) -> u8) -> [u8; 256] {
+    let mut lut = [0u8; 256];
+    for (v, out) in lut.iter_mut().enumerate() {
+        *out = f(v as u8);
     }
+    lut
 }
 
 pub fn posterize(canvas: &mut Canvas) {
     const LEVELS: f32 = 5.0;
-    let (w, h) = (canvas.width(), canvas.height());
-    for y in 0..h {
-        for x in 0..w {
-            let c = canvas.get(x as i32, y as i32).color;
-            canvas.set(
-                x as i32,
-                y as i32,
-                (
-                    quantize(c.0, LEVELS),
-                    quantize(c.1, LEVELS),
-                    quantize(c.2, LEVELS),
-                ),
-            );
-        }
-    }
+    let lut = channel_lut(|v| quantize(v, LEVELS));
+    canvas.map_colors(|c| {
+        (
+            lut[c.0 as usize],
+            lut[c.1 as usize],
+            lut[c.2 as usize],
+        )
+    });
 }
 
 fn quantize(v: u8, levels: f32) -> u8 {
@@ -518,21 +487,15 @@ fn quantize(v: u8, levels: f32) -> u8 {
 
 pub fn gamma(canvas: &mut Canvas) {
     const G: f32 = 1.35;
-    let (w, h) = (canvas.width(), canvas.height());
-    for y in 0..h {
-        for x in 0..w {
-            let c = canvas.get(x as i32, y as i32).color;
-            canvas.set(
-                x as i32,
-                y as i32,
-                (
-                    gamma_ch(c.0, G),
-                    gamma_ch(c.1, G),
-                    gamma_ch(c.2, G),
-                ),
-            );
-        }
-    }
+    // 256 powf calls per frame instead of three per pixel
+    let lut = channel_lut(|v| gamma_ch(v, G));
+    canvas.map_colors(|c| {
+        (
+            lut[c.0 as usize],
+            lut[c.1 as usize],
+            lut[c.2 as usize],
+        )
+    });
 }
 
 fn gamma_ch(v: u8, g: f32) -> u8 {
@@ -583,16 +546,14 @@ pub fn mirror(canvas: &mut Canvas) {
 }
 
 pub fn noir(canvas: &mut Canvas) {
-    let (w, h) = (canvas.width(), canvas.height());
-    for y in 0..h {
-        for x in 0..w {
-            let c = canvas.get(x as i32, y as i32).color;
-            let l = (c.0 as f32 * 0.299 + c.1 as f32 * 0.587 + c.2 as f32 * 0.114) / 255.0;
-            let t = ((l - 0.5) * 1.6 + 0.5).clamp(0.0, 1.0);
-            let v = (t * 255.0) as u8;
-            canvas.set(x as i32, y as i32, (v, v, v));
-        }
-    }
+    // luminance depends on all three channels, so this is not a per-channel
+    // LUT; the win is dropping the per-pixel bounds-checked get/set round trip
+    canvas.map_colors(|c| {
+        let l = (c.0 as f32 * 0.299 + c.1 as f32 * 0.587 + c.2 as f32 * 0.114) / 255.0;
+        let t = ((l - 0.5) * 1.6 + 0.5).clamp(0.0, 1.0);
+        let v = (t * 255.0) as u8;
+        (v, v, v)
+    });
 }
 
 #[cfg(test)]

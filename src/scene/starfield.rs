@@ -5,7 +5,7 @@
 //! streaks and the nebulas flare, then everything eases back to cruise.
 
 use super::{Detail, Scene};
-use crate::canvas::{density_for, ease_smooth, glow, lerp, scale, Canvas};
+use crate::canvas::{density_for, dot, ease_smooth, glow_f, lerp, line_f, scale, Canvas};
 use rand::{rngs::StdRng, RngExt};
 
 const TAU: f32 = std::f32::consts::TAU;
@@ -232,14 +232,9 @@ impl Scene for Starfield {
         // the warp point glows as the surge charges and burns white at full boost
         if surge_k > 0.02 {
             let gc = lerp(self.tints[0], (255, 255, 255), surge_k * 0.5);
-            glow(
-                canvas,
-                cx as i32,
-                cy as i32,
-                (2.0 + surge_k * 4.0) as i32,
-                gc,
-                surge_k * 0.55,
-            );
+            // fractional radius: the charge-up swells smoothly instead of
+            // stepping through integer radii
+            glow_f(canvas, cx, cy, 2.0 + surge_k * 4.0, gc, surge_k * 0.55);
         }
 
         // a tumbling asteroid drifts past now and then
@@ -295,31 +290,34 @@ impl Scene for Starfield {
             let bright =
                 (0.10 + 0.90 * depth * depth) * s.mag * twinkle * fade * (1.0 + surge_k * 0.5);
 
-            // fading trail from previous position to current; long during surge
+            // fading trail from previous position to current; long during
+            // surge. An AA segment slides subcell with the star, so warp
+            // streaks stay unbroken lines instead of stippled columns.
             if let Some((ox, oy)) = s.prev {
                 let dist = ((sx - ox).powi(2) + (sy - oy).powi(2)).sqrt();
-                let steps = (dist as usize).min(6) + (surge_k * 18.0) as usize;
-                for i in 1..=steps {
-                    let t = i as f32 / (steps + 1) as f32;
-                    let tx = ox + (sx - ox) * t;
-                    let ty = oy + (sy - oy) * t;
-                    canvas.set_f(tx, ty, scale(s.tint, bright * (1.0 - t) * 0.55));
+                let reach = ((dist.min(6.0) + surge_k * 18.0) / dist.max(1e-3)).min(1.0);
+                if dist > 0.05 {
+                    // two segments fake the fade toward the tail
+                    let (tx, ty) = (sx + (ox - sx) * reach, sy + (oy - sy) * reach);
+                    let (mx, my) = ((tx + sx) * 0.5, (ty + sy) * 0.5);
+                    line_f(canvas, tx, ty, mx, my, s.tint, bright * 0.16);
+                    line_f(canvas, mx, my, sx, sy, s.tint, bright * 0.42);
                 }
             }
 
             let color = lerp(scale(s.tint, bright), (255, 255, 255), depth * 0.4);
-            canvas.set_f(sx, sy, color);
+            dot(canvas, sx, sy, color, 1.0);
             if s.mag > 1.2 {
                 // bright stars bleed into neighbors slightly; near-camera
                 // whooshes flare as they pass
                 let flare = if s.z < 0.2 { 1.6 } else { 1.0 };
-                canvas.add(sx as i32 + 1, sy as i32, scale(color, 0.35 * flare));
-                canvas.add(sx as i32, sy as i32 + 1, scale(color, 0.35 * flare));
+                dot(canvas, sx + 1.0, sy, color, 0.35 * flare);
+                dot(canvas, sx, sy + 1.0, color, 0.35 * flare);
                 if s.z < 0.12 {
-                    canvas.add(sx as i32 - 1, sy as i32, scale(color, 0.5));
-                    canvas.add(sx as i32, sy as i32 - 1, scale(color, 0.5));
+                    dot(canvas, sx - 1.0, sy, color, 0.5);
+                    dot(canvas, sx, sy - 1.0, color, 0.5);
                     // the closest pass throws light onto its surroundings
-                    glow(canvas, sx as i32, sy as i32, 2, color, 0.35);
+                    glow_f(canvas, sx, sy, 2.0, color, 0.35);
                 }
             }
 

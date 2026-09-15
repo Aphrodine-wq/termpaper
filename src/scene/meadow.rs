@@ -208,6 +208,30 @@ impl Scene for Meadow {
                     mag: rng.random_range(0.4..1.0),
                 })
                 .collect();
+            // the moon: parked in the upper sky band, off-centre so the
+            // azimuth lighting on the grass below is asymmetric and readable
+            let r = ((h as f32 * 0.075).max(1.6)).min(w as f32 * 0.06).max(1.6);
+            self.moon = if horizon > 4 {
+                Some(Moon {
+                    x: rng.random_range(w as f32 * 0.18..w as f32 * 0.82),
+                    y: rng.random_range(r + 1.0..(horizon as f32 * 0.5).max(r + 1.5)),
+                    r,
+                    maria: [
+                        (
+                            rng.random_range(-0.35..0.15),
+                            rng.random_range(-0.30..0.10),
+                            rng.random_range(0.22..0.38),
+                        ),
+                        (
+                            rng.random_range(0.05..0.40),
+                            rng.random_range(0.05..0.40),
+                            rng.random_range(0.16..0.30),
+                        ),
+                    ],
+                })
+            } else {
+                None // no sky worth speaking of at this size
+            };
             self.gust = Gust::Idle;
             self.meteor = None;
         }
@@ -311,6 +335,52 @@ impl Scene for Meadow {
             canvas.set_f(s.x, s.y, scale(self.star_c, s.mag * tw * 0.55));
         }
 
+        // breathing moon: a slow luminance swell, limb-darkened, with two dark
+        // maria. Drawn in one pass rather than by stacking discs — overdrawing
+        // a dark disc on a bright one leaves a bright antialiased ring around
+        // each patch, which is exactly the artifact this avoids.
+        let (moon_x, moon_light) = match &self.moon {
+            Some(m) => {
+                let breathe = 0.88 + 0.12 * (self.t * 0.21).sin();
+                // halo: two nested falloffs so the glow has no single hard ring
+                let (mxi, myi) = (m.x as i32, m.y as i32);
+                glow(canvas, mxi, myi, (m.r * 3.2) as i32, self.moon_c, 0.09 * breathe);
+                glow(canvas, mxi, myi, (m.r * 1.7) as i32, self.moon_c, 0.15 * breathe);
+                let x0 = (m.x - m.r - 1.0).floor() as i32;
+                let x1 = (m.x + m.r + 1.0).ceil() as i32;
+                let y0 = (m.y - m.r - 1.0).floor() as i32;
+                let y1 = (m.y + m.r + 1.0).ceil() as i32;
+                for y in y0..=y1 {
+                    let dy = y as f32 - m.y;
+                    for x in x0..=x1 {
+                        let dx = x as f32 - m.x;
+                        let d = (dx * dx + dy * dy).sqrt();
+                        let cov = (m.r + 0.5 - d).clamp(0.0, 1.0);
+                        if cov <= 0.0 {
+                            continue;
+                        }
+                        // limb darkening toward the edge
+                        let mut v = breathe * (1.0 - 0.20 * (d / m.r).min(1.0).powi(2));
+                        for &(mx, my, mr) in &m.maria {
+                            let (ax, ay) = (dx - mx * m.r, dy - my * m.r);
+                            let md = (ax * ax + ay * ay).sqrt() / (mr * m.r).max(0.001);
+                            if md < 1.0 {
+                                v *= 1.0 - 0.26 * (1.0 - md * md);
+                            }
+                        }
+                        let c = scale(self.moon_c, v);
+                        if cov >= 0.999 {
+                            canvas.set(x, y, c);
+                        } else {
+                            canvas.add(x, y, scale(c, cov));
+                        }
+                    }
+                }
+                (m.x, breathe)
+            }
+            None => (0.0, 0.0),
+        };
+
         // shooting star: eased envelope, fading additive trail
         if let Some(m) = &self.meteor {
             let p = (m.age / m.life).clamp(0.0, 1.0);
@@ -343,6 +413,30 @@ impl Scene for Meadow {
             canvas.set(x as i32, horizon, scale(self.horizon_c, tex));
         }
 
+        // moon haze pooling along the skyline: brightest directly under the
+        // moon's azimuth, spilling a couple of rows either side of the horizon
+        if moon_light > 0.0 {
+            let reach = (w as f32 * 0.42).max(6.0);
+            for dy in -2i32..=1 {
+                let row = horizon + dy;
+                if row < 0 || row >= h as i32 {
+                    continue;
+                }
+                // the pool is densest right at the skyline
+                let vk = 1.0 - (dy as f32 + 0.5).abs() / 2.6;
+                if vk <= 0.0 {
+                    continue;
+                }
+                for x in 0..w as i32 {
+                    let d = ((x as f32 - moon_x).abs() / reach).min(1.0);
+                    let k = (1.0 - d * d) * vk * moon_light * 0.16;
+                    if k > 0.004 {
+                        canvas.add(x, row, scale(self.moon_c, k));
+                    }
+                }
+            }
+        }
+
         // grass, far to near so near blades occlude far ones
         let bases = [
             horizon,
@@ -367,10 +461,18 @@ impl Scene for Meadow {
                     bend += self.gust_dir * inf * 2.1 * amp;
                 }
 
+                // blades beneath the moon's azimuth catch extra light
+                let az = if moon_light > 0.0 {
+                    let d = ((b.x - moon_x).abs() / (w as f32 * 0.35)).min(1.0);
+                    1.0 + 0.26 * moon_light * (1.0 - d * d)
+                } else {
+                    1.0
+                };
+
                 let max_lean = b.len * 0.85;
                 let lean = (bend * b.len * 0.35).clamp(-max_lean, max_lean);
                 let segs = b.len.ceil().max(1.0) as i32;
-                let shade = 1.0 + bend * 0.10 + inf * 0.4;
+                let shade = (1.0 + bend * 0.10 + inf * 0.4) * az;
                 let mut tip = (b.x as i32, base);
                 for i in 0..segs {
                     let t = i as f32 / segs as f32;
@@ -391,7 +493,7 @@ impl Scene for Meadow {
                     b.tw += dt * b.tw_speed;
                     let tw = 0.5 + 0.5 * (b.tw * std::f32::consts::TAU + b.seed * 9.0).sin();
                     let sparkle = tw * tw * tw;
-                    let mut gb = sparkle * 0.28 + inf * 1.1;
+                    let mut gb = sparkle * 0.28 * az + inf * 1.1;
                     gb += (bend.abs() - 0.35).max(0.0) * 0.5;
                     if gb > 0.06 {
                         let gb = gb.min(1.2);

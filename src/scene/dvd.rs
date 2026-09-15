@@ -5,8 +5,8 @@
 //! drag on every bounce, a tinted edge flash + wall scuff on corner hits,
 //! and a 1x letter scale so the scene still reads on tiny terminals.
 
-use super::Scene;
-use crate::canvas::{ease_smooth, glow, lerp, scale, Canvas};
+use super::{Detail, Scene};
+use crate::canvas::{dot, ease_smooth, glow_f, lerp, rect_f, scale, Canvas};
 use rand::{rngs::StdRng, RngExt};
 
 // 5x7 block letters, scaled 2x at draw time → 10x14 per letter,
@@ -54,6 +54,7 @@ const COLORS: &[(u8, u8, u8)] = &[
 ];
 
 pub struct Dvd {
+    detail: Detail,
     rng: StdRng,
     colors: &'static [(u8, u8, u8)],
     x: f32,
@@ -82,7 +83,7 @@ pub struct Dvd {
 }
 
 impl Dvd {
-    pub fn new(mut rng: StdRng, theme: Option<&str>) -> Self {
+    pub fn new(mut rng: StdRng, theme: Option<&str>, detail: Detail) -> Self {
         let colors = colors_for(theme);
         let color = rng.random_range(0..colors.len());
         Dvd {
@@ -96,6 +97,7 @@ impl Dvd {
             impacts: Vec::new(),
             trail: Vec::new(),
             trail_t: 0.0,
+            detail,
             dust: Vec::new(),
             edge_flash: 0.0,
             color_blend: 1.0,
@@ -179,33 +181,34 @@ impl Dvd {
     fn draw_letter(
         canvas: &mut Canvas,
         glyph: &[&str; 7],
-        ox: i32,
-        oy: i32,
+        ox: f32,
+        oy: f32,
         kx: f32,
         ky: f32,
         cell: i32,
         c: (u8, u8, u8),
     ) {
         // squash/stretch is anchored at each letter's center so the logo
-        // deforms in place instead of sliding
+        // deforms in place instead of sliding. Fractional origin + rect_f
+        // edges make the logo glide between cells instead of popping.
         let (cx, cy) = (2.5 * cell as f32, 3.5 * cell as f32);
+        let cf = cell as f32;
         for (gy, row) in glyph.iter().enumerate() {
             for (gx, ch) in row.chars().enumerate() {
                 if ch == '#' {
                     // top-lit gradient keeps the flat blocks from reading dead
                     let shade = 1.05 - (gy as f32 / 6.0) * 0.3;
                     let gc = scale(c, shade);
-                    for sy in 0..cell {
-                        for sx in 0..cell {
-                            let lx = (gx as i32 * cell + sx) as f32;
-                            let ly = (gy as i32 * cell + sy) as f32;
-                            canvas.set(
-                                ox + ((lx - cx) * kx + cx) as i32,
-                                oy + ((ly - cy) * ky + cy) as i32,
-                                gc,
-                            );
-                        }
-                    }
+                    let lx = gx as f32 * cf;
+                    let ly = gy as f32 * cf;
+                    rect_f(
+                        canvas,
+                        ox + (lx - cx) * kx + cx,
+                        oy + (ly - cy) * ky + cy,
+                        cf * kx,
+                        cf * ky,
+                        gc,
+                    );
                 }
             }
         }
@@ -229,7 +232,12 @@ impl Scene for Dvd {
             self.x = self.rng.random_range(0.0..self.max_x().max(1.0));
             self.y = self.rng.random_range(0.0..self.max_y().max(1.0));
             self.trail.clear();
-            let nd = ((w * h) / 350).clamp(6, 60);
+            // the dust plane is the one density knob this scene has:
+            // the logo itself is a fixed-size sprite
+            let nd = self
+                .detail
+                .scale(((w * h) / 350) as f32, 6)
+                .clamp(6, 110);
             self.dust = (0..nd)
                 .map(|_| {
                     (
@@ -256,7 +264,7 @@ impl Scene for Dvd {
             let mx = dx + (self.t * 0.11 + phase).sin() * 1.5;
             let my = dy + (self.t * 0.07 + phase * 2.0).cos() * 0.8;
             let tw = 0.6 + 0.4 * (self.t * 0.8 + phase).sin();
-            canvas.set_f(mx, my, scale((110, 140, 180), mag * tw));
+            dot(canvas, mx, my, (110, 140, 180), mag * tw);
         }
 
         // impact payoff: scuff glow + sparkles in the NEW color; corner
@@ -317,8 +325,8 @@ impl Scene for Dvd {
             if *life <= 0.0 {
                 return false;
             }
-            let r = 2 + ((1.0 - *life) * 3.0) as i32;
-            glow(canvas, *ix as i32, *iy as i32, r, *c, *life * 0.5);
+            let r = 2.0 + (1.0 - *life) * 3.0;
+            glow_f(canvas, *ix, *iy, r, *c, *life * 0.5);
             true
         });
         self.sparkles.retain_mut(|(sx, sy, svx, svy, life, c)| {
@@ -332,7 +340,7 @@ impl Scene for Dvd {
             if *life <= 0.0 {
                 return false;
             }
-            canvas.set_f(*sx, *sy, scale(*c, *life * 1.8));
+            dot(canvas, *sx, *sy, *c, *life * 1.8);
             true
         });
 
@@ -349,10 +357,9 @@ impl Scene for Dvd {
         let tlen = self.trail.len();
         for (i, &(tx, ty, ci)) in self.trail.iter().enumerate() {
             let age = (i + 1) as f32 / tlen as f32; // 1 = newest
-            glow(canvas, tx as i32, ty as i32, 2, self.colors[ci], 0.15 * age * age);
+            glow_f(canvas, tx, ty, 2.0, self.colors[ci], 0.15 * age * age);
         }
 
-        let (ox, oy) = (self.x as i32, self.y as i32);
         // color eases to the new one over ~0.25s; logo squashes on impact
         self.color_blend = (self.color_blend + dt * 4.0).min(1.0);
         self.squash = (self.squash - dt * 5.0).max(0.0);
@@ -368,19 +375,19 @@ impl Scene for Dvd {
             (1.0 + 0.12 * s, 1.0 - 0.22 * s)
         };
         let cell = if (lw, lh) == (LOGO_W, LOGO_H) { 2 } else { 1 };
-        let adv = 6 * cell;
+        let adv = (6 * cell) as f32;
         // soft halo so the logo lights the dark around it
-        glow(
+        glow_f(
             canvas,
-            ox + lw / 2,
-            oy + lh / 2,
-            cell + 1,
+            self.x + lw as f32 / 2.0,
+            self.y + lh as f32 / 2.0,
+            (cell + 1) as f32,
             c,
             0.08,
         );
-        Self::draw_letter(canvas, &D, ox, oy, kx, ky, cell, c);
-        Self::draw_letter(canvas, &V, ox + adv, oy, kx, ky, cell, c);
-        Self::draw_letter(canvas, &D, ox + adv * 2, oy, kx, ky, cell, c);
+        Self::draw_letter(canvas, &D, self.x, self.y, kx, ky, cell, c);
+        Self::draw_letter(canvas, &V, self.x + adv, self.y, kx, ky, cell, c);
+        Self::draw_letter(canvas, &D, self.x + adv * 2.0, self.y, kx, ky, cell, c);
     }
 }
 
@@ -390,7 +397,7 @@ mod tests {
     use rand::SeedableRng;
 
     fn dvd_at(x: f32, y: f32, vx: f32, vy: f32) -> Dvd {
-        let mut d = Dvd::new(StdRng::seed_from_u64(8), None);
+        let mut d = Dvd::new(StdRng::seed_from_u64(8), None, Detail::Medium);
         d.w = 100;
         d.h = 50;
         d.x = x;

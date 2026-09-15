@@ -7,7 +7,7 @@
 
 use super::noise::{hash2, vnoise};
 use super::{Detail, Scene};
-use crate::canvas::{density_for, ease_smooth, glow, lerp, scale, Canvas};
+use crate::canvas::{ease_smooth, glow, lerp, scale, Canvas};
 use crate::physics::spring_damper;
 use rand::{rngs::StdRng, RngExt};
 
@@ -193,10 +193,12 @@ impl Scene for Fireflies {
         if w != self.w || h != self.h {
             self.w = w;
             self.h = h;
-            let n = self
-                .detail
-                .scale((w * h / 1300) as f32 * density_for(w, h), 26)
-                .min(320);
+            // Linear in area, not `(w*h/K) * density_for(w, h)`: density_for()
+            // already carries a w*h term, so that form was quadratic and landed
+            // under the count floor at every normal terminal size — which meant
+            // the floor *was* the count and --detail did nothing here. Medium is
+            // tuned to land near the old effective value (~28 at 160x100).
+            let n = self.detail.scale((w * h) as f32 / 560.0, 8).min(320);
             self.flies = (0..n).map(|_| spawn(&mut self.rng, w, h)).collect();
             self.bright = vec![0.0; n];
             self.swarm = Swarm::Idle;

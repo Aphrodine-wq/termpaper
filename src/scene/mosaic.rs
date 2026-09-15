@@ -319,6 +319,9 @@ impl Scene for Mosaic {
         canvas.clear((0, 0, 0));
         let edge_w = (self.spacing * 0.055).clamp(0.7, 1.8);
         let spill_w = edge_w * 3.0;
+        // the whole window lifts while any pane is flaring, so a flare reads as
+        // light entering the room rather than as one pane switching on alone
+        let ambient = wave_glow * 0.12;
 
         for y in 0..h as i32 {
             for x in 0..w as i32 {
@@ -345,7 +348,7 @@ impl Scene for Mosaic {
                     // lead came: bright edge; glints hot where two flashed
                     // panes meet, warms softly when either side flares
                     let meet = (f1 * f2 * 1.1).min(1.0);
-                    let bright = (0.30 + (f1 + f2) * 0.15 + meet * 0.9).min(1.2);
+                    let bright = (0.30 + (f1 + f2) * 0.15 + meet * 0.9 + ambient * 0.6).min(1.2);
                     let c = scale(lerp(self.lead, (255, 255, 255), meet * 0.5), bright);
                     canvas.set(x, y, c);
                 } else {
@@ -360,13 +363,11 @@ impl Scene for Mosaic {
                     let flare = (f1 + spill).min(1.2);
                     let tint = self.seeds[i1].tint;
                     let hot = lerp(tint, (255, 255, 255), 0.45);
+                    let lit = flare * 0.85 + ambient;
                     let (mut r, mut g, mut b) = (
-                        (tint.0 as f32 * self.breathe[i1] * shade + hot.0 as f32 * flare * 0.85)
-                            .min(255.0),
-                        (tint.1 as f32 * self.breathe[i1] * shade + hot.1 as f32 * flare * 0.85)
-                            .min(255.0),
-                        (tint.2 as f32 * self.breathe[i1] * shade + hot.2 as f32 * flare * 0.85)
-                            .min(255.0),
+                        (tint.0 as f32 * self.breathe[i1] * shade + hot.0 as f32 * lit).min(255.0),
+                        (tint.1 as f32 * self.breathe[i1] * shade + hot.1 as f32 * lit).min(255.0),
+                        (tint.2 as f32 * self.breathe[i1] * shade + hot.2 as f32 * lit).min(255.0),
                     );
                     // far plane: backlights bleeding dimly through the glass
                     for bl in &self.blobs {
