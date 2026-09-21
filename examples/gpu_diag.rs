@@ -12,7 +12,7 @@ use termpaper::{filter, render};
 fn main() {
     let (cols, rows) = (544usize, 66usize); // half mode -> 544x132 px
     let (w, h) = (cols, rows * 2);
-    let opts = SceneOptions { theme: None, detail: Detail::Low, text_scale: None };
+    let opts = SceneOptions { theme: None, detail: Detail::Low, text_scale: None, pixels: Default::default() };
     let mut s = scene::create("koi", &opts, StdRng::seed_from_u64(7)).unwrap();
     let mut canvas = Canvas::new(w, h);
     for _ in 0..40 { s.update(1.0 / 60.0, &mut canvas); }

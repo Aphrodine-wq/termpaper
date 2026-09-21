@@ -367,6 +367,9 @@ impl Menu {
 /// Snapshot of the host's current settings, for display + adjust.
 pub struct MenuCtx {
     pub renderer_status: String,
+    /// "wall: WxH cells @ (x,y)" when this pane is a crop of a video wall,
+    /// else "wall: local"
+    pub wall_status: String,
     pub scene_name: &'static str,
     pub scene_idx: usize,
     pub pixels: Pixels,
@@ -398,6 +401,7 @@ mod tests {
     fn ctx() -> MenuCtx {
         MenuCtx {
             renderer_status: "CPU · test".into(),
+            wall_status: "wall: local".into(),
             scene_name: "nexus",
             scene_idx: 1,
             pixels: Pixels::Half,
@@ -707,6 +711,7 @@ pub mod view {
         };
         lines.push(tab_line(m.section));
         lines.push(Line::from(Span::styled(ctx.renderer_status.clone(), Style::new().fg(Color::DarkGray))));
+        lines.push(Line::from(Span::styled(ctx.wall_status.clone(), Style::new().fg(Color::DarkGray))));
         lines.push(Line::from(""));
 
         match m.section {

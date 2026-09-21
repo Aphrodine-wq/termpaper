@@ -26,6 +26,16 @@ impl Pixels {
         }
     }
 
+    /// Height of one canvas pixel divided by its width, on screen. A terminal
+    /// cell is close to 1:2, so half-block and braille pixels are roughly
+    /// square while quadrant pixels are twice as tall as they are wide.
+    /// Scenes use this to keep circles round and to detect portrait canvases.
+    pub fn aspect(self) -> f32 {
+        let (pw, ph) = self.cell_size();
+        // cell is 1 wide : 2 tall; pixel = (1/pw) wide, (2/ph) tall
+        (2.0 / ph as f32) / (1.0 / pw as f32)
+    }
+
     #[allow(dead_code)] // used by the settings menu
     pub fn name(self) -> &'static str {
         match self {
@@ -237,6 +247,16 @@ pub fn draw_crop(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pixel_aspect_matches_cell_geometry() {
+        use super::Pixels;
+        // a 1:2 terminal cell: half and braille pixels are square, quad
+        // pixels are twice as tall as wide
+        assert_eq!(Pixels::Half.aspect(), 1.0);
+        assert_eq!(Pixels::Braille.aspect(), 1.0);
+        assert_eq!(Pixels::Quad.aspect(), 2.0);
+    }
+
     use super::*;
 
     #[test]

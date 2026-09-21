@@ -72,7 +72,10 @@ struct Args {
     #[arg(long)]
     gpu: bool,
 
-    /// Rendering backend (auto prefers the GPU when compiled and available)
+    /// Rendering backend: auto = GPU post-processing when compiled and
+    /// available, scenes run on the CPU; gpu = same, but reports if the GPU
+    /// is missing; cpu = everything on the CPU; shader = draw every scene
+    /// from its experimental WGSL world instead of the Rust scene
     #[arg(long, value_enum)]
     renderer: Option<termpaper::engine::Renderer>,
 
@@ -104,7 +107,8 @@ struct Args {
     #[arg(long)]
     all_groups: bool,
 
-    /// Disable video-wall mode
+    /// Never join a video wall: render the local canvas and hide this
+    /// window's geometry from peers (linking still syncs scenes)
     #[arg(long)]
     no_wall: bool,
 
@@ -223,6 +227,7 @@ fn main() -> std::io::Result<()> {
         theme: None,
         detail,
         text_scale: None,
+        pixels: Default::default(),
     };
     if scene::create(&scene_name, &probe, entropy_rng()).is_none() {
         eprintln!(
@@ -281,6 +286,10 @@ fn main() -> std::io::Result<()> {
         link_enabled,
         link_group,
         wall_spec: if args.no_wall { None } else { args.wall.clone() },
+        wall_enabled: !args.no_wall && cfg.wall.unwrap_or(true),
+        cli_no_link: args.no_link,
+        cli_group: args.group.as_deref().map(link::sanitize_group),
+        cli_no_wall: args.no_wall,
         smooth: cfg.smooth.unwrap_or(0.3),
         dim: cfg.dim.unwrap_or(1.0),
         fade: cfg.fade.unwrap_or(0.25),
@@ -320,6 +329,13 @@ struct Settings {
     link_enabled: bool,
     link_group: String,
     wall_spec: Option<String>,
+    /// automatic video wall from linked peers' geometry (false = --no-wall
+    /// or `wall = false`: local canvas, geometry hidden from peers)
+    wall_enabled: bool,
+    /// launch-time isolation flags; the `0` reset must not undo them
+    cli_no_link: bool,
+    cli_group: Option<String>,
+    cli_no_wall: bool,
     smooth: f32,
     dim: f32,
     fade: f32,
@@ -434,6 +450,7 @@ fn persist(settings: &mut Settings, scene_name: &str, opts: &SceneOptions) {
         Some(settings.contrast)
     };
     cfg.link = if settings.link_enabled { None } else { Some(false) };
+    cfg.wall = if settings.wall_enabled { None } else { Some(false) };
     cfg.group = if settings.link_group == "default" {
         None
     } else {
@@ -463,6 +480,17 @@ fn reset_link_guard(
     }
 }
 
+/// Link settings the `0` reset restores. `--no-link` and `--group` are
+/// launch-time isolation decisions (a solo art piece on one monitor), so a
+/// reset never re-enables linking or rejoins the default group on such an
+/// instance.
+fn link_defaults(cli_no_link: bool, cli_group: Option<&str>) -> (bool, String) {
+    (
+        config::DEFAULT_LINK && !cli_no_link,
+        cli_group.unwrap_or(config::DEFAULT_GROUP).to_string(),
+    )
+}
+
 fn apply_defaults(
     settings: &mut Settings,
     opts: &mut SceneOptions,
@@ -489,8 +517,10 @@ fn apply_defaults(
     settings.hue_shift = 0.0;
     settings.saturation = 1.0;
     settings.contrast = 1.0;
-    settings.link_enabled = config::DEFAULT_LINK;
-    settings.link_group = config::DEFAULT_GROUP.into();
+    let (link_enabled, link_group) = link_defaults(settings.cli_no_link, settings.cli_group.as_deref());
+    settings.link_enabled = link_enabled;
+    settings.link_group = link_group;
+    settings.wall_enabled = !settings.cli_no_wall;
 
     opts.detail = settings.detail;
     opts.theme = None;
@@ -538,6 +568,7 @@ fn run(
         theme: settings.theme.clone(),
         detail: settings.detail,
         text_scale: settings.text_scale,
+        pixels: settings.pixels,
     };
     let mut transition = transition::Transition::new();
     transition.set_fade_secs(settings.fade);
@@ -573,7 +604,7 @@ fn run(
     let mut wall_layout: Option<wall::WallLayout> = None;
     let mut wall_refresh = Instant::now() - Duration::from_secs(10);
     // hyprctl inside the frame loop stalls the frame it lands on
-    let geo_watcher = if settings.link_enabled || settings.wall_spec.is_some() {
+    let geo_watcher = if (settings.link_enabled && settings.wall_enabled) || settings.wall_spec.is_some() {
         Some(wall::GeoWatcher::spawn())
     } else {
         None
@@ -640,6 +671,9 @@ fn run(
             if now.duration_since(last_switch).as_secs_f64() >= secs {
                 sync_params = None; // local cycle: no shared seed
                 cur_sync = None;
+                if let Some(g) = &mut guard {
+                    g.set_synced(false);
+                }
                 transition.request((idx + 1) % names.len());
                 last_switch = now;
             }
@@ -677,9 +711,12 @@ fn run(
             if now.duration_since(last_heartbeat).as_secs() >= 15 {
                 last_heartbeat = now;
                 if let Some((seed, t0)) = cur_sync {
+                    // a peer that cycled locally holds no shared anchor, so it
+                    // must not win the election and then publish nothing
                     let leader = peers
                         .list
                         .iter()
+                        .filter(|i| i.synced)
                         .map(|i| i.pid)
                         .min()
                         .map(|m| m == std::process::id())
@@ -780,6 +817,7 @@ fn run(
             sim_debt = 0.0;
             if let Some(g) = &mut guard {
                 g.set_scene(names[idx]);
+                g.set_synced(cur_sync.is_some());
             }
             last_switch = now;
         }
@@ -790,13 +828,18 @@ fn run(
         {
             wall_refresh = Instant::now();
             let (cols, rows) = (terminal.size()?.width as usize, terminal.size()?.height as usize);
-            let geo = geo_watcher.as_ref().and_then(|w| w.latest());
+            // a --no-wall pane publishes no geometry, so peers never fold it
+            // into their wall either
+            let geo = geo_watcher
+                .as_ref()
+                .filter(|_| settings.wall_enabled)
+                .and_then(|w| w.latest());
             if let Some(g) = &mut guard {
                 g.set_geometry(cols, rows, geo.map(|g| (g.x, g.y, g.w, g.h)));
             }
             wall_layout = if let Some(spec) = &settings.wall_spec {
                 wall::manual_layout(spec, cols, rows)
-            } else if settings.link_enabled {
+            } else if settings.link_enabled && settings.wall_enabled {
                 let mut parts: Vec<wall::Participant> = peers
                     .list
                     .iter()
@@ -932,6 +975,10 @@ fn run(
                 let ctx = MenuCtx {
                     renderer_status: rendered.as_ref().map(|f| format!("{} · worker {:.1} ms", f.backend, f.render_ms))
                         .unwrap_or_else(|| "Renderer initializing…".into()),
+                    wall_status: match wall_layout {
+                        Some(l) => format!("wall: {}x{} cells @ ({},{})", l.virtual_w, l.virtual_h, l.crop_x, l.crop_y),
+                        None => "wall: local".into(),
+                    },
                     scene_name: names[idx],
                     scene_idx: idx,
                     pixels: settings.pixels,
@@ -1122,6 +1169,7 @@ fn run(
                         if let Some(input) = input {
                             let ctx = MenuCtx {
                                 renderer_status: String::new(),
+                                wall_status: String::new(),
                                 scene_name: names[idx],
                                 scene_idx: idx,
                                 pixels: settings.pixels,

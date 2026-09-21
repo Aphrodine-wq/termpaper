@@ -69,6 +69,9 @@ pub struct InstanceInfo {
     /// terminal padding in px (x, y) — the cell grid is inset by this much
     /// inside the window geometry, so wall crops must account for it
     pub pad: (i32, i32),
+    /// running the group's shared (seed, t0) anchor — false after a local
+    /// `--cycle` switch; such a peer must not lead the heartbeat
+    pub synced: bool,
 }
 
 pub fn epoch_now_ms() -> u64 {
@@ -221,6 +224,7 @@ pub struct Guard {
     rows: usize,
     geo: Option<(i32, i32, i32, i32)>,
     pad: (i32, i32),
+    synced: bool,
     /// (inode, mtime) of control.json at the last poll that read it —
     /// lets per-frame polling stop at a stat when nothing changed
     ctrl_seen: Option<(u64, SystemTime)>,
@@ -261,6 +265,7 @@ impl Guard {
             rows: 0,
             geo: None,
             pad: (0, 0),
+            synced: true,
             ctrl_seen: None,
         };
         g.write()?;
@@ -279,7 +284,7 @@ impl Guard {
         atomic_write(
             &self.path(),
             &format!(
-                "{{\"pid\":{},\"scene\":\"{}\",\"group\":\"{}\",\"started_at_epoch_secs\":{},\"cols\":{},\"rows\":{},\"px\":{},\"py\":{},\"version\":\"{}\"{}}}",
+                "{{\"pid\":{},\"scene\":\"{}\",\"group\":\"{}\",\"started_at_epoch_secs\":{},\"cols\":{},\"rows\":{},\"px\":{},\"py\":{},\"synced\":{},\"version\":\"{}\"{}}}",
                 self.pid,
                 esc(&self.scene),
                 esc(&self.group),
@@ -288,6 +293,7 @@ impl Guard {
                 self.rows,
                 self.pad.0,
                 self.pad.1,
+                self.synced,
                 env!("CARGO_PKG_VERSION"),
                 geo_json,
             ),
@@ -299,6 +305,14 @@ impl Guard {
     pub fn set_pad(&mut self, pad: (i32, i32)) {
         if self.pad != pad {
             self.pad = pad;
+            let _ = self.write();
+        }
+    }
+
+    /// Record whether this instance runs the group's shared anchor.
+    pub fn set_synced(&mut self, synced: bool) {
+        if self.synced != synced {
+            self.synced = synced;
             let _ = self.write();
         }
     }
@@ -528,6 +542,8 @@ pub fn parse_instance(text: &str) -> Option<InstanceInfo> {
             json_get(text, "px").and_then(|v| v.parse().ok()).unwrap_or(0),
             json_get(text, "py").and_then(|v| v.parse().ok()).unwrap_or(0),
         ),
+        // older instance files predate the flag: treat them as anchored
+        synced: json_get(text, "synced").map(|v| v != "false").unwrap_or(true),
     })
 }
 
@@ -866,7 +882,13 @@ mod tests {
         assert_eq!(info.pid, 4242);
         assert_eq!(info.scene, "fire");
         assert!(uptime_secs(info.started_at) > 0);
+        assert!(info.synced, "missing synced flag defaults to anchored");
         assert!(parse_instance("garbage").is_none());
+        let cycled = parse_instance(
+            "{\"pid\":1,\"scene\":\"fire\",\"started_at_epoch_secs\":1700000000,\"synced\":false}",
+        )
+        .unwrap();
+        assert!(!cycled.synced);
     }
 }
 

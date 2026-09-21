@@ -19,10 +19,63 @@ use std::time::Instant;
 )]
 #[serde(rename_all = "lowercase")]
 pub enum Renderer {
+    /// GPU post-processing when compiled and available; scenes run on the CPU.
     #[default]
     Auto,
+    /// Like `Auto`, but reports when the GPU was requested and is missing.
     Gpu,
+    /// Everything on the CPU.
     Cpu,
+    /// GPU post-processing and every scene drawn from its WGSL shader arm
+    /// (the experimental GPU worlds) instead of the Rust scene.
+    Shader,
+}
+
+/// Below this pixel count the GPU round trip costs more than the arithmetic
+/// it saves; the worker stays on the CPU path. Roughly an 80x25 terminal in
+/// half mode.
+pub const MIN_GPU_PIXELS: usize = 4_000;
+
+/// Decide how one request is rendered.
+///
+/// `post`: the GPU runs filters, grading, smoothing and cell packing.
+/// `world`: the GPU also draws the scene from its WGSL arm instead of running
+/// the Rust scene. Scenes are Rust artwork first — the WGSL worlds are opt-in
+/// via `scene::GPU_WORLD_SCENES` or `--renderer shader`. `bump` always keeps
+/// its CPU text layout.
+pub fn plan_backend(renderer: Renderer, has_gpu: bool, size: (usize, usize), name: &str) -> (bool, bool) {
+    let post = has_gpu && renderer != Renderer::Cpu && size.0 * size.1 >= MIN_GPU_PIXELS;
+    let world = post
+        && name != "bump"
+        && (renderer == Renderer::Shader || crate::scene::gpu_world(name));
+    (post, world)
+}
+
+/// Human-readable backend line for the settings menu.
+fn describe_backend(
+    renderer: Renderer,
+    adapter: Option<&str>,
+    errored: bool,
+    post: bool,
+    world: bool,
+) -> String {
+    match adapter {
+        Some(a) if world => format!("GPU world · {a}"),
+        Some(a) if post => format!("GPU post · {a} · CPU scene"),
+        Some(_) => "CPU · small canvas".into(),
+        None if errored => "CPU · GPU error (fallback)".into(),
+        None => match renderer {
+            Renderer::Cpu => "CPU · selected".into(),
+            Renderer::Gpu | Renderer::Shader => "CPU · GPU requested but unavailable".into(),
+            Renderer::Auto => {
+                if cfg!(feature = "gpu") {
+                    "CPU · GPU unavailable".into()
+                } else {
+                    "CPU · GPU feature not compiled".into()
+                }
+            }
+        },
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -135,24 +188,11 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
         None
     };
     #[cfg(feature = "gpu")]
-    let mut backend = gpu
-        .as_ref()
-        .map(|g| format!("GPU · {}", g.adapter_name()))
-        .unwrap_or_else(|| {
-            if renderer == Renderer::Cpu {
-                "CPU · selected"
-            } else {
-                "CPU · GPU unavailable"
-            }
-            .into()
-        });
+    let mut adapter: Option<String> = gpu.as_ref().map(|g| g.adapter_name().to_string());
     #[cfg(not(feature = "gpu"))]
-    let backend = if renderer == Renderer::Cpu {
-        "CPU · selected"
-    } else {
-        "CPU · GPU feature not compiled"
-    }
-    .to_string();
+    let adapter: Option<String> = None;
+    #[allow(unused_mut)]
+    let mut errored = false;
     let mut generation = 0;
     let mut player: Option<Playback> = None;
     let mut raw = Canvas::new(1, 1);
@@ -173,9 +213,14 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
         };
         let start = Instant::now();
         let k = &request.key;
+        // scenes see the pixel mode they will be shown in (aspect/orientation)
+        let opts = SceneOptions {
+            pixels: k.pixels,
+            ..k.opts.clone()
+        };
         if request.generation != generation {
             generation = request.generation;
-            player = Some(Playback::new(&k.name, &k.opts, k.seed));
+            player = Some(Playback::new(&k.name, &opts, k.seed));
             previous = Canvas::new(1, 1);
             elapsed_ms = request.elapsed_ms;
             #[cfg(feature = "gpu")]
@@ -191,20 +236,19 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
         #[cfg(feature = "gpu")]
         if gpu.as_ref().is_some_and(|g| g.failed()) {
             gpu = None;
-            backend = "CPU · GPU error (fallback)".into();
+            adapter = None;
+            errored = true;
         }
-        #[cfg(feature = "gpu")]
-        let gpu_scene = gpu.is_some();
-        #[cfg(not(feature = "gpu"))]
-        let gpu_scene = false;
-        if gpu_scene && k.name != "bump" {
+        let (gpu_post, gpu_world) = plan_backend(renderer, adapter.is_some(), k.size, &k.name);
+        let backend = describe_backend(renderer, adapter.as_deref(), errored, gpu_post, gpu_world);
+        if gpu_world {
             if (raw.width(), raw.height()) != k.size {
                 raw.resize(k.size.0, k.size.1);
             }
         } else {
             player.as_mut().unwrap().advance_cancellable(
                 &k.name,
-                &k.opts,
+                &opts,
                 k.size,
                 request.elapsed_ms,
                 request.speed,
@@ -229,12 +273,12 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
         #[allow(unused_mut)]
         let mut cells = None;
         #[cfg(feature = "gpu")]
-        if let Some(g) = &mut gpu {
+        if let Some(g) = gpu.as_mut().filter(|_| gpu_post) {
             g.resize(k.size.0, k.size.1, k.grid.0 * k.grid.1);
-            if k.name == "bump" {
-                g.canvas_frame();
+            if gpu_world {
+                g.scene_frame(&k.name, &opts, k.seed, t, request.speed);
             } else {
-                g.scene_frame(&k.name, &k.opts, k.seed, t, request.speed);
+                g.canvas_frame();
             }
             let plan = crate::gpu::Plan {
                 filters: &request.filters,
@@ -259,7 +303,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
         }
         // Initial GPU frames are in flight. Do not publish a blank CPU canvas
         // over the last completed image while waiting for asynchronous readback.
-        if gpu_scene && cells.is_none() {
+        if gpu_post && cells.is_none() {
             continue;
         }
         let mut canvas = raw.clone_for_smooth();
@@ -284,7 +328,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
             generation,
             canvas,
             cells,
-            backend: backend.clone(),
+            backend,
             render_ms: start.elapsed().as_secs_f32() * 1000.0,
         };
         let mut mailbox = shared.0.lock().unwrap();
@@ -321,6 +365,36 @@ mod tests {
             dim: 1.0,
             smooth: 0.0,
         }
+    }
+
+    #[test]
+    fn scenes_default_to_the_cpu_even_with_a_gpu() {
+        // the Rust scenes are the artwork: a GPU only post-processes them
+        for name in crate::scene::names() {
+            let (post, world) = plan_backend(Renderer::Auto, true, (200, 100), name);
+            assert!(post, "{name}: GPU post-processing expected");
+            assert_eq!(world, crate::scene::gpu_world(name), "{name}");
+        }
+        // shader mode opts every scene into its WGSL arm, except bump's text
+        assert_eq!(plan_backend(Renderer::Shader, true, (200, 100), "scroll"), (true, true));
+        assert_eq!(plan_backend(Renderer::Shader, true, (200, 100), "bump"), (true, false));
+        // no device, tiny canvas, or an explicit cpu choice: everything on the CPU
+        assert_eq!(plan_backend(Renderer::Auto, false, (200, 100), "scroll"), (false, false));
+        assert_eq!(plan_backend(Renderer::Auto, true, (40, 12), "scroll"), (false, false));
+        assert_eq!(plan_backend(Renderer::Cpu, true, (200, 100), "scroll"), (false, false));
+    }
+
+    #[test]
+    fn backend_line_names_the_path() {
+        assert_eq!(describe_backend(Renderer::Cpu, None, false, false, false), "CPU · selected");
+        assert_eq!(
+            describe_backend(Renderer::Gpu, None, false, false, false),
+            "CPU · GPU requested but unavailable"
+        );
+        assert_eq!(describe_backend(Renderer::Auto, None, true, false, false), "CPU · GPU error (fallback)");
+        assert_eq!(describe_backend(Renderer::Auto, Some("Navi"), false, true, false), "GPU post · Navi · CPU scene");
+        assert_eq!(describe_backend(Renderer::Shader, Some("Navi"), false, true, true), "GPU world · Navi");
+        assert_eq!(describe_backend(Renderer::Auto, Some("Navi"), false, false, false), "CPU · small canvas");
     }
 
     #[test]

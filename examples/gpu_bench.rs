@@ -75,6 +75,7 @@ fn make_canvas(w: usize, h: usize) -> Canvas {
         theme: None,
         detail: Detail::Low,
         text_scale: None,
+        pixels: Default::default(),
     };
     let mut s = scene::create("koi", &opts, StdRng::seed_from_u64(7)).unwrap();
     let mut c = Canvas::new(w, h);

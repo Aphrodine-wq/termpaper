@@ -7,8 +7,12 @@
 //!
 //! Why only that part: the benches in `examples/render_bench.rs` put a
 //! 272x33-cell braille frame at 7.4ms, of which 6.8ms is that arithmetic. The
-//! scene update stays on the CPU because 30-odd of the 47 scenes are stateful
-//! particle systems, not fragment functions.
+//! scene update stays on the CPU because the scenes are the artwork: stateful
+//! particle systems and rigs, not fragment functions. A scene can opt into
+//! being drawn by its WGSL arm in `shaders/world.wgsl` instead (the "GPU
+//! worlds", `scene::GPU_WORLD_SCENES` or `--renderer shader`); by default the
+//! worker uploads the CPU canvas with `canvas_frame` and the GPU only
+//! post-processes it.
 //!
 //! Two things make this a win rather than a wash at these tiny resolutions:
 //!
@@ -57,7 +61,7 @@ mod world;
 /// 4k px is roughly an 80x25 terminal in half mode — below that the whole
 /// frame is under 50us on the CPU and the GPU cannot save time that is not
 /// being spent.
-pub const MIN_GPU_PIXELS: usize = 4_000;
+pub const MIN_GPU_PIXELS: usize = crate::engine::MIN_GPU_PIXELS;
 
 /// Uniform slots reserved per frame. Every scheduled pass consumes one, and
 /// the worst realistic stack (a full filter list, grade, dim, smooth, pack) is
@@ -405,8 +409,9 @@ impl Gpu {
         self.world_frame = Some((name.into(), opts.clone(), seed, seconds, speed));
     }
 
-    /// Lightweight text scenes keep their authored CPU layout; the GPU still
-    /// handles their filters, grading, smoothing and terminal packing.
+    /// Use the uploaded CPU canvas as the frame — every scene not in
+    /// `scene::GPU_WORLD_SCENES` (and always `bump`). The GPU still handles
+    /// filters, grading, smoothing and terminal packing.
     pub fn canvas_frame(&mut self) {
         self.world_frame = None;
     }

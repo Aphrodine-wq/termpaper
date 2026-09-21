@@ -57,6 +57,10 @@ pub struct Config {
     /// link group name — instances in the same group sync; different groups stay independent
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// video-wall cropping when linked (default true); false renders the
+    /// local canvas and hides this window's geometry from peers
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wall: Option<bool>,
     /// per-scene remembered theme
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub themes: HashMap<String, String>,
@@ -260,6 +264,7 @@ mod tests {
             pixels: Some("quad".into()),
             filters: vec!["scanlines".into(), "vignette".into()],
             text_scale: Some(3),
+            wall: Some(false),
             ..Default::default()
         };
         cfg.themes.insert("airspace".into(), "golden".into());
@@ -272,6 +277,7 @@ mod tests {
         assert_eq!(back.pixels.as_deref(), Some("quad"));
         assert_eq!(back.filters, vec!["scanlines", "vignette"]);
         assert_eq!(back.text_scale, Some(3));
+        assert_eq!(back.wall, Some(false));
         assert_eq!(back.themes.get("airspace").map(|s| s.as_str()), Some("golden"));
         assert_eq!(back.keys.get("quit").map(|s| s.as_str()), Some("x"));
     }

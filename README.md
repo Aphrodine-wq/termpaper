@@ -234,7 +234,7 @@ Options:
       --switch <SCENE>      Publish a scene switch to linked instances and exit
       --all-groups          With --switch, publish to every link group
       --wall <COLSxROWS:IDX> Manual video-wall tile (e.g. 2x1:0)
-      --no-wall             Disable video-wall cropping
+      --no-wall             Never join a video wall (local canvas, geometry hidden from peers)
       --pad <PX>          Terminal padding in px (all sides) so wall crops
                           line up across window borders
   -h, --help              Print help
@@ -342,7 +342,7 @@ termpaper --group wallpaper rain   # right monitor
 ```sh
 termpaper --wall 2x1:0 --group wallpaper rain   # left half of a 2×1 wall
 termpaper --wall 2x1:1 --group wallpaper rain   # right half
-termpaper --no-wall                             # local canvas only
+termpaper --no-wall                             # local canvas only, never folded into a wall
 ```
 
 **Padding:** kitty/alacritty window margins? Set `pad = 7` or `--pad 7` so
@@ -451,12 +451,14 @@ termpaper fire --filter crt
 termpaper city --filter scanlines --filter vignette
 ```
 
-## GPU scene rendering (optional)
+## GPU post-processing (optional)
 
-Build with `gpu` to enable Vulkan scene rendering, simulations, filters,
-colour grading, smoothing and terminal-cell packing. `auto` selects the GPU
-when available; `cpu` keeps the original scene implementations. `--gpu`
-remains an alias for `--renderer gpu`.
+Build with `gpu` to run filters, colour grading, smoothing and terminal-cell
+packing on Vulkan. Scenes always run on the CPU — they are the artwork — and
+the worker uploads each frame for the GPU to finish. `auto` uses the GPU when
+compiled and available; `gpu` does the same but reports when the GPU is
+missing; `cpu` keeps everything on the CPU. `--gpu` remains an alias for
+`--renderer gpu`.
 
 ```sh
 cargo install termpaper --features gpu
@@ -465,30 +467,34 @@ termpaper plasma --renderer gpu --pixels braille --filter bloom
 termpaper scroll --renderer cpu
 ```
 
-Open `?` to see the active adapter or CPU fallback reason. Builds without the
-feature still work on the CPU. Device and validation errors trigger fallback.
+Open `?` to see the active path ("GPU post · adapter · CPU scene") or the CPU
+fallback reason. Builds without the feature still work on the CPU. Device and
+validation errors trigger fallback.
 
 Scene work runs in a separate worker with a single latest-request mailbox.
 Switches invalidate old frames; full GPU readback queues skip submissions
-instead of waiting on the input thread. Compiled scene pipelines are cached
-across switches and resizes. Bump keeps its original lightweight CPU text
-layout and uses GPU post-processing. Fire, Life, Boids, Sand and Reaction use
-fixed-step GPU simulation on a resolution-independent 192×192 world lattice.
+instead of waiting on the input thread.
+
+**GPU worlds (experimental).** `src/gpu/shaders/world.wgsl` carries a shader
+re-interpretation of the catalog. A scene listed in `scene::GPU_WORLD_SCENES`
+is drawn from its WGSL arm instead of its Rust code; the list is empty by
+default. `--renderer shader` forces the shader arm for every scene (Bump keeps
+its CPU text layout). Fire, Life, Boids, Sand and Reaction there use fixed-step
+simulation on a resolution-independent 192×192 lattice. The worlds are new
+interpretations, not pixel-identical ports; use the same backend, seed and
+settings across linked monitors.
 
 The default target is 120 FPS, with 144 available in Settings. This is a cap,
 not a guarantee: terminal escape-sequence throughput can still limit display
 rate. The worker timing in the menu is CPU submission time, not GPU timing or
-measured display FPS. For hardware measurements and scene image captures:
+measured display FPS. For hardware measurements and scene image captures
+(`--world` reviews the shader arms):
 
 ```sh
 cargo run --release --features gpu --example world_review -- all /tmp
+cargo run --release --features gpu --example world_review -- all /tmp --world
 cargo test --release --features gpu --test gpu_world -- --ignored
 ```
-
-The GPU worlds are new interpretations, not pixel-identical ports of the CPU
-artwork. Use the same backend, seed, settings and wall layout across linked
-monitors. Automatic cross-backend negotiation and exhaustive theme parity are
-not implemented; the CPU renderer remains available for the original artwork.
 
 **Fidelity.** `gpu_bench` checks the shaders against the CPU functions in two
 stages: every filter must land within one 8-bit step per channel (15 of 21 are
@@ -535,6 +541,7 @@ contrast = 1.0          # 0.5–2.5
 pad = 0                 # terminal padding px (wall alignment)
 link = true             # false = solo art
 group = "wallpaper"     # sync cluster
+wall = true             # false = never crop into a video wall
 clock = true
 text_scale = 2          # 1|2|3 — bump scene only
 # cycle = 30            # auto-rotate scenes (local only)

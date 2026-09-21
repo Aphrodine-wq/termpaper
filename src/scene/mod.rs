@@ -1,6 +1,7 @@
 //! Scene trait, options, themes, and registry.
 
 use crate::canvas::Canvas;
+use crate::render::Pixels;
 use rand::rngs::StdRng;
 
 pub mod abyss;
@@ -134,6 +135,10 @@ pub struct SceneOptions {
     pub detail: Detail,
     /// bump font scale override (1|2|3); None = auto
     pub text_scale: Option<u32>,
+    /// pixel mode the canvas will be shown in — gives scenes the on-screen
+    /// pixel aspect (see `Pixels::aspect`) so compositions stay round and
+    /// orientation-aware. The engine fills this in from the render request.
+    pub pixels: Pixels,
 }
 
 pub trait Scene {
@@ -302,7 +307,7 @@ pub const SCENES: &[SceneDef] = &[
         name: "den",
         desc: "a cozy room with a CRT playing other scenes",
         themes: &["night", "evening", "rain-outside"],
-        make: |rng, o| Box::new(den::Den::new(rng, o.theme.as_deref(), o.detail)),
+        make: |rng, o| Box::new(den::Den::new(rng, o.theme.as_deref(), o.detail, o.pixels)),
     },
     SceneDef {
         name: "traffic",
@@ -480,10 +485,30 @@ pub fn create(name: &str, opts: &SceneOptions, rng: StdRng) -> Option<Box<dyn Sc
     find(name).map(|s| (s.make)(rng, opts))
 }
 
+/// Scenes drawn by their WGSL arm in `src/gpu/shaders/world.wgsl` when a GPU
+/// is available, instead of running the Rust scene. Empty by default: the
+/// Rust scenes are the artwork and the GPU only post-processes and packs
+/// cells. `--renderer shader` treats every scene as if it were listed here.
+pub const GPU_WORLD_SCENES: &[&str] = &[];
+
+/// Whether the GPU should draw this scene from its shader arm.
+pub fn gpu_world(name: &str) -> bool {
+    GPU_WORLD_SCENES.contains(&name)
+}
+
 
 #[cfg(test)]
 mod option_tests {
     use super::*;
+
+    #[test]
+    fn gpu_world_allowlist_names_exist() {
+        for name in GPU_WORLD_SCENES {
+            assert!(find(name).is_some(), "GPU_WORLD_SCENES lists unknown scene {name}");
+            assert!(gpu_world(name));
+        }
+        assert!(!gpu_world("no-such-scene"));
+    }
 
     #[test]
     fn detail_scaling_changes_particle_counts() {
@@ -543,6 +568,7 @@ mod perf {
             theme: None,
             detail: Detail::High,
             text_scale: None,
+            pixels: Default::default(),
         };
         for name in names() {
             let mut s = create(name, &opts, StdRng::seed_from_u64(1)).unwrap();
@@ -576,6 +602,7 @@ mod scaling_tests {
                 theme: None,
                 detail: Detail::Medium,
                 text_scale: None,
+                pixels: Default::default(),
             };
             let mut s = create(name, &opts, StdRng::seed_from_u64(1)).unwrap();
             let mut c = Canvas::new(w, h);
@@ -609,6 +636,7 @@ mod scaling_tests {
             theme: None,
             detail: Detail::High,
             text_scale: None,
+            pixels: Default::default(),
         };
         for (w, h) in [(40, 12), (400, 200)] {
             for name in names() {
@@ -689,6 +717,7 @@ mod fast_forward_tests {
             theme: None,
             detail: Detail::High,
             text_scale: None,
+            pixels: Default::default(),
         };
         for name in names() {
             let mut s = create(name, &opts, StdRng::seed_from_u64(1)).unwrap();
@@ -724,6 +753,7 @@ mod clouds_perf_tests {
             theme: None,
             detail: Detail::High,
             text_scale: None,
+            pixels: Default::default(),
         };
         let mut s = create("clouds", &opts, StdRng::seed_from_u64(1)).unwrap();
         let mut c = Canvas::new(200, 100);
@@ -750,6 +780,7 @@ mod edge_coverage_tests {
             theme: None,
             detail: Detail::Medium,
             text_scale: None,
+            pixels: Default::default(),
         };
         for name in names() {
             if matches!(name, "bump" | "dvd") {
@@ -831,6 +862,7 @@ mod registry_tests {
             theme: theme.map(|t| t.to_string()),
             detail,
             text_scale: None,
+            pixels: Default::default(),
         }
     }
 
@@ -937,6 +969,7 @@ mod particle_trim_tests {
                 theme: None,
                 detail: Detail::High,
                 text_scale: None,
+                pixels: Default::default(),
             };
             let mut s = create(name, &opts, StdRng::seed_from_u64(11)).unwrap();
             let mut c = Canvas::new(160, 100);

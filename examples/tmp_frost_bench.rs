@@ -10,6 +10,7 @@ fn main() {
             theme: None,
             detail,
             text_scale: None,
+            pixels: Default::default(),
         };
         let mut s = scene::create("frost", &opts, StdRng::seed_from_u64(1)).unwrap();
         let mut canvas = Canvas::new(200, 100);

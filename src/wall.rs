@@ -259,13 +259,17 @@ fn axis_offsets(spans: &[(i32, i32, usize)], tol: i32) -> Vec<(i32, usize)> {
     offsets
 }
 
+/// Portrait and landscape panes never share a wall: a rotated monitor's
+/// content rect would stretch the virtual canvas to ~2x height, and every
+/// landscape pane would then render a crop of a picture composed for
+/// neither orientation. Square counts as landscape.
+fn landscape(content: (i32, i32, i32, i32)) -> bool {
+    content.2 >= content.3
+}
+
 /// Compute the shared virtual canvas + our crop. Deterministic: depends
 /// only on registry data, sorted by pid for tie-breaks.
 pub fn compute_layout(mut parts: Vec<Participant>, own_pid: u32) -> Option<WallLayout> {
-    if parts.len() < 2 || !parts.iter().any(|p| p.pid == own_pid) {
-        return None;
-    }
-    parts.sort_by_key(|p| p.pid);
     // content rect: window geometry inset by the terminal's padding
     let content = |p: &Participant| {
         (
@@ -275,6 +279,12 @@ pub fn compute_layout(mut parts: Vec<Participant>, own_pid: u32) -> Option<WallL
             (p.geo.h - 2 * p.pad.1).max(1),
         )
     };
+    let own_landscape = landscape(content(parts.iter().find(|p| p.pid == own_pid)?));
+    parts.retain(|p| landscape(content(p)) == own_landscape);
+    if parts.len() < 2 {
+        return None;
+    }
+    parts.sort_by_key(|p| p.pid);
     // rough px-per-cell, used only as an edge-merging tolerance
     let cell_w: f32 = parts
         .iter()
@@ -503,6 +513,46 @@ mod tests {
         .unwrap();
         assert!(layout.crop_x < layout.virtual_w);
         assert!(compute_layout(vec![part(1, 0, 0, 500, 500, 50, 25)], 1).is_none());
+    }
+
+    #[test]
+    fn portrait_pane_does_not_stretch_a_landscape_wall() {
+        // two 1920x1080 landscape monitors (kitty windows under a 30px bar)
+        // plus a rotated 1080x1920 monitor at x=3840 running its own art
+        let parts = vec![
+            part(1, 0, 30, 1920, 1050, 272, 33),
+            part(2, 1920, 30, 1920, 1050, 272, 33),
+            part(3, 3840, 0, 1080, 1920, 270, 213),
+        ];
+        let left = compute_layout(parts.clone(), 1).unwrap();
+        let right = compute_layout(parts.clone(), 2).unwrap();
+        assert_eq!((left.virtual_w, left.virtual_h), (544, 33));
+        assert_eq!((right.virtual_w, right.virtual_h), (544, 33));
+        assert_eq!((left.crop_x, left.crop_y), (0, 0));
+        assert_eq!((right.crop_x, right.crop_y), (272, 0));
+        // the lone portrait pane renders locally
+        assert!(compute_layout(parts, 3).is_none());
+    }
+
+    #[test]
+    fn portrait_pair_forms_its_own_wall() {
+        let parts = vec![
+            part(1, 0, 0, 1920, 1080, 272, 33),
+            part(2, 1920, 0, 1080, 1920, 135, 100),
+            part(3, 3000, 0, 1080, 1920, 135, 100),
+        ];
+        let a = compute_layout(parts.clone(), 2).unwrap();
+        let b = compute_layout(parts.clone(), 3).unwrap();
+        assert_eq!((a.virtual_w, a.virtual_h), (270, 100));
+        assert_eq!((a.crop_x, b.crop_x), (0, 135));
+        assert!(compute_layout(parts, 1).is_none());
+    }
+
+    #[test]
+    fn square_pane_counts_as_landscape() {
+        assert!(landscape((0, 0, 500, 500)));
+        assert!(landscape((0, 0, 501, 500)));
+        assert!(!landscape((0, 0, 500, 501)));
     }
 
     #[test]

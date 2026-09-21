@@ -62,3 +62,52 @@ fn gpu_replay_resize_and_backpressure() {
     assert!(gpu.run_blocking(&canvas, &plan).is_some());
     assert!(!gpu.failed());
 }
+
+#[test]
+#[ignore = "requires a real Vulkan device; run with --features gpu -- --ignored"]
+fn hybrid_canvas_frame_packs_cpu_scene() {
+    use rand::{rngs::StdRng, SeedableRng};
+    use termpaper::gpu::FrameCells;
+    let (w, h) = (48usize, 96usize);
+    let mut gpu = Gpu::new(w, h, w * h / 2).expect("Vulkan device required");
+    let mut canvas = Canvas::new(w, h);
+    let opts = SceneOptions {
+        pixels: Pixels::Half,
+        ..SceneOptions::default()
+    };
+    let mut scene = termpaper::scene::create("scroll", &opts, StdRng::seed_from_u64(42)).unwrap();
+    for _ in 0..30 {
+        scene.update(1.0 / 30.0, &mut canvas);
+    }
+    let plan = Plan {
+        filters: &[],
+        quick_filter: None,
+        t: 1.0,
+        hue_shift: 0.0,
+        saturation: 1.0,
+        contrast: 1.0,
+        dim: 1.0,
+        smooth: 0.0,
+        pixels: Pixels::Half,
+        cols: w,
+        rows: h / 2,
+        crop: (0, 0),
+    };
+    gpu.canvas_frame();
+    let words = gpu.run_blocking(&canvas, &plan).unwrap();
+    assert!(!gpu.failed());
+    let cells = FrameCells { words: &words, cols: w, rows: h / 2 };
+    let mut unique = std::collections::HashSet::new();
+    for i in 0..w * h / 2 {
+        let (_, a, b) = cells.get(i);
+        unique.insert(a);
+        unique.insert(b);
+    }
+    assert!(unique.len() > 8, "flat output ({} colors)", unique.len());
+    // half mode packs the two source pixels of a cell verbatim
+    for (x, row) in [(0usize, 0usize), (10, 20), (47, 47)] {
+        let (_, a, b) = cells.get(row * w + x);
+        assert_eq!(a, canvas.get(x as i32, (row * 2) as i32).color, "top pixel at {x},{row}");
+        assert_eq!(b, canvas.get(x as i32, (row * 2 + 1) as i32).color, "bottom pixel at {x},{row}");
+    }
+}

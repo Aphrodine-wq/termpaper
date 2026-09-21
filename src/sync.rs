@@ -56,9 +56,7 @@ impl Playback {
         cancelled: impl Fn() -> bool,
     ) {
         if (self.canvas.width(), self.canvas.height()) != size
-            || self.opts.theme != opts.theme
-            || self.opts.detail != opts.detail
-            || self.opts.text_scale != opts.text_scale
+            || self.opts != *opts
             || self.speed != speed
         {
             self.scene =
