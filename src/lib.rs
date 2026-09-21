@@ -1,5 +1,6 @@
 //! Library target so examples/benches can link the internals.
 //! The binary (main.rs) uses these same modules via `use termpaper::…`.
+pub mod anim;
 pub mod brand;
 pub mod canvas;
 pub mod color_grade;
