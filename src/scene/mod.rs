@@ -6,6 +6,7 @@ use rand::rngs::StdRng;
 
 pub mod abyss;
 pub mod airspace;
+pub mod alpine;
 pub mod aquarium;
 pub mod aurora;
 pub mod boids;
@@ -458,6 +459,12 @@ pub const SCENES: &[SceneDef] = &[
         desc: "endless ink-wash mountain scroll unrolling upward, made for portrait screens",
         themes: &["sumi", "night", "indigo"],
         make: |rng, o| Box::new(scroll::Scroll::new(rng, o.theme.as_deref(), o.detail)),
+    },
+    SceneDef {
+        name: "alpine",
+        desc: "alpine lake at dusk: parallax ridges under a sinking sun, a mirrored lake, a lone canoe",
+        themes: &["dusk", "dawn", "storm"],
+        make: |rng, o| Box::new(alpine::Alpine::new(rng, o.theme.as_deref(), o.detail, o.pixels)),
     },
 ];
 

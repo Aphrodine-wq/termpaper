@@ -1,6 +1,6 @@
 //! Reusable scenery, extracted so every scene draws stars, moons, ridges and
 //! pines the same way (and so a new scene gets them for free).
-use super::draw::{blend, blend_f, capsule, ellipse_f, Surface};
+use super::draw::{blend, blend_f, capsule, ellipse_f, polygon_fill, Surface};
 use super::Rgb;
 use crate::canvas::{lerp, scale, Canvas};
 use crate::scene::noise::{fbm, hash2, vnoise};
@@ -133,18 +133,30 @@ pub fn pine<S: Surface>(s: &mut S, x: f32, base_y: f32, height: f32, width: f32,
         return;
     }
     let top = base_y - height;
-    // trunk
-    capsule(s, x, base_y, width * 0.08 + 0.3, x, top + 1.0, 0.3, color, a);
-    // branch tiers: wider toward the base, each a tapered horizontal stroke
-    let tiers = (height / 2.5).clamp(2.0, 14.0) as i32;
+    // trunk peeking out under the foliage
+    capsule(s, x, base_y, width * 0.08 + 0.3, x, base_y - height * 0.2, 0.3, color, a);
+    // a solid stepped triangle: tiers notch the outline so it reads as a
+    // conifer rather than a plain wedge, and it stays solid at 3 px tall
+    let tiers = (height / 2.2).clamp(2.0, 9.0) as i32;
+    let mut right: Vec<(f32, f32)> = Vec::with_capacity(tiers as usize * 2 + 2);
+    let mut left: Vec<(f32, f32)> = Vec::with_capacity(tiers as usize * 2 + 2);
     for i in 0..tiers {
-        let f = (i as f32 + 0.5) / tiers as f32; // 0 top .. 1 base
-        let y = top + f * height * 0.92;
-        let half = width * 0.5 * (0.15 + 0.85 * f);
-        let droop = half * 0.35;
-        capsule(s, x, y, 0.35 + f * 0.3, x - half, y + droop, 0.3, color, a);
-        capsule(s, x, y, 0.35 + f * 0.3, x + half, y + droop, 0.3, color, a);
+        let f0 = i as f32 / tiers as f32;
+        let f1 = (i + 1) as f32 / tiers as f32;
+        let y1 = top + f1 * height * 0.9;
+        let half1 = width * 0.5 * (0.12 + 0.88 * f1);
+        let half0 = width * 0.5 * (0.12 + 0.88 * f0);
+        // tier bottom edge, then notch back in for the next tier
+        right.push((x + half1, y1));
+        right.push((x + half0.max(half1 * 0.55), y1 + 0.2));
+        left.push((x - half1, y1));
+        left.push((x - half0.max(half1 * 0.55), y1 + 0.2));
     }
+    let mut pts = vec![(x, top)];
+    pts.extend(right.iter().copied());
+    pts.push((x, base_y - height * 0.1));
+    pts.extend(left.iter().rev().copied());
+    polygon_fill(s, &pts, color, a);
 }
 
 /// A rounded deciduous tree: trunk and a lumpy canopy built from a few

@@ -16,7 +16,7 @@ fn world_shader_is_valid_without_a_gpu() {
 // falls into the shader's `default:` and is CPU-rendered unless allowlisted.
 #[test]
 fn shader_scene_ids_match_catalog_order() {
-    let expected = "rain starfield fire pipes plasma aurora life boids lava tunnel dvd bump canopy finale ocean circuits clouds mandel meteors koi sand city abyss den traffic nexus ripple fireflies lanterns incense frost orbits ribbons sonar tide clockwork grid inkdrop mosaic harmonograph nebula pendulum reaction meadow airspace aquarium drive candy scroll";
+    let expected = "rain starfield fire pipes plasma aurora life boids lava tunnel dvd bump canopy finale ocean circuits clouds mandel meteors koi sand city abyss den traffic nexus ripple fireflies lanterns incense frost orbits ribbons sonar tide clockwork grid inkdrop mosaic harmonograph nebula pendulum reaction meadow airspace aquarium drive candy scroll alpine";
     assert_eq!(
         termpaper::scene::names(),
         expected.split_whitespace().collect::<Vec<_>>()
