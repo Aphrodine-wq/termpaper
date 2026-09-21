@@ -41,6 +41,8 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub renderer: Option<crate::engine::Renderer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pad: Option<i32>,
     /// global hue rotation in degrees (0 = off)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -64,7 +66,7 @@ pub struct Config {
 }
 
 /// Built-in runtime defaults (empty config file, no CLI overrides).
-pub const DEFAULT_FPS: u32 = 60;
+pub const DEFAULT_FPS: u32 = 120;
 pub const DEFAULT_SPEED: f32 = 1.0;
 pub const DEFAULT_SMOOTH: f32 = 0.3;
 pub const DEFAULT_DIM: f32 = 1.0;

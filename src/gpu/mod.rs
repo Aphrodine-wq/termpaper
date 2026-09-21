@@ -43,6 +43,7 @@ use std::sync::Arc;
 
 use crate::canvas::{Canvas, Cell};
 use crate::render::Pixels;
+mod world;
 
 /// Below this pixel count the GPU path is not worth its setup cost.
 ///
@@ -109,6 +110,8 @@ struct Pass {
 struct Slot {
     buf: wgpu::Buffer,
     ready: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
+    serial: usize,
     /// Cells the in-flight copy will contain, or None when the slot is idle.
     pending: Option<usize>,
 }
@@ -168,8 +171,12 @@ pub struct Gpu {
     readback: Vec<u32>,
     /// Cells `readback` describes, so a terminal resize invalidates it.
     readback_cells: usize,
+    readback_serial: Option<usize>,
+    failed: Arc<AtomicBool>,
 
     adapter_name: String,
+    world: Option<world::World>,
+    world_frame: Option<(String, crate::scene::SceneOptions, u64, f32, f32)>,
 }
 
 /// The finished cells of a frame, ready to be written into a ratatui buffer.
@@ -241,12 +248,18 @@ impl Gpu {
         }))
         .ok()?;
 
-        // A validation error would otherwise abort the process from a
-        // background thread; downgrade it to a log line and let the frame come
-        // out wrong rather than taking the wallpaper down.
-        device.on_uncaptured_error(Arc::new(|e| {
+        // Let the worker switch to CPU instead of repeatedly submitting to a
+        // failed device or leaving the terminal permanently blank.
+        let failed = Arc::new(AtomicBool::new(false));
+        let error_flag = failed.clone();
+        device.on_uncaptured_error(Arc::new(move |e| {
+            error_flag.store(true, Ordering::Release);
             eprintln!("termpaper: gpu error: {e}");
         }));
+        let lost_flag = failed.clone();
+        device.set_device_lost_callback(move |_reason, _message| {
+            lost_flag.store(true, Ordering::Release);
+        });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("post"),
@@ -359,11 +372,15 @@ impl Gpu {
             upload: Vec::new(),
             readback: Vec::new(),
             readback_cells: 0,
+            readback_serial: None,
+            failed,
             device,
             queue,
             pipelines,
             layout,
             adapter_name,
+            world: None,
+            world_frame: None,
         };
         gpu.resize(width, height, max_cells);
         Some(gpu)
@@ -371,6 +388,27 @@ impl Gpu {
 
     pub fn adapter_name(&self) -> &str {
         &self.adapter_name
+    }
+
+    pub fn failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
+    /// Invalidate old scene frames without waiting for outstanding commands.
+    pub fn invalidate(&mut self) {
+        let (w, h) = self.dims;
+        self.dims = (0, 0);
+        self.resize(w, h, self.cell_capacity);
+    }
+
+    pub fn scene_frame(&mut self, name: &str, opts: &crate::scene::SceneOptions, seed: u64, seconds: f32, speed: f32) {
+        self.world_frame = Some((name.into(), opts.clone(), seed, seconds, speed));
+    }
+
+    /// Lightweight text scenes keep their authored CPU layout; the GPU still
+    /// handles their filters, grading, smoothing and terminal packing.
+    pub fn canvas_frame(&mut self) {
+        self.world_frame = None;
     }
 
     fn pixel_buffer(device: &wgpu::Device, px: usize, label: &str) -> wgpu::Buffer {
@@ -452,6 +490,8 @@ impl Gpu {
                     mapped_at_creation: false,
                 }),
                 ready: Arc::new(AtomicBool::new(false)),
+                failed: Arc::new(AtomicBool::new(false)),
+                serial: 0,
                 pending: None,
             })
             .collect();
@@ -463,6 +503,10 @@ impl Gpu {
         self.upload.resize(px, 0);
         self.readback.clear();
         self.readback_cells = 0;
+        self.readback_serial = None;
+        if let Some(world) = &mut self.world {
+            world.reset(&self.device, (width, height));
+        }
     }
 
     /// Whether the GPU path is expected to beat the CPU at this size.
@@ -598,10 +642,17 @@ impl Gpu {
     /// uniform slots than are reserved, in which case nothing is submitted and
     /// the caller should fall back to the CPU for this frame.
     pub fn submit(&mut self, canvas: &Canvas, plan: &Plan) -> bool {
+        if self.failed() { return false; }
         let (w, h) = self.dims;
         debug_assert_eq!((canvas.width(), canvas.height()), (w, h));
         let cells = plan.cols * plan.rows;
         if cells == 0 || cells > self.cell_capacity {
+            return false;
+        }
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        let slot_idx = self.frame % SLOTS;
+        if self.slots[slot_idx].pending.is_some() {
+            // A full ring is backpressure, never a reason to wait for the GPU.
             return false;
         }
 
@@ -612,13 +663,19 @@ impl Gpu {
 
         // Pack the canvas. The glyph flag rides in the top byte so the shaders
         // know which cells hold text without needing the characters.
-        for (dst, cell) in self.upload.iter_mut().zip(canvas.cells_raw()) {
-            let (r, g, b) = cell.color;
-            let fl = u32::from(cell.ch.is_some());
-            *dst = r as u32 | (g as u32) << 8 | (b as u32) << 16 | fl << 24;
+        if let Some((name, opts, seed, seconds, speed)) = &self.world_frame {
+            let world = self.world.get_or_insert_with(|| world::World::new(&self.device, self.dims));
+            world.render(&self.device, &self.queue, &self.buf_a, self.dims,
+                name, opts, *seed, *seconds, *speed);
+            if self.failed() { return false; }
+        } else {
+            for (dst, cell) in self.upload.iter_mut().zip(canvas.cells_raw()) {
+                let (r, g, b) = cell.color;
+                let fl = u32::from(cell.ch.is_some());
+                *dst = r as u32 | (g as u32) << 8 | (b as u32) << 16 | fl << 24;
+            }
+            self.queue.write_buffer(&self.buf_a, 0, bytemuck::cast_slice(&self.upload));
         }
-        self.queue
-            .write_buffer(&self.buf_a, 0, bytemuck::cast_slice(&self.upload));
 
         // Smoothing reads history; on the first frame at a new size there is
         // none, so seed it with the current frame — same as the CPU path,
@@ -641,14 +698,6 @@ impl Gpu {
             raw[i * stride..i * stride + bytes.len()].copy_from_slice(bytes);
         }
         self.queue.write_buffer(&self.params_buf, 0, &raw);
-
-        let slot_idx = self.frame % SLOTS;
-        if self.slots[slot_idx].pending.is_some() {
-            // The ring wrapped before a map came back. Drain it rather than
-            // silently overwriting a buffer the GPU may still be copying into.
-            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-            self.reclaim(slot_idx);
-        }
 
         let mut enc = self
             .device
@@ -688,15 +737,20 @@ impl Gpu {
         let ready = self.slots[slot_idx].ready.clone();
         ready.store(false, Ordering::Release);
         let cb_ready = ready.clone();
+        let failed = self.slots[slot_idx].failed.clone();
+        failed.store(false, Ordering::Release);
         self.slots[slot_idx]
             .buf
             .slice(..(cells * CELL_WORDS * 4) as u64)
             .map_async(wgpu::MapMode::Read, move |res| {
                 if res.is_ok() {
                     cb_ready.store(true, Ordering::Release);
+                } else {
+                    failed.store(true, Ordering::Release);
                 }
             });
         self.slots[slot_idx].pending = Some(cells);
+        self.slots[slot_idx].serial = self.frame;
         self.frame += 1;
         true
     }
@@ -705,6 +759,7 @@ impl Gpu {
         if self.slots[i].pending.take().is_some() {
             self.slots[i].buf.unmap();
             self.slots[i].ready.store(false, Ordering::Release);
+            self.slots[i].failed.store(false, Ordering::Release);
         }
     }
 
@@ -715,31 +770,31 @@ impl Gpu {
     /// flight yet — and the caller draws that one on the CPU.
     pub fn poll_cells(&mut self, cols: usize, rows: usize) -> Option<FrameCells<'_>> {
         let _ = self.device.poll(wgpu::PollType::Poll);
-        // The frame before the one just submitted.
-        if self.frame < 2 {
-            return None;
-        }
-        let i = (self.frame - 2) % SLOTS;
-        let n = self.slots[i].pending?;
-        if !self.slots[i].ready.load(Ordering::Acquire) {
-            return None;
-        }
-        if n != cols * rows {
-            // terminal resized between submit and read — that frame is stale
+        let mut ready: Vec<_> = (0..self.slots.len())
+            .filter(|&i| self.slots[i].pending.is_some()
+                && (self.slots[i].ready.load(Ordering::Acquire)
+                    || self.slots[i].failed.load(Ordering::Acquire)))
+            .collect();
+        ready.sort_by_key(|&i| self.slots[i].serial);
+        for i in ready {
+            let n = self.slots[i].pending.unwrap();
+            if self.slots[i].failed.load(Ordering::Acquire) {
+                self.failed.store(true, Ordering::Release);
+            }
+            if n == cols * rows && !self.slots[i].failed.load(Ordering::Acquire)
+                && self.readback_serial.is_none_or(|serial| self.slots[i].serial > serial) {
+                if let Ok(view) = self.slots[i].buf.slice(..(n * CELL_WORDS * 4) as u64).get_mapped_range() {
+                    self.readback.clear();
+                    self.readback.extend_from_slice(bytemuck::cast_slice(&view[..]));
+                    self.readback_cells = n;
+                    self.readback_serial = Some(self.slots[i].serial);
+                }
+            }
             self.reclaim(i);
+        }
+        if self.readback_cells != cols * rows || self.readback.is_empty() {
             return None;
         }
-        {
-            let view = self.slots[i]
-                .buf
-                .slice(..(n * CELL_WORDS * 4) as u64)
-                .get_mapped_range();
-            self.readback.clear();
-            let view = view.ok()?;
-            self.readback
-                .extend_from_slice(bytemuck::cast_slice(&view[..]));
-        }
-        self.reclaim(i);
         Some(FrameCells {
             words: &self.readback,
             cols,
@@ -755,6 +810,7 @@ impl Gpu {
             self.reclaim(i);
         }
         self.frame = 0;
+        self.readback_serial = None;
     }
 
     /// Run one plan start to finish and return the finished cells, blocking on

@@ -1,6 +1,6 @@
 //! termpaper — Wallpaper Engine for the terminal. Live truecolor worlds.
 
-use termpaper::{canvas, color_grade, color_wheel, config, filter, link, menu, render, scene, transition, wall};
+use termpaper::{color_wheel, config, filter, link, menu, render, scene, transition, wall};
 
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -67,12 +67,14 @@ struct Args {
     #[arg(long)]
     no_truecolor: bool,
 
-    /// Run the post-processing chain (filters, grading, smoothing and the
-    /// pixels-to-cells packing) on the GPU. Requires a build with
-    /// `--features gpu` and a working Vulkan device; falls back to the CPU
-    /// silently if either is missing.
+    /// Legacy alias for --renderer gpu. Requires --features gpu and Vulkan;
+    /// falls back to CPU if unavailable (shown in the settings menu).
     #[arg(long)]
     gpu: bool,
+
+    /// Rendering backend (auto prefers the GPU when compiled and available)
+    #[arg(long, value_enum)]
+    renderer: Option<termpaper::engine::Renderer>,
 
     /// Screensaver mode: any key exits
     #[arg(long)]
@@ -247,7 +249,7 @@ fn main() -> std::io::Result<()> {
     } else {
         args.filter.clone()
     };
-    let fps = args.fps.or(cfg.fps).unwrap_or(60).clamp(1, 240);
+    let fps = args.fps.or(cfg.fps).unwrap_or(config::DEFAULT_FPS).clamp(1, 240);
     let idle_fps = args.idle_fps.or(cfg.idle_fps).map(|f| f.clamp(1, 240));
     let speed = args.speed.or(cfg.speed).unwrap_or(1.0);
     let cycle = args.cycle.or(cfg.cycle).filter(|c| *c > 0.0);
@@ -267,7 +269,14 @@ fn main() -> std::io::Result<()> {
         .or(cfg.group.clone())
         .map(|g| link::sanitize_group(&g))
         .unwrap_or_else(|| "default".into());
-    let cfg_gpu = cfg.gpu.unwrap_or(false);
+    let renderer = args.renderer.unwrap_or_else(|| {
+        if args.gpu { termpaper::engine::Renderer::Gpu }
+        else { cfg.renderer.unwrap_or_else(|| match cfg.gpu {
+            Some(true) => termpaper::engine::Renderer::Gpu,
+            Some(false) => termpaper::engine::Renderer::Cpu,
+            None => termpaper::engine::Renderer::Auto,
+        }) }
+    });
     let settings = Settings {
         link_enabled,
         link_group,
@@ -293,7 +302,7 @@ fn main() -> std::io::Result<()> {
         contrast,
         screensaver: args.screensaver,
         truecolor: detect_truecolor() && !args.no_truecolor,
-        gpu: args.gpu || cfg_gpu,
+        renderer,
     };
 
     let mut terminal = ratatui::init();
@@ -333,7 +342,7 @@ struct Settings {
     contrast: f32,
     screensaver: bool,
     truecolor: bool,
-    gpu: bool,
+    renderer: termpaper::engine::Renderer,
 }
 
 /// Snapshot the current runtime settings for broadcast.
@@ -348,13 +357,6 @@ const MAX_CATCHUP: usize = 4;
 /// Debt past this is written off: returning from suspend should not simulate
 /// minutes of scene time to catch up.
 const MAX_DEBT: f32 = 1.5;
-
-/// Linked-switch fast-forward: cap the catch-up target at 30s of sim time
-/// and spend it across frames under a strict per-frame budget, so adopting
-/// a peer's (seed, t0) never freezes a frame.
-const FF_MAX_STEPS: usize = 1800;
-const FF_STEPS_PER_FRAME: usize = 90;
-const FF_FRAME_BUDGET: Duration = Duration::from_millis(2);
 
 /// Spend owed wall time as bounded simulation steps, draining `debt`.
 ///
@@ -414,6 +416,7 @@ fn persist(settings: &mut Settings, scene_name: &str, opts: &SceneOptions) {
     cfg.clock = Some(settings.clock);
     cfg.cycle = settings.cycle;
     cfg.fps = Some(settings.fps);
+    cfg.renderer = Some(settings.renderer);
     cfg.speed = Some(settings.speed);
     cfg.hue_shift = if settings.hue_shift < 0.5 {
         None
@@ -519,16 +522,11 @@ fn run(
     } else {
         None
     };
-    // start the stamp at launch time so a leftover control.json from an
-    // older session can't override the scene chosen on the command line;
-    // the 15s heartbeat re-publish converges the group soon after anyway
-    let mut control_stamp = link::Stamp {
-        epoch: link::epoch_now_ms(),
-        seq: 0,
-        from_pid: 0,
-    };
+    // Guard reaps dead sessions; adopt a living group's scene immediately.
+    let mut control_stamp = link::Stamp::default();
     // artwork sync: (seed, t0_ms) for the next scene creation, if any
     let mut sync_params: Option<(u64, u64)> = None;
+    let mut sync_theme: Option<Option<String>> = None;
     // sync params of the scene currently on screen — lets receivers skip
     // identical re-publishes (heartbeat/duplicates) without a visible
     // restart, and lets the leader re-publish the exact same sim state
@@ -553,39 +551,27 @@ fn run(
         .position(|n| *n == start_scene)
         .unwrap_or(0);
     let mut current = scene::create(names[idx], &opts, entropy_rng()).expect("validated");
-    let mut canvas = canvas::Canvas::new(1, 1);
-    let mut prev_canvas = canvas::Canvas::new(1, 1);
-    // linked-switch fast-forward state: steps still owed, and a persistent
-    // scratch canvas the catch-up updates render into (never shown)
-    let mut ff_remaining = 0usize;
-    let mut ff_scratch = canvas::Canvas::new(1, 1);
-    // Scratch for the CPU fallback while the GPU pipeline is filling. The
-    // fallback must not run in `canvas`: `canvas` holds the raw scene output
-    // that the next GPU submit uploads, and filtering it in place would apply
-    // the chain twice.
-    #[cfg(feature = "gpu")]
-    let mut cpu_scratch = canvas::Canvas::new(1, 1);
-    #[cfg(not(feature = "gpu"))]
-    if settings.gpu {
-        eprintln!(
-            "termpaper: --gpu ignored — this build has no GPU backend \
-             (rebuild with `cargo install termpaper --features gpu`)"
-        );
-    }
-    #[cfg(feature = "gpu")]
-    let mut gpu = if settings.gpu {
-        // dimensions are set by the first `resize` inside the frame loop
-        let g = termpaper::gpu::Gpu::new(1, 1, 1);
-        if g.is_none() {
-            eprintln!("termpaper: --gpu requested but no usable Vulkan device; staying on the CPU");
+    if let Some(g) = &mut guard {
+        if let Some(ctrl) = g.latest_scene() {
+            sync_params = Some((ctrl.seed, ctrl.t0_ms));
+            cur_sync = sync_params;
+            sync_theme = Some(ctrl.theme);
+            if let Some(i) = names.iter().position(|n| *n == ctrl.scene) {
+                transition.request(i);
+            }
+        } else {
+            let seed = rand::rng().random();
+            let t0 = link::epoch_now_ms();
+            cur_sync = Some((seed, t0));
+            g.publish(names[idx], opts.theme.as_deref(), seed, t0);
         }
-        g
-    } else {
-        None
-    };
+    }
+    let mut worker = termpaper::engine::Worker::new(settings.renderer);
+    let mut rendered: Option<termpaper::engine::Frame> = None;
+    let mut local_seed: u64 = rand::rng().random();
+    let mut local_elapsed = 0.0f64;
     let mut wall_layout: Option<wall::WallLayout> = None;
     let mut wall_refresh = Instant::now() - Duration::from_secs(10);
-    // compositor geometry arrives from a background thread — spawning
     // hyprctl inside the frame loop stalls the frame it lands on
     let geo_watcher = if settings.link_enabled || settings.wall_spec.is_some() {
         Some(wall::GeoWatcher::spawn())
@@ -626,6 +612,7 @@ fn run(
         // transition fades are cosmetic: clamp and never carry a remainder
         let raw_dt = wall_dt.min(MAX_STEP);
         last_frame = now;
+        if !paused { local_elapsed += wall_dt as f64; }
 
         // Scene time is owed against the wall clock. Linked instances agree on
         // a scene only because each simulates `now - t0` worth of time, so any
@@ -633,7 +620,7 @@ fn run(
         // discarded — otherwise every frame that overruns MAX_STEP leaves this
         // pane permanently behind its peers, and the 15s heartbeat won't repair
         // it (peers already holding this (seed, t0) skip the rebuild).
-        let (step_dt, n_steps) = if paused {
+        let (_step_dt, _n_steps) = if paused {
             // frozen: accrue nothing and spend nothing, but still redraw. Note
             // debt left over from a hitch must not be drained here either, or
             // the scene would keep creeping forward while paused.
@@ -720,9 +707,7 @@ fn run(
                             // already running this exact sim, skip silently
                             let identical = i == idx && cur_sync == Some((ctrl.seed, ctrl.t0_ms));
                             if !identical {
-                                if let Some(t) = &ctrl.theme {
-                                    opts.theme = Some(t.clone());
-                                }
+                                sync_theme = Some(ctrl.theme);
                                 sync_params = Some((ctrl.seed, ctrl.t0_ms));
                                 transition.request(i);
                                 last_switch = Instant::now();
@@ -763,7 +748,7 @@ fn run(
                                 opts.text_scale = m.text_scale;
                                 recreate = true;
                             }
-                            if recreate {
+                            if recreate && cur_sync.is_none() {
                                 transition.request(idx);
                                 sync_params = None;
                             }
@@ -777,12 +762,10 @@ fn run(
         let (fade, swap) = transition.tick(raw_dt);
         if let Some(i) = swap {
             idx = i % names.len();
-            opts.theme = settings
-                .cfg
-                .themes
-                .get(names[idx])
-                .cloned()
-                .or_else(|| settings.theme.clone());
+            opts.theme = sync_theme.take().unwrap_or_else(|| {
+                settings.cfg.themes.get(names[idx]).cloned()
+                    .or_else(|| settings.theme.clone())
+            });
             // artwork sync: linked switches carry (seed, t0) so every
             // instance builds the identical simulation
             let sp = sync_params.take();
@@ -792,39 +775,13 @@ fn run(
                 None => entropy_rng(),
             };
             current = scene::create(names[idx], &opts, rng).expect("registry");
-            ff_remaining = match sp {
-                Some((_, t0)) => {
-                    // fast-forward to the publisher's sim time — but spread
-                    // across frames (see below) instead of freezing this one.
-                    // Cap at 30s of sim: beyond that "approximately synced"
-                    // is indistinguishable for generative art, and peers
-                    // holding the same (seed, t0) skip rebuilds anyway.
-                    let elapsed_ms = link::epoch_now_ms().saturating_sub(t0);
-                    ff_scratch.resize(canvas.width().max(1), canvas.height().max(1));
-                    ((elapsed_ms as f32 / (1000.0 / 60.0)) as usize).min(FF_MAX_STEPS)
-                }
-                None => 0,
-            };
+            local_seed = rand::rng().random();
+            local_elapsed = 0.0;
+            sim_debt = 0.0;
             if let Some(g) = &mut guard {
                 g.set_scene(names[idx]);
             }
             last_switch = now;
-        }
-
-        // spend any owed fast-forward: the scene animates (fast) through
-        // the fade-in and converges within ~20 frames instead of freezing
-        // for up to 200ms at the darkest point of the transition
-        if ff_remaining > 0 {
-            let ff_start = Instant::now();
-            let mut spent = 0usize;
-            while ff_remaining > 0
-                && spent < FF_STEPS_PER_FRAME
-                && ff_start.elapsed() < FF_FRAME_BUDGET
-            {
-                current.update(1.0 / 60.0, &mut ff_scratch);
-                ff_remaining -= 1;
-                spent += 1;
-            }
         }
 
         // video wall: refresh layout every 2s from registry geometry
@@ -891,110 +848,44 @@ fn run(
         terminal.draw(|f| {
             let area = f.area();
             let (pw, ph) = settings.pixels.cell_size();
-            let (w, h2) = match wall_layout {
+            let size = match wall_layout {
                 Some(l) => (l.virtual_w * pw, l.virtual_h * ph),
                 None => (area.width as usize * pw, area.height as usize * ph),
             };
-            if canvas.width() != w || canvas.height() != h2 {
-                canvas.resize(w, h2);
+            let crop = wall_layout.map(|l| (l.crop_x * pw, l.crop_y * ph)).unwrap_or((0, 0));
+            let (seed, elapsed_ms) = cur_sync.map(|(s, t0)| (s, link::epoch_now_ms().saturating_sub(t0)))
+                .unwrap_or((local_seed, (local_elapsed * 1000.0) as u64));
+            let request = termpaper::engine::Request {
+                generation: 0,
+                key: termpaper::engine::SceneKey {
+                    name: names[idx].into(), seed, opts: opts.clone(), size,
+                    grid: (area.width as usize, area.height as usize), crop, pixels: settings.pixels,
+                },
+                elapsed_ms, speed: settings.speed, paused, filters: settings.filters.clone(),
+                quick: quick_filter.clone(), hue: settings.hue_shift, saturation: settings.saturation,
+                contrast: settings.contrast, dim: fade * settings.dim, smooth: settings.smooth,
+            };
+            if let Some(frame) = worker.submit(request) { rendered = Some(frame); }
+            if rendered.as_ref().is_some_and(|frame| frame.generation != worker.generation()) {
+                rendered = None;
             }
-            // usually one step; more only when repaying time lost to a hitch
-            for s in step_dt.iter().take(n_steps) {
-                current.update(*s, &mut canvas);
-            }
-            let t = launch.elapsed().as_secs_f32();
-
-            // The GPU runs the same chain in compute shaders and hands back
-            // finished terminal cells. It is one frame behind by design — the
-            // readback never fences — so the first frame or two after startup
-            // and after every resize still come from the CPU below.
-            #[allow(unused_mut)] // only the GPU branch below ever sets this
-            let mut drawn = false;
-            #[cfg(feature = "gpu")]
-            if let Some(g) = gpu.as_mut() {
-                let (cols, rows) = (area.width as usize, area.height as usize);
-                let crop = match wall_layout {
-                    Some(l) => (l.crop_x * pw, l.crop_y * ph),
-                    None => (0, 0),
-                };
-                if termpaper::gpu::Gpu::should_use(w, h2) && cols * rows > 0 {
-                    g.resize(w, h2, cols * rows);
-                    let plan = termpaper::gpu::Plan {
-                        filters: &settings.filters,
-                        quick_filter: quick_filter.as_deref(),
-                        t,
-                        hue_shift: settings.hue_shift,
-                        saturation: settings.saturation,
-                        contrast: settings.contrast,
-                        dim: fade * settings.dim,
-                        smooth: settings.smooth,
-                        pixels: settings.pixels,
-                        cols,
-                        rows,
-                        crop,
-                    };
-                    g.submit(&canvas, &plan);
-                    if let Some(cells) = g.poll_cells(cols, rows) {
-                        termpaper::gpu::blit(
-                            &cells,
-                            &canvas,
-                            crop,
-                            settings.pixels,
-                            area,
-                            f.buffer_mut(),
-                            settings.truecolor,
-                        );
-                        drawn = true;
-                    }
-                }
-            }
-
-            if !drawn {
-                // The CPU chain. When the GPU owns `canvas` this runs on a copy,
-                // because `canvas` must stay as the raw scene output for the next
-                // submit; otherwise it filters in place as it always has.
+            if let Some(frame) = &rendered {
+                #[allow(unused_mut)]
+                let mut drawn = false;
                 #[cfg(feature = "gpu")]
-                let work = if gpu.is_some() {
-                    canvas.snapshot_into(&mut cpu_scratch);
-                    &mut cpu_scratch
-                } else {
-                    &mut canvas
-                };
-                #[cfg(not(feature = "gpu"))]
-                let work = &mut canvas;
-
-                filter::apply_all(&settings.filters, work, t);
-                color_grade::apply(
-                    work,
-                    settings.hue_shift,
-                    settings.saturation,
-                    settings.contrast,
-                );
-                if let Some(qf) = &quick_filter {
-                    filter::apply(qf, work, t);
+                if let Some(words) = &frame.cells {
+                    let cells = termpaper::gpu::FrameCells {
+                        words, cols: area.width as usize, rows: area.height as usize,
+                    };
+                    termpaper::gpu::blit(&cells, &frame.canvas, crop, settings.pixels, area,
+                        f.buffer_mut(), settings.truecolor);
+                    drawn = true;
                 }
-                canvas::dim(work, fade * settings.dim);
-                // temporal smoothing (glyph cells excluded inside smooth_blend)
-                if settings.smooth > 0.001 {
-                    work.smooth_blend(&prev_canvas, 1.0 - settings.smooth);
-                    // reuse the snapshot buffer: allocating a fresh canvas every
-                    // frame churned the allocator at the frame rate
-                    work.snapshot_into(&mut prev_canvas);
-                }
-                match wall_layout {
-                    Some(l) => render::draw_crop(
-                        work,
-                        l.crop_x as i32 * pw as i32,
-                        l.crop_y as i32 * ph as i32,
-                        area,
-                        f.buffer_mut(),
-                        settings.truecolor,
-                        settings.pixels,
-                    ),
-                    None => render::draw(work, area, f.buffer_mut(), settings.truecolor, settings.pixels),
+                if !drawn {
+                    render::draw_crop(&frame.canvas, crop.0 as i32, crop.1 as i32, area,
+                        f.buffer_mut(), settings.truecolor, settings.pixels);
                 }
             }
-
             // bottom-left hint, fading out over its last second
             let hint_age = launch.elapsed().as_secs_f32();
             if hint_age < 4.0 && !menu.open {
@@ -1039,6 +930,8 @@ fn run(
             // the menu floats over the live scene
             if menu.open {
                 let ctx = MenuCtx {
+                    renderer_status: rendered.as_ref().map(|f| format!("{} · worker {:.1} ms", f.backend, f.render_ms))
+                        .unwrap_or_else(|| "Renderer initializing…".into()),
                     scene_name: names[idx],
                     scene_idx: idx,
                     pixels: settings.pixels,
@@ -1099,12 +992,15 @@ fn run(
         // into dropped frames. 100us holds jitter at ~0.025ms — 0.6% of a
         // 240fps frame — for ~1% CPU.
         let deadline = last_frame + frame_dur;
+        let mut events_handled = 0;
         loop {
             let now2 = Instant::now();
-            if now2 >= deadline {
+            // Rendering may already have exhausted the frame budget. Always
+            // poll input anyway; otherwise expensive scenes become inescapable.
+            if events_handled >= 64 {
                 break;
             }
-            let remaining = deadline - now2;
+            let remaining = deadline.saturating_duration_since(now2);
             let coarse = remaining.saturating_sub(SPIN_TAIL);
             let has_event = if coarse.is_zero() {
                 event::poll(Duration::ZERO)?
@@ -1112,6 +1008,7 @@ fn run(
                 event::poll(coarse)?
             };
             if has_event {
+                events_handled += 1;
                 let ev = event::read()?;
                 match ev {
                     Event::FocusGained => {
@@ -1224,6 +1121,7 @@ fn run(
                         };
                         if let Some(input) = input {
                             let ctx = MenuCtx {
+                                renderer_status: String::new(),
                                 scene_name: names[idx],
                                 scene_idx: idx,
                                 pixels: settings.pixels,
@@ -1255,9 +1153,12 @@ fn run(
                                         let seed: u64 = rand::rng().random();
                                         let t0 = link::epoch_now_ms();
                                         sync_params = Some((seed, t0));
+                                        let theme = settings.cfg.themes.get(names[i]).cloned()
+                                            .or_else(|| settings.theme.clone());
+                                        sync_theme = Some(theme.clone());
                                         transition.request(i);
                                         if let Some(g) = &mut guard {
-                                            g.publish(names[i], None, seed, t0);
+                                            g.publish(names[i], theme.as_deref(), seed, t0);
                                         }
                                         last_switch = Instant::now();
                                     }
@@ -1280,6 +1181,8 @@ fn run(
                                             let seed: u64 = rand::rng().random();
                                             let t0 = link::epoch_now_ms();
                                             sync_params = Some((seed, t0));
+                                            sync_theme = Some(t.clone());
+                                            transition.request(idx);
                                             g.publish(names[idx], t.as_deref(), seed, t0);
                                         }
                                         opts.theme = t;
@@ -1442,9 +1345,12 @@ fn run(
                         let seed: u64 = rand::rng().random();
                         let t0 = link::epoch_now_ms();
                         sync_params = Some((seed, t0));
+                        let theme = settings.cfg.themes.get(names[i]).cloned()
+                            .or_else(|| settings.theme.clone());
+                        sync_theme = Some(theme.clone());
                         transition.request(i);
                         if let Some(g) = &mut guard {
-                            g.publish(names[i], None, seed, t0);
+                            g.publish(names[i], theme.as_deref(), seed, t0);
                         }
                         last_switch = Instant::now();
                     };

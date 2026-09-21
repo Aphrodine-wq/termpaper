@@ -1,6 +1,6 @@
 # termpaper
 
-**Wallpaper Engine for the terminal.** Forty-eight hand-animated truecolor worlds —
+**Wallpaper Engine for the terminal.** Forty-nine hand-animated truecolor worlds —
 rain on glass, neon skylines, deep ocean, demoscene plasma — rendered live at up to
 **120 fps** (240 max) in any pane that can paint 24-bit color. Stack **22 filters**,
 remix **per-scene themes**, grade color on a 100-step wheel, remap every keybind,
@@ -181,7 +181,7 @@ Every tab opens with a fastfetch-style header: ASCII logo, version, scene,
 display mode, link status. The **About** tab goes full cinema poster.
 
 - **Scenes** — the catalog at your fingertips. `↑/↓` browse, `Enter` switch.
-  `n of 48`.
+  `n of 49`.
 - **Instances** — who's linked in your cluster right now (pid, scene, uptime).
   `(you)` marks this window. Know your swarm before you flip the whole wall.
 - **Settings** — the full mixing desk: Pixels, Detail, Theme, Hue, Saturation,
@@ -272,8 +272,9 @@ termpaper --instances
 
 Or **`?` → Instances** — live peers in your cluster, `(you)` on this window.
 
-Spin up a second monitor? It **drops into the same frame** — shared rng seed,
-fast-forward — so both screens show the exact same moment in time.
+Spin up a second monitor? It adopts the group's saved scene anchor and
+replays toward the shared frame. Catch-up is spread across display frames;
+joining a long-running scene can take time.
 
 ### Sync clusters
 
@@ -403,9 +404,15 @@ Seed/timestamp sync makes both halves the same continuous picture. If the
 combined wall exceeds ~3x the standard canvas, instances stay local.
 
 **Artwork sync**: a published switch carries an rng seed and start
-timestamp — receivers build the scene from the same seed and fast-forward
-the simulation, so two linked terminals show the *same* animation frames,
-like one wallpaper spanning windows. Control messages are totally ordered
+timestamp. Linked scenes use fixed 60Hz simulation steps independent of
+display FPS, with bounded catch-up work per frame and no 30-second replay
+cutoff. Wall-size changes rebuild from the seed at the final shared size,
+so monitor discovery order does not permanently change the artwork. Filters
+share the scene clock, and trail smoothing adjusts to each display's frame
+duration. Matching scene options and virtual canvas sizes are required for
+matching simulation frames; terminal presentation is not hardware frame-locked.
+Speed/detail changes reconstruct the shared simulation and may briefly replay.
+Control messages are totally ordered
 (millisecond epoch + per-publisher sequence, ties by pid), so rapid scene
 flipping never drops a switch.
 
@@ -444,31 +451,44 @@ termpaper fire --filter crt
 termpaper city --filter scanlines --filter vignette
 ```
 
-## GPU post-processing (optional)
+## GPU scene rendering (optional)
 
-The filters, colour grading, temporal smoothing and the pixels-to-glyphs
-packing are all pure per-pixel arithmetic, so they can run as compute shaders
-instead. Build with the `gpu` feature and pass `--gpu`:
+Build with `gpu` to enable Vulkan scene rendering, simulations, filters,
+colour grading, smoothing and terminal-cell packing. `auto` selects the GPU
+when available; `cpu` keeps the original scene implementations. `--gpu`
+remains an alias for `--renderer gpu`.
 
 ```sh
 cargo install termpaper --features gpu
-termpaper plasma --gpu --pixels braille --filter bloom
+termpaper scroll --renderer auto --fps 120
+termpaper plasma --renderer gpu --pixels braille --filter bloom
+termpaper scroll --renderer cpu
 ```
 
-Needs Vulkan. Without a usable device it prints a line and stays on the CPU —
-the CPU path remains the default and the reference implementation.
+Open `?` to see the active adapter or CPU fallback reason. Builds without the
+feature still work on the CPU. Device and validation errors trigger fallback.
 
-**What it does.** Everything after the scene update moves to the GPU, including
-the luminance split that picks each cell's glyph, so the readback is 12 bytes
-per *terminal cell* rather than 32 bytes of pixels. The readback is pipelined
-one frame deep, so the frame loop never waits on the GPU.
+Scene work runs in a separate worker with a single latest-request mailbox.
+Switches invalidate old frames; full GPU readback queues skip submissions
+instead of waiting on the input thread. Compiled scene pipelines are cached
+across switches and resizes. Bump keeps its original lightweight CPU text
+layout and uses GPU post-processing. Fire, Life, Boids, Sand and Reaction use
+fixed-step GPU simulation on a resolution-independent 192×192 world lattice.
 
-**What it's worth.** The moved stage gets 1.9–7.1x faster depending on
-resolution (`cargo run --release --features gpu --example gpu_bench`). End to
-end the win is smaller and worth stating plainly: a 250×45 braille terminal at
-240fps with bloom+vignette drops from 5.48 to 4.18 CPU-seconds per 7s window,
-about 24% less CPU for slightly more frames. Post-processing simply stops being
-the bottleneck — the terminal write becomes it, at ~23 MB/s of escape sequences.
+The default target is 120 FPS, with 144 available in Settings. This is a cap,
+not a guarantee: terminal escape-sequence throughput can still limit display
+rate. The worker timing in the menu is CPU submission time, not GPU timing or
+measured display FPS. For hardware measurements and scene image captures:
+
+```sh
+cargo run --release --features gpu --example world_review -- all /tmp
+cargo test --release --features gpu --test gpu_world -- --ignored
+```
+
+The GPU worlds are new interpretations, not pixel-identical ports of the CPU
+artwork. Use the same backend, seed, settings and wall layout across linked
+monitors. Automatic cross-backend negotiation and exhaustive theme parity are
+not implemented; the CPU renderer remains available for the original artwork.
 
 **Fidelity.** `gpu_bench` checks the shaders against the CPU functions in two
 stages: every filter must land within one 8-bit step per channel (15 of 21 are
@@ -554,7 +574,7 @@ termpaper your_scene
 Full recipe, trait API, themes, filters, and design bar:
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Scenes (48)
+## Scenes (49)
 
 The catalog — one word each, full descriptions in `termpaper --list`:
 
@@ -566,7 +586,7 @@ The catalog — one word each, full descriptions in `termpaper --list`:
 **lanterns** · **incense** · **frost** · **orbits** · **ribbons** · **sonar** ·
 **tide** · **clockwork** · **grid** · **inkdrop** · **mosaic** ·
 **harmonograph** · **nebula** · **pendulum** · **reaction** · **meadow** ·
-**airspace** · **aquarium** · **drive** · **candy**
+**airspace** · **aquarium** · **drive** · **candy** · **scroll**
 — run `termpaper --list` for one-line descriptions.
 
 A dim clock (`HH:MM`) sits in the top-right corner of every scene —

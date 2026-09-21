@@ -32,7 +32,12 @@ const MAX_AREA: usize = 3 * 200 * 100;
 /// its enclosing braces and pull the numbers out of that slice.
 pub fn parse_hyprctl_for_pid(text: &str, pid: u32) -> Option<Geo> {
     let pat = format!("\"pid\": {pid}");
-    let pos = text.find(&pat).or_else(|| text.find(&format!("\"pid\":{pid}")))?;
+    let pos = [pat, format!("\"pid\":{pid}")].iter().find_map(|pat| {
+        text.match_indices(pat).find_map(|(pos, matched)| {
+            (!text.as_bytes().get(pos + matched.len()).is_some_and(u8::is_ascii_digit))
+                .then_some(pos)
+        })
+    })?;
     // Enclosing object: brace-count outward from the pid field. hyprctl
     // objects contain NESTED objects (e.g. "workspace": {...}) before the
     // pid, so a naive nearest-'{' grabs the wrong slice.
@@ -351,6 +356,14 @@ pub fn manual_layout(spec: &str, cols: usize, rows: usize) -> Option<WallLayout>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pid_lookup_does_not_match_a_longer_pid() {
+        let text = r#"[{"pid":1112,"at":[1,2],"size":[30,40]},
+            {"pid":111,"at":[50,60],"size":[70,80]}]"#;
+        assert_eq!(parse_hyprctl_for_pid(text, 111), Some(Geo { x: 50, y: 60, w: 70, h: 80 }));
+        assert_eq!(parse_hyprctl_for_pid(text, 11), None);
+    }
 
     const HYPR: &str = r#"[
     {

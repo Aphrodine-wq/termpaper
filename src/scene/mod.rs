@@ -48,6 +48,7 @@ pub mod reaction;
 pub mod ribbons;
 pub mod ripple;
 pub mod sand;
+pub mod scroll;
 pub mod shells;
 pub mod sonar;
 pub mod starfield;
@@ -127,7 +128,7 @@ impl Detail {
 }
 
 /// Per-launch scene configuration.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct SceneOptions {
     pub theme: Option<String>,
     pub detail: Detail,
@@ -446,6 +447,12 @@ pub const SCENES: &[SceneDef] = &[
         desc: "saturated sugar-rush orbs on a neon gradient",
         themes: &["classic", "sour", "pastel", "mono"],
         make: |rng, o| Box::new(candy::Candy::new(rng, o.theme.as_deref(), o.detail)),
+    },
+    SceneDef {
+        name: "scroll",
+        desc: "endless ink-wash mountain scroll unrolling upward, made for portrait screens",
+        themes: &["sumi", "night", "indigo"],
+        make: |rng, o| Box::new(scroll::Scroll::new(rng, o.theme.as_deref(), o.detail)),
     },
 ];
 

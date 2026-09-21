@@ -179,6 +179,12 @@ fn atomic_write(path: &PathBuf, contents: &str) -> std::io::Result<()> {
     let tmp = path.with_file_name(format!(".{}.{}.tmp", name, std::process::id()));
     std::fs::write(&tmp, contents)?;
     std::fs::rename(&tmp, path)?;
+    // Keep the scene anchor even when a settings message replaces control.
+    if name == "control.json"
+        && parse_control(contents).is_some_and(|c| c.kind == ControlKind::Scene)
+    {
+        atomic_write(&path.with_file_name("scene.json"), contents)?;
+    }
     Ok(())
 }
 
@@ -232,6 +238,12 @@ fn file_ino(_m: &std::fs::Metadata) -> u64 {
 }
 
 impl Guard {
+    pub fn latest_scene(&self) -> Option<Control> {
+        let text = std::fs::read_to_string(self.dir.join("scene.json"))
+            .or_else(|_| std::fs::read_to_string(self.dir.join("control.json"))).ok()?;
+        parse_control(&text).filter(|c| c.kind == ControlKind::Scene)
+    }
+
     pub fn new(scene: &str, group: &str) -> Option<Self> {
         let group = sanitize_group(group);
         let dir = group_dir(&group)?;
@@ -553,6 +565,7 @@ pub fn reap_stale(dir: &PathBuf) {
     // a control file with no living publisher and no live peers is a relic
     // of a dead session; drop it so it can't confuse the next launch
     if !any_live_inst {
+        let _ = std::fs::remove_file(dir.join("scene.json"));
         let ctrl = dir.join("control.json");
         if let Ok(text) = std::fs::read_to_string(&ctrl) {
             let publisher_dead = json_get(&text, "from_pid")
@@ -677,6 +690,20 @@ mod tests {
 
     // env vars are process-global: serialize these tests
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn settings_do_not_erase_the_scene_anchor() {
+        with_registry(|_| {
+            let mut guard = Guard::new("rain", "default").unwrap();
+            guard.publish("rain", Some("mono"), 123, 456);
+            guard.publish_settings(&SettingsMsg::default());
+            let anchor = guard.latest_scene().unwrap();
+            assert_eq!(anchor.scene, "rain");
+            assert_eq!(anchor.seed, 123);
+            assert_eq!(anchor.t0_ms, 456);
+            assert_eq!(anchor.theme.as_deref(), Some("mono"));
+        });
+    }
 
     fn with_registry<F: FnOnce(PathBuf)>(f: F) {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

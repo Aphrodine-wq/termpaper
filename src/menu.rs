@@ -366,6 +366,7 @@ impl Menu {
 
 /// Snapshot of the host's current settings, for display + adjust.
 pub struct MenuCtx {
+    pub renderer_status: String,
     pub scene_name: &'static str,
     pub scene_idx: usize,
     pub pixels: Pixels,
@@ -396,6 +397,7 @@ mod tests {
 
     fn ctx() -> MenuCtx {
         MenuCtx {
+            renderer_status: "CPU · test".into(),
             scene_name: "nexus",
             scene_idx: 1,
             pixels: Pixels::Half,
@@ -704,6 +706,7 @@ pub mod view {
             brand::compact_lines(&stats)
         };
         lines.push(tab_line(m.section));
+        lines.push(Line::from(Span::styled(ctx.renderer_status.clone(), Style::new().fg(Color::DarkGray))));
         lines.push(Line::from(""));
 
         match m.section {
