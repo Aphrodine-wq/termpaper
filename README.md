@@ -1,25 +1,41 @@
 # termpaper
 
-**Wallpaper Engine for the terminal.** Forty-nine hand-animated truecolor worlds —
-rain on glass, neon skylines, deep ocean, demoscene plasma — rendered live at up to
-**120 fps** (240 max) in any pane that can paint 24-bit color. Stack **22 filters**,
-remix **per-scene themes**, grade color on a 100-step wheel, remap every keybind,
-span monitors as one seamless wall, or build your own scenes.
-
-Your terminal never had to be boring. Tune everything.
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/Aphrodine-wq/termpaper/main/install.sh | bash && termpaper rain
-```
-
-One line to install. One word to start: `termpaper fire`.
+**Wallpaper Engine for the terminal.** Real places, rendered live on your GPU —
+Big Sur at sunset, a Shinjuku alley in the rain, the aurora over Tromsø, a
+cabin fireplace while it snows outside — in any terminal that paints 24-bit
+colour. **41 Studio scenes** are ray-marched, physically lit WGSL shaders
+with 3–4 time-of-day and weather themes each; the **51 Classic** hand-animated
+CPU scenes are still here. Run one terminal per monitor and they become
+**one continuous picture across every screen**, portrait and landscape
+lined up in millimetres, frames presented in lockstep.
 
 ```sh
-termpaper rain --fps 120     # high-refresh rain on glass
-termpaper life --speed 4     # crank the simulation
-termpaper list               # the catalog
-termpaper                    # press ? — full command center
+curl -fsSL https://raw.githubusercontent.com/Aphrodine-wq/termpaper/main/install.sh | bash && termpaper tokyo
 ```
+
+```sh
+termpaper bigsur                 # a Studio scene (needs a Vulkan GPU)
+termpaper tokyo --theme snow     # every scene has themes
+termpaper list                   # the catalog, by category
+termpaper wall up                # one terminal per monitor, one picture
+termpaper                        # press ? — browse, preview, tune
+```
+
+## Studio scenes
+
+Each Studio scene is one stateless WGSL shader: every pixel is a pure function
+of where it is and what time it is. That is what makes them cheap to sync — a
+terminal on the left monitor and one on the right render their own halves of
+the same frame from the same clock, with nothing to replay and nothing to
+drift. They are supersampled (up to 24 samples per pixel, adapted to a GPU
+time budget), tonemapped with AgX, and dithered once, statically, so they
+cost the terminal as little bandwidth as possible.
+
+<!-- studio-catalog:begin -->
+<!-- studio-catalog:end -->
+
+No GPU? Studio scenes fall back to a related Classic scene, and linked
+terminals without a GPU still stay in sync with each other.
 
 ## Install
 
@@ -28,6 +44,8 @@ termpaper                    # press ? — full command center
 | What | Why |
 |------|-----|
 | **Truecolor terminal** | The full palette — `kitty`, `ghostty`, `alacritty`, `foot`, `wezterm`, … Check: `echo $COLORTERM` → `truecolor` or `24bit`. |
+| **A Vulkan GPU** | For the Studio scenes (any recent AMD, Intel or NVIDIA driver; `vulkan-icd-loader`). Without one, Studio scenes show a Classic fallback. |
+| **Hyprland** *(optional)* | For the physical multi-monitor wall, `termpaper desk`, `wall up` and `calibrate`. Everything else runs anywhere. |
 | **Rust toolchain** | Only if you're building from source ([rustup.rs](https://rustup.rs)). |
 
 No truecolor? termpaper still runs — it auto-falls back to xterm-256.
@@ -349,34 +367,66 @@ termpaper switch fire --all
 
 ### One canvas. Every monitor.
 
-When linked instances know where they sit on screen, they become **windows
-into one giant virtual canvas** — meteors streak from the left bezel into
-the right, rain falls through the gap, one uninterrupted picture.
+On Hyprland, linked terminals become windows onto one picture that spans
+the desk. termpaper reads every monitor's size in millimetres, rotation and
+scale from the compositor, lays them out left to right as they sit on the
+desk (centred on one line by default), and one terminal — the group's leader —
+publishes a **wall plan**: where each terminal's grid of cells sits, in
+millimetres. Every pane adopts it verbatim.
 
-**Hyprland:** geometry comes from `hyprctl`. Same group, different monitors — done:
+- **Studio scenes** map each pane straight into the scene's coordinates, so a
+  horizon crosses from a landscape monitor onto a rotated portrait one at the
+  same physical height, whatever the fonts or pixel pitch. The portrait
+  screen simply sees more sky above and more foreground below.
+- **Classic scenes** share one canvas at a common cell pitch; a pane whose
+  cells are a different size resamples it with a box filter.
 
 ```sh
-termpaper --group wallpaper rain   # left monitor
-termpaper --group wallpaper rain   # right monitor
+termpaper wall up              # a kitty per monitor, fonts matched to pixel pitch
+termpaper wall up --dry-run    # show the commands first
+termpaper desk                 # monitors in mm, and the current plan
+termpaper calibrate            # line the screens up (see below)
+termpaper wall down
 ```
 
-**Manual grid** (any compositor, any layout):
+`wall up` scales each terminal's font by its monitor's pixel pitch so cells
+come out the same physical size everywhere, forces zero padding, and classes
+the windows `termpaper-wallpaper-<OUTPUT>` — point the hyprwinwrap plugin at
+that pattern and they become a live desktop background.
+
+**Calibrate.** Monitors on arms rarely sit exactly where the compositor
+thinks. `termpaper calibrate` (or `?` → Wall → Align monitors…) switches every
+pane to a millimetre test pattern — a 10 mm grid, level lines across the desk,
+diagonals and a circle crossing each seam, a 100 mm ruler per screen. Nudge
+the selected monitor with the arrows (Shift = 10 mm, Alt = 0.2 mm) until the
+lines run straight, `[`/`]` for bezel width, `-`/`=` if a real ruler disagrees
+with the bar, `Enter` to save. It goes to `~/.config/termpaper/desk.toml`,
+shared by every termpaper on the machine:
+
+```toml
+align = "center"        # center|top|bottom|hypr
+bezel_mm = 0.0          # >0 hides the art behind the bezels, like a window
+frame = "row"           # the picture's frame: the landscape row, "all", or "monitor:NAME"
+portrait = "extend"     # Classic scenes on portrait screens: extend|band|separate
+
+[monitors."DP-1"]
+offset_mm = [0.0, -12.0]
+size_mm = [336.0, 597.0]   # only if the EDID size is missing or wrong
+```
+
+**Without Hyprland** the older cell-count wall still works: same group on
+each monitor, or a manual grid:
 
 ```sh
 termpaper --wall 2x1:0 --group wallpaper rain   # left half of a 2×1 wall
 termpaper --wall 2x1:1 --group wallpaper rain   # right half
-termpaper --no-wall                             # local canvas only, never folded into a wall
+termpaper --no-wall                             # never join a wall
 ```
 
-**Padding:** kitty/alacritty window margins? Set `pad = 7` (px), `pad = "3.5pt"`
-(kitty's `window_padding_width` is in points) or `pad = [x, y]`, plus
-`placement = "center"` if your terminal centres its grid (default `top-left`),
-so crops line up at the text edge, not the window chrome. Every instance
-publishes its inset and its measured cell size; the wall math handles the rest.
-
-Shared seed + geometry = **one continuous frame** across the grid. If the
-virtual canvas gets too huge (~3× standard area), instances gracefully fall
-back to local mode.
+**Padding:** if your terminal pads its grid, say so — `pad = 7` (px),
+`pad = "3.5pt"` (kitty's `window_padding_width` is in points) or `pad = [x, y]`,
+plus `placement = "center"` if the terminal centres its grid — so the wall
+lines up at the text edge, not the window chrome.
 
 ### Fleet commands
 
@@ -389,57 +439,19 @@ termpaper switch fire --group wallpaper
 
 The menu's **Wall** page has **Link** (on/off) and **Group** rows.
 Presets cycle through `default`, `wallpaper`, `desk`, and `art`, and the
-page lists who's in your group. Menu settings edits
-(pixels, detail, filters, theme, text scale, speed, fps, smooth, dim,
-fade) and the `f` quick filter also propagate live to linked instances in
-the same group — remote applies are session-only and never touch your
-config file. New instances adopt the group's current scene and settings
-on launch (fast-forwarding to the same animation frame), and the
-lowest-pid instance in the group re-publishes the current scene every 15s
-as a sync anchor — identical re-publishes are skipped silently, so no
-visible restarts.
+page lists who's in your group. Settings that change the simulation
+(scene, theme, detail, pixels, speed, text size) travel in the group's
+**anchor** and switch every pane together after a synchronised fade;
+appearance settings (filters, fps, smooth, dim, fade, colour grade, the `f`
+quick filter) apply live. Remote changes are session-only and never touch
+your config file. A new instance adopts the anchor on launch and replays to
+the shared frame out of sight; if that would take more than a few seconds,
+the group restarts the scene together instead.
 
 Linking works on macOS too (iTerm2, Terminal.app, …): without
 `$XDG_RUNTIME_DIR` the registry lives in `/tmp/termpaper-$UID`. Only the
 video wall's *auto* window-geometry mode is Linux/Hyprland-only — manual
 `--wall COLSxROWS:INDEX` tiling works everywhere.
-
-## Video wall
-
-Linked terminals with known window positions act as viewports onto one
-shared virtual canvas — a meteor flies from one window into the next.
-Auto mode reads window geometry from `hyprctl` (Hyprland only); manual
-mode tiles without a compositor:
-
-```sh
-termpaper --wall 2x1:0   # left half of a 2x1 wall
-termpaper --wall 2x1:1   # right half
-termpaper --no-wall      # stay local
-```
-
-**Margin aware**: if your terminal pads its grid (kitty/alacritty
-`padding`), tell termpaper so crops line up across window borders —
-`pad = 7` in `config.toml` or `--pad 7`. Each instance publishes its
-padding in the registry and the layout insets every window's content
-rect, so the shared canvas runs edge-to-edge of the *text*, not the
-frame. (Any remaining gap between windows' content belongs to the virtual
-canvas too — the fullscreen wallpaper instance renders it.)
-
-Seed/timestamp sync makes both halves the same continuous picture. If the
-combined wall exceeds ~3x the standard canvas, instances stay local.
-
-**Artwork sync**: a published switch carries an rng seed and start
-timestamp. Linked scenes use fixed 60Hz simulation steps independent of
-display FPS, with bounded catch-up work per frame and no 30-second replay
-cutoff. Wall-size changes rebuild from the seed at the final shared size,
-so monitor discovery order does not permanently change the artwork. Filters
-share the scene clock, and trail smoothing adjusts to each display's frame
-duration. Matching scene options and virtual canvas sizes are required for
-matching simulation frames; terminal presentation is not hardware frame-locked.
-Speed/detail changes reconstruct the shared simulation and may briefly replay.
-Control messages are totally ordered
-(millisecond epoch + per-publisher sequence, ties by pid), so rapid scene
-flipping never drops a switch.
 
 ## Pixel modes
 
@@ -478,59 +490,42 @@ termpaper fire --filter crt
 termpaper city --filter scanlines --filter vignette
 ```
 
-## GPU post-processing (optional)
+## The GPU engine
 
-Build with `gpu` to run filters, colour grading, smoothing and terminal-cell
-packing on Vulkan. Scenes always run on the CPU — they are the artwork — and
-the worker uploads each frame for the GPU to finish. `auto` uses the GPU when
-compiled and available; `gpu` does the same but reports when the GPU is
-missing; `cpu` keeps everything on the CPU. `--gpu` remains an alias for
-`--renderer gpu`.
+Studio scenes and the post-processing chain run on Vulkan through `wgpu`
+(on by default; `cargo build --no-default-features` builds a CPU-only binary
+with the Classic scenes). Every frame is one GPU submission: the scene pass
+writes this pane's window of the picture — plus a small apron when a filter
+reads neighbours, so filters stay seamless across a wall — then filters,
+colour grade, smoothing and terminal-cell packing run as compute passes and
+only the finished cells are read back, pipelined so the CPU never waits.
 
-```sh
-cargo install termpaper --features gpu
-termpaper scroll --renderer auto --fps 120
-termpaper plasma --renderer gpu --pixels braille --filter bloom
-termpaper scroll --renderer cpu
-```
-
-Open `?` to see the active path ("GPU post · adapter · CPU scene") or the CPU
-fallback reason. Builds without the feature still work on the CPU. Device and
-validation errors trigger fallback.
-
-Scene work runs in a separate worker with a single latest-request mailbox.
-Switches invalidate old frames; full GPU readback queues skip submissions
-instead of waiting on the input thread.
-
-**GPU worlds (experimental).** `src/gpu/shaders/world.wgsl` carries a shader
-re-interpretation of the catalog. A scene listed in `scene::GPU_WORLD_SCENES`
-is drawn from its WGSL arm instead of its Rust code; the list is empty by
-default. `--renderer shader` forces the shader arm for every scene (Bump keeps
-its CPU text layout). Fire, Life, Boids, Sand and Reaction there use fixed-step
-simulation on a resolution-independent 192×192 lattice. The worlds are new
-interpretations, not pixel-identical ports; use the same backend, seed and
-settings across linked monitors.
-
-The default target is 120 FPS, with 144 available in the menu. This is a cap,
-not a guarantee: terminal escape-sequence throughput can still limit display
-rate. The worker timing in the menu is CPU submission time, not GPU timing or
-measured display FPS. For hardware measurements and scene image captures
-(`--world` reviews the shader arms):
+- **Quality governor.** Each frame the scene pass is timed on the GPU and the
+  sample count per pixel moves within a budget (`gpu_budget_ms`, default 3 ms)
+  so a wallpaper never makes your compositor stutter. Only anti-aliasing
+  changes — never geometry — so panes of a wall that settle on different
+  counts still meet cleanly. `Quality` (low / medium / high) sets the ceiling
+  and the ray-march step count.
+- **Bandwidth.** The terminal write is the real bottleneck, so Studio scenes
+  cap at `shader_fps` (60), skip frames that would be identical, and pack
+  cells with hysteresis: a cell whose colours moved by only a few levels keeps
+  its previous value and ratatui never re-sends it (about 45% fewer bytes).
+  Output is wrapped in DEC 2026 synchronized updates, so no terminal ever
+  shows half a frame.
+- **Robust.** Scene shaders compile on a background thread while the old
+  scene fades out, inside error scopes: a broken shader shows its Classic
+  fallback and never takes the GPU down for the others.
 
 ```sh
-cargo run --release --features gpu --example world_review -- all /tmp
-cargo run --release --features gpu --example world_review -- all /tmp --world
-cargo test --release --features gpu --test gpu_world -- --ignored
+termpaper bigsur --renderer auto     # GPU when available (default)
+termpaper bigsur --renderer cpu      # force the CPU: Studio scenes show their fallback
+cargo test --release --test gpu_shader_scenes -- --ignored   # render every scene on your GPU
 ```
 
-**Fidelity.** `gpu_bench` checks the shaders against the CPU functions in two
-stages: every filter must land within one 8-bit step per channel (15 of 21 are
-bit-exact; the rest differ by one because the CPU truncates between stages and
-RADV contracts multiply-adds), and every glyph that differs in quad/braille must
-be a pixel that sat within 20 luminance units of its block's split threshold —
-a coin flip that was always going to land either way. `grain` is deliberately
-different: the CPU pulls from a seeded RNG in raster order, the shader uses a
-positional hash. Same range, same per-frame determinism, different noise.
+`?` shows the active path, e.g. `GPU shader · AMD Radeon RX 6700 XT · 6 spp · 1.8 ms`.
+
+**GPU worlds (experimental)** — `--renderer shader` draws Classic scenes from
+the older all-in-one `world.wgsl` interpretations instead of their Rust code.
 
 ## Controls (defaults — all remappable in `[keys]`)
 
@@ -578,6 +573,8 @@ text_scale = 2          # 1|2|3 — bump scene only
 # cycle = 300           # auto-rotate scenes every N seconds (local only)
 # cycle_scope = "favorites"   # all|category|favorites
 favorites = ["bigsur", "koi"] # ★ in the menu browser
+gpu_budget_ms = 3.0     # GPU time per frame a Studio scene may use
+shader_fps = 60         # fps cap while a Studio scene is showing
 
 [themes]
 life = "ember"
@@ -599,24 +596,25 @@ Unknown keys/actions warn but never fail.
 
 ## Build your own
 
-termpaper is a canvas for terminal artists. A **scene** is a Rust module
-implementing the `Scene` trait — full-frame truecolor, every tick.
-
-**The lane in:** PR to termpaper itself — your scene ships with every install.
-
-Scenes compile in — no plugins, no runtime overhead. Pure speed, pure type safety.
+A **Studio scene** is one `.wgsl` file in `src/gpu/scenes/` — a header and a
+`fn scene(p: vec2f, ctx: Ctx) -> vec3f`. `build.rs` finds it; there is no
+registry to edit. The shared library (`src/gpu/scenes/lib/`) brings a
+physical sky, volumetric clouds, water with Fresnel and caustics, fog, rain,
+snow, fire, bokeh, SDFs and ray-marching. Iterate without rebuilding:
 
 ```sh
-cargo install --path . --locked
-termpaper your_scene
+cargo run --release --example shader_review -- yourscene         # contact sheets
+cargo run --release --example shader_review -- yourscene --bench # GPU time vs budget
+TERMPAPER_SHADER_DIR=src/gpu/scenes cargo run --release -- yourscene   # live, hot reload
 ```
 
-Full recipe, trait API, themes, filters, and design bar:
+Classic scenes are Rust modules implementing the `Scene` trait. The full
+recipe for both, the author contract and the design bar:
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Scenes (49)
+## Classic scenes (51)
 
-The catalog — one word each, full descriptions in `termpaper list`:
+The original catalog — one word each, full descriptions in `termpaper list`:
 
 **rain** · **starfield** · **fire** · **pipes** · **plasma** · **aurora** · **life** · **boids** ·
 **lava** · **tunnel** · **dvd** · **bump** · **canopy** ·
@@ -626,7 +624,7 @@ The catalog — one word each, full descriptions in `termpaper list`:
 **lanterns** · **incense** · **frost** · **orbits** · **ribbons** · **sonar** ·
 **tide** · **clockwork** · **grid** · **inkdrop** · **mosaic** ·
 **harmonograph** · **nebula** · **pendulum** · **reaction** · **meadow** ·
-**airspace** · **aquarium** · **drive** · **candy** · **scroll**
+**airspace** · **aquarium** · **drive** · **candy** · **scroll** · **alpine** · **campfire**
 — run `termpaper list` for one-line descriptions.
 
 A dim clock (`HH:MM`) sits in the top-right corner of every scene —
@@ -681,7 +679,7 @@ edge-to-edge coverage. Density scales with terminal area (`density_for`: 1× at
 phone pane to an ultrawide. Physics (gravity, drag, springs) lives in a shared
 module. Filters hit the frame, ratatui blits in your pixel mode, non-truecolor
 terminals get xterm-256 quantization — or the whole post chain runs in compute
-shaders instead, see **GPU post-processing**. Resizes every frame. Coverage test:
+shaders instead, see **The GPU engine**. Resizes every frame. Coverage test:
 <2% unpainted cells at any size — no borders, no dead pixels.
 
 ## License
