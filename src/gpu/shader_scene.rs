@@ -53,11 +53,12 @@ impl ShaderView {
     }
 }
 
-/// Scene time from the shared clock. Time is quantised to the 60 Hz tick grid
-/// the Classic scenes use, so every pane rendering within the same tick draws
-/// identical pixels; and wrapped hourly (f32 loses sub-frame precision after a
-/// few hours), with the first seconds of each hour blended from the previous
-/// cycle so nothing jumps.
+/// Scene time from the shared clock. Continuous (ms resolution): a Studio
+/// scene has no tick grid, so any frame rate animates evenly, and panes still
+/// draw identical pixels because the frame clock renders every pane for the
+/// same slot times. Wrapped hourly (f32 loses sub-frame precision after a few
+/// hours), with the first seconds of each hour blended from the previous
+/// cycle so nothing jumps. `tick` is the 60 Hz Classic tick of the moment.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShaderTime {
     pub t: f32,
@@ -71,7 +72,7 @@ pub const WRAP_BLEND_SECS: f64 = 8.0;
 
 pub fn shader_time(elapsed_ms: u64, speed: f32) -> ShaderTime {
     let tick = elapsed_ms.saturating_mul(60) / 1000;
-    let t = tick as f64 / 60.0 * speed.max(0.0) as f64;
+    let t = elapsed_ms as f64 / 1000.0 * speed.max(0.0) as f64;
     let cycle = (t / WRAP_SECS).floor();
     let tw = t - cycle * WRAP_SECS;
     let blend = if cycle >= 1.0 && tw < WRAP_BLEND_SECS {
@@ -574,10 +575,11 @@ mod tests {
     }
 
     #[test]
-    fn time_is_tick_quantised_and_wraps_with_a_blend() {
+    fn time_is_continuous_and_wraps_with_a_blend() {
         let a = shader_time(1000, 1.0);
         let b = shader_time(1008, 1.0);
-        assert_eq!(a.t, b.t, "within one 60 Hz tick");
+        assert!((b.t - a.t - 0.008).abs() < 1e-5, "no 60 Hz quantisation: any fps animates evenly");
+        assert_eq!((a.tick, b.tick), (60, 60));
         assert_eq!(a.blend, 1.0);
         let wrap = shader_time(3_600_000 + 2000, 1.0);
         assert!(wrap.t < 3.0 && wrap.blend < 1.0 && wrap.blend > 0.0);

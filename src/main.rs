@@ -420,41 +420,24 @@ struct Settings {
     shader_fps: u32,
 }
 
-/// Snapshot the current runtime settings for broadcast.
 /// How long before the frame deadline to stop sleeping and busy-wait.
 /// Sized from `examples/pace_bench.rs` — see the frame loop for the tradeoff.
 const SPIN_TAIL: Duration = Duration::from_micros(100);
 
-/// Largest single simulation step. Bounds physics after a stall.
-const MAX_STEP: f32 = 1.0 / 30.0;
-/// Most catch-up steps per frame, so repaying a hitch never starves render.
-const MAX_CATCHUP: usize = 4;
-/// Debt past this is written off: returning from suspend should not simulate
-/// minutes of scene time to catch up.
-const MAX_DEBT: f32 = 1.5;
-
-/// Spend owed wall time as bounded simulation steps, draining `debt`.
-///
-/// Returns the per-step dt values (already speed-scaled) and how many are live.
-/// Always at least one step so the frame still redraws when nothing is owed.
-fn plan_steps(debt: &mut f32, speed: f32) -> ([f32; MAX_CATCHUP], usize) {
-    let mut step_dt = [0.0f32; MAX_CATCHUP];
-    let spend = debt.min(MAX_CATCHUP as f32 * MAX_STEP);
-    if spend <= 1e-6 {
-        // paused, or nothing owed yet — still redraw the current state
-        return (step_dt, 1);
+/// Frame period for a scene: Classic scenes snap to a divisor of their
+/// 60 Hz tick; Studio scenes use continuous time, so any rate works (capped
+/// by `shader_fps`). Either way the deadlines sit on the anchor's slot grid.
+fn frame_period_ms(settings: &Settings, focused: bool, scene_name: &str) -> f64 {
+    let mut fps = match settings.idle_fps {
+        Some(idle) if !focused => settings.fps.min(idle),
+        _ => settings.fps,
+    };
+    if scene::lookup(scene_name).is_some_and(|e| e.needs_gpu()) {
+        fps = fps.min(settings.shader_fps);
+    } else {
+        fps = termpaper::sync::classic_fps(fps);
     }
-    // split the owed time into EQUAL steps rather than MAX_STEP chunks plus
-    // a small remainder: verlet velocity is displacement-per-previous-step,
-    // so a 1/30 step followed by a 1/300 remainder mis-scales it 10x for a
-    // step — a visible speed pulse in every verlet scene after a hitch
-    let n = ((spend / MAX_STEP).ceil() as usize).clamp(1, MAX_CATCHUP);
-    let s = spend / n as f32;
-    for slot in step_dt.iter_mut().take(n) {
-        *slot = s * speed;
-    }
-    *debt -= spend;
-    (step_dt, n)
+    1000.0 / fps.max(1) as f64
 }
 
 /// The appearance settings peers mirror. Sim settings (speed, detail,
@@ -889,8 +872,13 @@ fn run(
     let mut rendered: Option<termpaper::engine::Frame> = None;
     // backend status while no frame is coming (a Studio shader compiling)
     let mut worker_status: Option<String> = None;
-    // suspend detection: realtime vs monotonic progress between frames
-    let mut clock_probe = (Instant::now(), link::epoch_now_ms());
+    // the shared epoch clock and the anchor's slot grid frames are paced on;
+    // also detects a suspend (realtime jumping ahead of the monotonic clock)
+    let mut clock = termpaper::sync::FrameClock::new();
+    // how many slots ahead of display each frame is requested
+    let mut lead = termpaper::sync::Lead::new();
+    // origin of the slot grid the lead's outstanding requests refer to
+    let mut grid_origin = st.cur.t0_ms;
     // the anchor this pane asked the leader to replace (catch-up too long)
     let mut reanchor_wanted: Option<link::Stamp> = None;
     // bumped whenever the wall layout moves this pane's window
@@ -923,38 +911,12 @@ fn run(
 
     let launch = Instant::now();
     let mut last_switch = Instant::now();
-    let mut last_frame = Instant::now();
-    // un-simulated wall time carried forward (see `plan_steps`)
-    let mut sim_debt = 0.0f32;
     // cached "HH:MM" for the clock overlay (refreshed at most every 10s)
     let mut clock_text = String::new();
     let mut clock_stamp = Instant::now() - Duration::from_secs(60);
 
     loop {
         let now = Instant::now();
-        let wall_dt = (now - last_frame).as_secs_f32();
-        last_frame = now;
-
-        // Scene time is owed against the wall clock. Linked instances agree on
-        // a scene only because each simulates `now - t0` worth of time, so any
-        // time the per-step clamp drops has to be carried forward rather than
-        // discarded.
-        let (_step_dt, _n_steps) = if st.cur.paused() {
-            ([0.0f32; MAX_CATCHUP], 1)
-        } else {
-            sim_debt = (sim_debt + wall_dt).min(MAX_DEBT);
-            plan_steps(&mut sim_debt, settings.speed)
-        };
-        let mut fps_target = match settings.idle_fps {
-            Some(idle) if !focused => settings.fps.min(idle),
-            _ => settings.fps,
-        };
-        // Studio scenes change once per 60 Hz tick: more frames would only
-        // re-send identical cells
-        if scene::lookup(&st.cur.scene).is_some_and(|e| e.needs_gpu()) {
-            fps_target = fps_target.min(settings.shader_fps);
-        }
-        let frame_dur = Duration::from_secs_f64(1.0 / fps_target as f64);
 
         // System suspend: the realtime clock ran on while the monotonic one
         // stood still. Move t0 forward by the gap so the scene resumes where
@@ -962,10 +924,7 @@ fn run(
         // publishes the retime; the others apply the same shift locally
         // right away and then adopt the leader's (a retime: no rebuild).
         {
-            let (probe_i, probe_ms) = clock_probe;
-            let now_ms = link::epoch_now_ms();
-            let jump = (now_ms as i64 - probe_ms as i64) - now.duration_since(probe_i).as_millis() as i64;
-            clock_probe = (now, now_ms);
+            let jump = clock.resync(now, termpaper::sync::epoch_now_ms_f64()) as i64;
             if jump > SUSPEND_JUMP_MS && !st.target().paused() {
                 let mut a = st.target().clone();
                 a.t0_ms += jump as u64;
@@ -1047,15 +1006,24 @@ fn run(
         // local edits to sim settings become a new anchor
         sync_sim(&mut st, &mut guard, &mut transition, &names, &settings, &opts);
 
-        // transition: fade out → swap → fade in, on the shared epoch clock
-        let (fade, swap) = transition.tick_at(link::epoch_now_ms());
+        // Frame slots: this frame is presented at `slot` of the anchor's
+        // grid (t0 + n·period, the same on every pane) and requests the
+        // frame for `slot + lead`, so what the terminal shows at a slot was
+        // rendered for that slot.
+        let mut period = frame_period_ms(&settings, focused, &st.cur.scene);
+        let mut slot = clock.slot_at(now, st.cur.t0_ms, period);
+        let mut target = slot + lead.lead() as i64;
+
+        // transition: fade out → swap → fade in, on the shared epoch clock,
+        // evaluated for the moment the requested frame will be on screen
+        let shown_at = termpaper::sync::FrameClock::slot_epoch(st.cur.t0_ms, period, target) as u64;
+        let (fade, swap) = transition.tick_at(shown_at);
         if swap.is_some() {
             if let Some((a, synced)) = st.next.take() {
                 st.cur = a;
                 st.synced = synced;
             }
             idx = names.iter().position(|n| *n == st.cur.scene).unwrap_or(idx);
-            sim_debt = 0.0;
             reanchor_wanted = None;
             if let Some(g) = &mut guard {
                 g.set_scene(names[idx]);
@@ -1063,6 +1031,14 @@ fn run(
                 g.set_reanchor(None);
             }
             last_switch = now;
+            period = frame_period_ms(&settings, focused, &st.cur.scene);
+            slot = clock.slot_at(now, st.cur.t0_ms, period);
+            target = slot + lead.lead() as i64;
+        }
+        if st.cur.t0_ms != grid_origin {
+            // new grid: outstanding requests no longer map onto it
+            grid_origin = st.cur.t0_ms;
+            lead.reset();
         }
 
         // video wall: refresh layout every 2s from registry geometry
@@ -1149,7 +1125,11 @@ fn run(
             text_scale: st.cur.text_scale,
             pixels: shown_pixels,
         };
-        let elapsed_ms = st.cur.elapsed_at(link::epoch_now_ms());
+        // the scene clock of the target slot (frozen while the wall is paused)
+        let elapsed_ms = match st.cur.paused_at_ms {
+            Some(at) => at.saturating_sub(st.cur.t0_ms),
+            None => termpaper::sync::slot_elapsed_ms(target, period),
+        };
         terminal.draw(|f| {
             let area = f.area();
             let (pw, ph) = shown_pixels.cell_size();
@@ -1179,7 +1159,12 @@ fn run(
                 budget_ms: settings.gpu_budget_ms,
                 prefetch: transition.pending().map(|i| names[i % names.len()].to_string()),
             };
-            if let Some(frame) = worker.submit(request) { rendered = Some(frame); worker_status = None; }
+            if let Some(frame) = worker.submit(request) {
+                lead.on_frame(frame.elapsed_ms, slot);
+                rendered = Some(frame);
+                worker_status = None;
+            }
+            lead.on_submit(elapsed_ms, slot);
             if let Some(status) = worker.take_status() { worker_status = Some(status); }
             if rendered.as_ref().is_some_and(|frame| frame.generation != worker.generation()) {
                 rendered = None;
@@ -1247,7 +1232,7 @@ fn run(
             // the menu floats over the live scene
             if menu.open {
                 let ctx = MenuCtx {
-                    renderer_status: worker_status.clone().or_else(|| rendered.as_ref().map(|f| format!("{} · worker {:.1} ms", f.backend, f.render_ms)))
+                    renderer_status: worker_status.clone().or_else(|| rendered.as_ref().map(|f| format!("{} · worker {:.1} ms · lead {}", f.backend, f.render_ms, lead.lead())))
                         .unwrap_or_else(|| "Renderer initializing…".into()),
                     wall_status: match wall_layout {
                         Some(l) => format!("wall: {}x{} cells @ ({},{})", l.virtual_w, l.virtual_h, l.crop_x, l.crop_y),
@@ -1341,7 +1326,11 @@ fn run(
         // and several instances pacing on one machine then starve each other
         // into dropped frames. 100us holds jitter at ~0.025ms — 0.6% of a
         // 240fps frame — for ~1% CPU.
-        let deadline = last_frame + frame_dur;
+        //
+        // The deadline is the next slot of the anchor's grid, not "last frame
+        // + period": every pane with this anchor and rate presents at the same
+        // moments, and a late frame does not push every later one back.
+        let deadline = clock.slot_instant(grid_origin, period, slot + 1);
         let mut events_handled = 0;
         loop {
             let now2 = Instant::now();
@@ -1766,124 +1755,5 @@ fn run(
             }
             break;
         }
-    }
-}
-
-#[cfg(test)]
-mod sync_tests {
-    use super::*;
-
-    /// A normal frame simulates exactly the wall time that passed.
-    #[test]
-    fn steady_frame_spends_all_its_time() {
-        let mut debt = 1.0 / 120.0;
-        let (dts, n) = plan_steps(&mut debt, 1.0);
-        assert_eq!(n, 1);
-        assert!((dts[0] - 1.0 / 120.0).abs() < 1e-6);
-        assert!(debt < 1e-6, "steady frames must leave nothing owed");
-    }
-
-    /// The core sync property: over many frames, simulated time tracks wall
-    /// time even when individual frames overrun MAX_STEP. Before the catch-up
-    /// the clamp silently discarded the overrun and the pane fell behind.
-    #[test]
-    fn hitches_are_repaid_so_sim_time_tracks_wall_time() {
-        let mut debt = 0.0f32;
-        let mut simulated = 0.0f32;
-        let mut wall = 0.0f32;
-        // 200 good frames at 120fps with a 150ms stall every 20th
-        for i in 0..200 {
-            let frame = if i % 20 == 19 { 0.150 } else { 1.0 / 120.0 };
-            wall += frame;
-            debt = (debt + frame).min(MAX_DEBT);
-            let (dts, n) = plan_steps(&mut debt, 1.0);
-            simulated += dts.iter().take(n).sum::<f32>();
-        }
-        // whatever is still owed is bounded by one frame's worth of steps
-        let drift = (wall - simulated - debt).abs();
-        assert!(drift < 1e-3, "sim time drifted from wall time by {drift}s");
-        assert!(
-            debt < MAX_CATCHUP as f32 * MAX_STEP,
-            "debt should stay bounded, got {debt}"
-        );
-    }
-
-    /// No single step may exceed MAX_STEP, or a stall would blow up physics.
-    #[test]
-    fn no_single_step_exceeds_the_clamp() {
-        let mut debt = 5.0; // absurd stall
-        let (dts, n) = plan_steps(&mut debt, 1.0);
-        for s in dts.iter().take(n) {
-            assert!(*s <= MAX_STEP + 1e-6, "step {s} exceeds MAX_STEP");
-        }
-        assert_eq!(n, MAX_CATCHUP, "a big stall should use the full budget");
-    }
-
-    /// Debt is capped, so resuming from suspend does not simulate minutes.
-    #[test]
-    fn debt_is_capped_for_suspend() {
-        let mut debt = 0.0f32;
-        debt = (debt + 3600.0).min(MAX_DEBT);
-        assert_eq!(debt, MAX_DEBT);
-        let mut total = 0.0;
-        // draining is bounded: a handful of frames, not an hour of simulation
-        for _ in 0..20 {
-            let (dts, n) = plan_steps(&mut debt, 1.0);
-            total += dts.iter().take(n).sum::<f32>();
-        }
-        assert!(total <= MAX_DEBT + 1e-3, "drained {total}s, cap is {MAX_DEBT}");
-        assert!(debt < 1e-6, "cap should fully drain within 20 frames");
-    }
-
-    /// Nothing owed still yields one redraw step (the paused path in the frame
-    /// loop bypasses `plan_steps` entirely so leftover debt is not drained).
-    #[test]
-    fn idle_still_yields_a_redraw_step() {
-        let mut debt = 0.0f32;
-        let (dts, n) = plan_steps(&mut debt, 1.0);
-        assert_eq!(n, 1);
-        assert_eq!(dts[0], 0.0);
-    }
-
-    /// Pausing must not spend debt carried in from a hitch.
-    #[test]
-    fn pausing_preserves_outstanding_debt() {
-        let mut debt = 0.5f32;
-        let before = debt;
-        // the loop's paused branch: no accrual, no plan_steps call
-        let (dts, n) = ([0.0f32; MAX_CATCHUP], 1);
-        assert_eq!(n, 1);
-        assert_eq!(dts[0], 0.0);
-        assert_eq!(debt, before, "paused frames must leave debt untouched");
-        // and it is still there to repay on resume
-        let (dts, n) = plan_steps(&mut debt, 1.0);
-        assert!(dts.iter().take(n).sum::<f32>() > 0.0);
-    }
-
-    /// Catch-up steps are equal-sized: a hitch must never emit a big step
-    /// followed by a tiny remainder, or verlet velocity (displacement per
-    /// previous step) mis-scales for one step and the scene visibly pulses.
-    #[test]
-    fn catchup_steps_are_equal_sized() {
-        let mut debt = MAX_STEP + MAX_STEP / 10.0; // just past one step
-        let (dts, n) = plan_steps(&mut debt, 1.0);
-        assert_eq!(n, 2);
-        assert!(
-            (dts[0] - dts[1]).abs() < 1e-6,
-            "steps should be equal, got {} and {}",
-            dts[0],
-            dts[1]
-        );
-        assert!((dts[0] + dts[1] - (MAX_STEP + MAX_STEP / 10.0)).abs() < 1e-6);
-    }
-
-    /// `--speed` scales simulated time without changing the debt accounting.
-    #[test]
-    fn speed_scales_steps_only() {
-        let mut debt = 1.0 / 60.0;
-        let (dts, n) = plan_steps(&mut debt, 4.0);
-        assert_eq!(n, 1);
-        assert!((dts[0] - 4.0 / 60.0).abs() < 1e-6);
-        assert!(debt < 1e-6);
     }
 }
