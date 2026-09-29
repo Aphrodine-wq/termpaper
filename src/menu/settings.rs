@@ -49,6 +49,7 @@ pub enum SettingId {
     OnLaunch,
     Transition,
     Fade,
+    ResetPlayback,
     // Display
     Colors,
     Pixels,
@@ -76,6 +77,7 @@ pub enum SettingId {
     NightTo,
     NightLevel,
     TerminalCheck,
+    ResetDisplay,
     // Wall
     Link,
     Group,
@@ -166,6 +168,7 @@ pub const PLAYBACK: &[Setting] = &[
     row(S::OnLaunch, "On launch", Choice, "What termpaper opens on: the scene you left, a random favourite, or any scene."),
     row(S::Transition, "Transition", Choice, "How one scene gives way to the next."),
     row(S::Fade, "Length", Slider, "How long a scene change takes."),
+    row(S::ResetPlayback, "Reset this page", Action, "Speed, cycling and transitions back to how termpaper starts. u undoes it."),
 ];
 
 #[rustfmt::skip]
@@ -196,6 +199,7 @@ pub const DISPLAY: &[Setting] = &[
     row(S::NightTo, "Until", Choice, "When night dimming ends."),
     row(S::NightLevel, "Night brightness", Slider, "How bright the picture is at night."),
     row(S::TerminalCheck, "Terminal check…", Open, "See what this terminal can show, and set Colours and Pixels to match."),
+    row(S::ResetDisplay, "Reset this page", Action, "Everything on this page back to how termpaper starts in this terminal. u undoes it."),
 ];
 
 #[rustfmt::skip]
@@ -633,7 +637,7 @@ pub fn value(id: SettingId, ctx: &MenuCtx) -> String {
         S::Dim => format!("{:.0}%", ctx.dim * 100.0),
         S::TextScale => ctx.text_scale.map_or("auto".into(), |t| format!("{t}×")),
         S::ResetLook if ctx.look.is_neutral() => "neutral".into(),
-        S::ResetLook => String::new(),
+        S::ResetLook | S::ResetPlayback | S::ResetDisplay => String::new(),
         S::Speed => format!("{}×", short(ctx.speed)),
         S::Cycle => cycle_label(ctx.cycle),
         S::CycleScope => match ctx.cycle_scope {
@@ -850,6 +854,8 @@ pub fn step(id: SettingId, ctx: &MenuCtx, dir: i32) -> Option<Effect> {
 pub fn action(id: SettingId, ctx: &MenuCtx) -> Option<Effect> {
     match id {
         S::ResetLook => (!ctx.look.is_neutral()).then(|| Effect::SetLook(Look::default())),
+        S::ResetPlayback => Some(Effect::ResetPage(Page::Playback)),
+        S::ResetDisplay => Some(Effect::ResetPage(Page::Display)),
         S::PauseWall => Some(Effect::PauseWall),
         S::WallUp => Some(Effect::WallUp),
         S::WallDown => Some(Effect::WallDown),

@@ -356,7 +356,9 @@ Six pages — `Tab` / `Shift-Tab` switch, or click a tab:
   monitors, and the live instances (★ leads).
 
 `↑`/`↓` move, `←`/`→` change a value, `Enter` toggles or opens, `Esc` backs
-out, `u` undoes; the mouse clicks, drags sliders and scrolls. The footer
+out, `u` undoes; the mouse clicks, drags sliders and scrolls. Look, Playback
+and Display each end with a row that puts the whole page back as termpaper
+starts (one `u` brings it all back). The footer
 only shows keys that do something right now, and `?` inside the menu lists
 the rest. Changes are saved a moment after you stop — only the ones that
 differ from the defaults. The art never stops.

@@ -341,6 +341,9 @@ pub enum Effect {
     /// ask the gallery for its themes (`g` on the Themes page): they come
     /// back as the Gallery shelf, where Enter installs one
     FetchGallery,
+    /// everything on a settings page back to how termpaper starts, as one
+    /// undo step
+    ResetPage(Page),
 }
 
 impl Effect {
@@ -366,6 +369,7 @@ impl Effect {
                 | Effect::SetPlayback(_)
                 | Effect::SetDisplay(_)
                 | Effect::SetWallPrefs(_)
+                | Effect::ResetPage(_)
         )
     }
 }

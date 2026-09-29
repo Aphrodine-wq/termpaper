@@ -2250,10 +2250,12 @@ fn run(
             pending_fx.extend(fx);
         }
         let mut effects: VecDeque<Effect> = std::mem::take(&mut pending_fx).into();
+        // a page reset is one undo step: the changes it queues take none
+        let mut resetting = false;
         while let Some(fx) = effects.pop_front() {
             // one undo step per change, or per burst of the same change (a
             // held arrow key sweeping a slider undoes in one go)
-            if fx.undoable() {
+            if fx.undoable() && !resetting {
                 let kind = std::mem::discriminant(&fx);
                 let fresh = undo_last.is_none_or(|(k, at)| k != kind || now.saturating_duration_since(at) > UNDO_BURST);
                 if fresh {
@@ -2819,6 +2821,38 @@ fn run(
                         },
                         Err(e) => menu.flash(e),
                     }
+                }
+                Effect::ResetPage(page) => {
+                    resetting = true;
+                    let fx = match page {
+                        menu::Page::Playback => vec![
+                            Effect::SetSpeed(config::DEFAULT_SPEED),
+                            Effect::SetCycle(None),
+                            Effect::SetCycleScope(CycleScope::All),
+                            Effect::SetFade(config::DEFAULT_FADE),
+                            Effect::SetPlayback(Default::default()),
+                        ],
+                        menu::Page::Display => {
+                            let mut v = vec![
+                                Effect::SetPixels(platform_default_pixels()),
+                                Effect::SetDetail(platform_default_detail()),
+                                Effect::SetSmooth(config::DEFAULT_SMOOTH),
+                                Effect::SetFps(settings.default_fps),
+                                Effect::SetClock(config::DEFAULT_CLOCK),
+                                Effect::SetDisplay(Default::default()),
+                            ];
+                            // a new renderer means a new worker: only when it changes
+                            if settings.renderer != termpaper::engine::Renderer::Auto {
+                                v.push(Effect::SetRenderer(termpaper::engine::Renderer::Auto));
+                            }
+                            v
+                        }
+                        _ => Vec::new(),
+                    };
+                    for f in fx.into_iter().rev() {
+                        effects.push_front(f);
+                    }
+                    menu.flash("Back to how termpaper starts · u undoes it");
                 }
                 Effect::FetchGallery => {
                     #[cfg(feature = "net")]

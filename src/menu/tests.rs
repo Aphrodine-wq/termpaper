@@ -1341,3 +1341,15 @@ fn r_picks_another_scene_from_the_list_on_show() {
     assert_ne!(m.browser.highlighted(&c).unwrap().name(), before);
     assert_eq!(m.browser.column, Column::Scenes);
 }
+
+#[test]
+fn playback_and_display_end_with_a_reset_row() {
+    let c = ctx();
+    for page in [Page::Playback, Page::Display] {
+        let rows = settings::page(page);
+        let last = rows.last().unwrap();
+        assert_eq!(last.label, "Reset this page");
+        assert_eq!(settings::action(last.id, &c), Some(Effect::ResetPage(page)));
+        assert!(Effect::ResetPage(page).undoable());
+    }
+}
