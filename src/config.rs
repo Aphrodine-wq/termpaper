@@ -42,6 +42,10 @@ pub struct Config {
     pub gpu: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub renderer: Option<crate::engine::Renderer>,
+    /// GPU milliseconds per frame a Studio scene may spend (default 3)
+    pub gpu_budget_ms: Option<f32>,
+    /// fps cap while a Studio scene is showing (default 60)
+    pub shader_fps: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pad: Option<i32>,
     /// global hue rotation in degrees (0 = off)

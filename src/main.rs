@@ -5,7 +5,7 @@ use termpaper::{color_wheel, config, filter, link, menu, render, scene, transiti
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use menu::{Effect, Menu, MenuCtx};
-use rand::{rngs::StdRng, RngExt, SeedableRng};
+use rand::RngExt;
 use render::Pixels;
 use scene::{Detail, SceneOptions};
 use ratatui::{layout::Rect, style::Style, text::Text, widgets::Paragraph};
@@ -128,10 +128,6 @@ fn detect_truecolor() -> bool {
         .unwrap_or(false)
 }
 
-fn entropy_rng() -> StdRng {
-    StdRng::from_rng(&mut rand::rng())
-}
-
 /// Fallback quality profile when neither CLI nor config sets one.
 /// macOS (MacBook thermal/battery headroom) defaults to half-res pixels
 /// and 0.5x particle counts; explicit --detail/--pixels/config always win.
@@ -177,7 +173,7 @@ fn main() -> std::io::Result<()> {
     }
 
     if let Some(scene) = &args.switch {
-        if scene::create(scene, &Default::default(), entropy_rng()).is_none() {
+        if !scene::exists(scene) {
             eprintln!("termpaper: unknown scene '{scene}'. See --list.");
             std::process::exit(2);
         }
@@ -200,17 +196,24 @@ fn main() -> std::io::Result<()> {
 
     if args.list {
         // one write: piping into `head` shouldn't panic on SIGPIPE
-        let out: String = scene::catalog()
-            .iter()
-            .map(|(name, desc)| format!("{name:<12} {desc}\n"))
-            .collect();
+        let mut out = String::new();
+        for cat in scene::Category::ALL {
+            let group: Vec<_> = scene::entries().filter(|e| e.category() == cat).collect();
+            if group.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("\n{} ({})\n", cat.label(), group.len()));
+            for e in group {
+                out.push_str(&format!("  {:<14} {}\n", e.name(), e.desc()));
+            }
+        }
         use std::io::Write;
         let _ = std::io::stdout().write_all(out.as_bytes());
         return Ok(());
     }
 
     let cfg = config::load();
-    let names = scene::names();
+    let names = scene::all_names();
 
     let detail = args
         .detail
@@ -223,13 +226,7 @@ fn main() -> std::io::Result<()> {
         .clone()
         .or_else(|| cfg.scene.clone())
         .unwrap_or_else(|| "rain".to_string());
-    let probe = SceneOptions {
-        theme: None,
-        detail,
-        text_scale: None,
-        pixels: Default::default(),
-    };
-    if scene::create(&scene_name, &probe, entropy_rng()).is_none() {
+    if !scene::exists(&scene_name) {
         eprintln!(
             "termpaper: unknown scene '{scene_name}'. Available: {}",
             names.join(", ")
@@ -282,6 +279,11 @@ fn main() -> std::io::Result<()> {
             None => termpaper::engine::Renderer::Auto,
         }) }
     });
+    let cfg_budget = cfg
+        .gpu_budget_ms
+        .unwrap_or(termpaper::engine::DEFAULT_GPU_BUDGET_MS)
+        .clamp(0.5, 50.0);
+    let cfg_shader_fps = cfg.shader_fps.unwrap_or(60).clamp(10, 240);
     let settings = Settings {
         link_enabled,
         link_group,
@@ -312,6 +314,8 @@ fn main() -> std::io::Result<()> {
         screensaver: args.screensaver,
         truecolor: detect_truecolor() && !args.no_truecolor,
         renderer,
+        gpu_budget_ms: cfg_budget,
+        shader_fps: cfg_shader_fps,
     };
 
     let mut terminal = ratatui::init();
@@ -359,6 +363,10 @@ struct Settings {
     screensaver: bool,
     truecolor: bool,
     renderer: termpaper::engine::Renderer,
+    /// GPU ms per frame a Studio scene may use (quality governor budget)
+    gpu_budget_ms: f32,
+    /// fps cap for Studio scenes: they animate on the shared 60 Hz tick
+    shader_fps: u32,
 }
 
 /// Snapshot the current runtime settings for broadcast.
@@ -498,7 +506,6 @@ fn apply_defaults(
     transition: &mut transition::Transition,
     guard: &mut Option<link::Guard>,
     quick_filter: &mut Option<String>,
-    current: &mut Box<dyn scene::Scene>,
 ) {
     config::reset_stored_defaults(&mut settings.cfg, scene_name);
 
@@ -528,7 +535,6 @@ fn apply_defaults(
     *quick_filter = None;
 
     transition.set_fade_secs(settings.fade);
-    *current = scene::create(scene_name, opts, entropy_rng()).expect("registry");
     reset_link_guard(
         guard,
         settings.link_enabled,
@@ -543,7 +549,7 @@ fn run(
     start_scene: &str,
     mut settings: Settings,
 ) -> std::io::Result<()> {
-    let names = scene::names();
+    let names = scene::all_names();
     let mut guard = if settings.link_enabled {
         link::Guard::new(start_scene, &settings.link_group).map(|mut g| {
             g.set_pad((settings.pad, settings.pad));
@@ -581,7 +587,6 @@ fn run(
         .iter()
         .position(|n| *n == start_scene)
         .unwrap_or(0);
-    let mut current = scene::create(names[idx], &opts, entropy_rng()).expect("validated");
     if let Some(g) = &mut guard {
         if let Some(ctrl) = g.latest_scene() {
             sync_params = Some((ctrl.seed, ctrl.t0_ms));
@@ -599,6 +604,8 @@ fn run(
     }
     let mut worker = termpaper::engine::Worker::new(settings.renderer);
     let mut rendered: Option<termpaper::engine::Frame> = None;
+    // backend status while no frame is coming (a Studio shader compiling)
+    let mut worker_status: Option<String> = None;
     let mut local_seed: u64 = rand::rng().random();
     let mut local_elapsed = 0.0f64;
     let mut wall_layout: Option<wall::WallLayout> = None;
@@ -660,10 +667,15 @@ fn run(
             sim_debt = (sim_debt + wall_dt).min(MAX_DEBT);
             plan_steps(&mut sim_debt, settings.speed)
         };
-        let fps_target = match settings.idle_fps {
+        let mut fps_target = match settings.idle_fps {
             Some(idle) if !focused => settings.fps.min(idle),
             _ => settings.fps,
         };
+        // Studio scenes change once per 60 Hz tick: more frames would only
+        // re-send identical cells
+        if scene::lookup(names[idx]).is_some_and(|e| e.needs_gpu()) {
+            fps_target = fps_target.min(settings.shader_fps);
+        }
         let frame_dur = Duration::from_secs_f64(1.0 / fps_target as f64);
 
         // scene cycling
@@ -807,11 +819,6 @@ fn run(
             // instance builds the identical simulation
             let sp = sync_params.take();
             cur_sync = sp;
-            let rng = match sp {
-                Some((seed, _)) => StdRng::seed_from_u64(seed),
-                None => entropy_rng(),
-            };
-            current = scene::create(names[idx], &opts, rng).expect("registry");
             local_seed = rand::rng().random();
             local_elapsed = 0.0;
             sim_debt = 0.0;
@@ -907,8 +914,11 @@ fn run(
                 elapsed_ms, speed: settings.speed, paused, filters: settings.filters.clone(),
                 quick: quick_filter.clone(), hue: settings.hue_shift, saturation: settings.saturation,
                 contrast: settings.contrast, dim: fade * settings.dim, smooth: settings.smooth,
+                budget_ms: settings.gpu_budget_ms,
+                prefetch: transition.pending().map(|i| names[i % names.len()].to_string()),
             };
-            if let Some(frame) = worker.submit(request) { rendered = Some(frame); }
+            if let Some(frame) = worker.submit(request) { rendered = Some(frame); worker_status = None; }
+            if let Some(st) = worker.take_status() { worker_status = Some(st); }
             if rendered.as_ref().is_some_and(|frame| frame.generation != worker.generation()) {
                 rendered = None;
             }
@@ -935,7 +945,7 @@ fn run(
                 let a = 1.0 - (hint_age - 3.0).clamp(0.0, 1.0);
                 let g = (90.0 * a) as u8;
                 if g > 8 {
-                    let hint = format!("? menu · c color grade · ←/→ scene · q quit · {}", current.name());
+                    let hint = format!("? menu · c color grade · ←/→ scene · q quit · {}", names[idx]);
                     let rect = Rect {
                         x: area.x,
                         y: area.y + area.height.saturating_sub(1),
@@ -973,7 +983,7 @@ fn run(
             // the menu floats over the live scene
             if menu.open {
                 let ctx = MenuCtx {
-                    renderer_status: rendered.as_ref().map(|f| format!("{} · worker {:.1} ms", f.backend, f.render_ms))
+                    renderer_status: worker_status.clone().or_else(|| rendered.as_ref().map(|f| format!("{} · worker {:.1} ms", f.backend, f.render_ms)))
                         .unwrap_or_else(|| "Renderer initializing…".into()),
                     wall_status: match wall_layout {
                         Some(l) => format!("wall: {}x{} cells @ ({},{})", l.virtual_w, l.virtual_h, l.crop_x, l.crop_y),
@@ -1139,7 +1149,6 @@ fn run(
                             &mut transition,
                             &mut guard,
                             &mut quick_filter,
-                            &mut current,
                         );
                         persist(&mut settings, names[idx], &opts);
                         if let Some(g) = &mut guard {
@@ -1218,8 +1227,6 @@ fn run(
                                     }
                                     Effect::SetDetail(d) => {
                                         opts.detail = d;
-                                        current = scene::create(names[idx], &opts, entropy_rng())
-                                            .expect("registry");
                                         if let Some(g) = &mut guard {
                                             g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                                         }
@@ -1234,14 +1241,10 @@ fn run(
                                             g.publish(names[idx], t.as_deref(), seed, t0);
                                         }
                                         opts.theme = t;
-                                        current = scene::create(names[idx], &opts, entropy_rng())
-                                            .expect("registry");
                                     }
                                     Effect::SetTextScale(ts) => {
                                         settings.text_scale = ts;
                                         opts.text_scale = ts;
-                                        current = scene::create(names[idx], &opts, entropy_rng())
-                                            .expect("registry");
                                         if let Some(g) = &mut guard {
                                             g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                                         }
@@ -1436,7 +1439,6 @@ fn run(
                         }
                     } else if km.matches("detail_next", key.code) {
                         opts.detail = opts.detail.next();
-                        current = scene::create(names[idx], &opts, entropy_rng()).expect("registry");
                         if let Some(g) = &mut guard {
                             g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                         }

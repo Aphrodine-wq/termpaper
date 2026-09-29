@@ -8,6 +8,7 @@ pub mod color_wheel;
 pub mod config;
 pub mod engine;
 pub mod filter;
+pub mod governor;
 pub mod link;
 pub mod menu;
 pub mod physics;

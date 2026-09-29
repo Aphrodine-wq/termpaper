@@ -47,7 +47,13 @@ use std::sync::Arc;
 
 use crate::canvas::{Canvas, Cell};
 use crate::render::Pixels;
+mod shader_scene;
 mod world;
+
+pub use shader_scene::{
+    shader_time, uniforms, FrameDesc, FrameUniforms, Pixels as ShaderPixels, ShaderTime, ShaderView,
+    Status as ShaderStatus,
+};
 
 /// Below this pixel count the GPU path is not worth its setup cost.
 ///
@@ -118,6 +124,17 @@ struct Slot {
     serial: usize,
     /// Cells the in-flight copy will contain, or None when the slot is idle.
     pending: Option<usize>,
+    /// The copy also carries the scene pass's two timestamps after the cells.
+    timed: bool,
+}
+
+/// Bytes appended to a staging slot for the scene pass's begin/end timestamps.
+const TIMING_BYTES: usize = 16;
+
+/// Where the timestamps sit in a staging slot: after the cells, rounded up to
+/// the 8-byte alignment mapped ranges require.
+fn timing_offset(cell_bytes: u64) -> u64 {
+    (cell_bytes + 7) & !7
 }
 
 /// A frame's worth of post-processing, described independently of the GPU so
@@ -181,6 +198,16 @@ pub struct Gpu {
     adapter_name: String,
     world: Option<world::World>,
     world_frame: Option<(String, crate::scene::SceneOptions, u64, f32, f32)>,
+
+    /// Studio shader scenes: pipelines, compile thread, uniforms.
+    shader: Option<shader_scene::ShaderScenes>,
+    shader_frame: Option<(&'static crate::scene::shader::ShaderSpec, FrameUniforms)>,
+    /// Bumped whenever the pixel buffers are reallocated, so cached bind
+    /// groups that point at them know to rebuild.
+    buffers_gen: u64,
+    /// Timestamp queries for the scene pass, when the adapter has them.
+    timestamps: Option<(wgpu::QuerySet, wgpu::Buffer)>,
+    scene_ms: Option<f32>,
 }
 
 /// The finished cells of a frame, ready to be written into a ratatui buffer.
@@ -244,13 +271,31 @@ impl Gpu {
             return None;
         }
 
+        // Timestamps let the quality governor measure the scene pass exactly;
+        // without them it falls back to backpressure alone.
+        let features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("termpaper-post"),
-            required_features: wgpu::Features::empty(),
+            required_features: features,
             required_limits: limits,
             ..Default::default()
         }))
         .ok()?;
+        let timestamps = features.contains(wgpu::Features::TIMESTAMP_QUERY).then(|| {
+            (
+                device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("scene-ts"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count: 2,
+                }),
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("scene-ts-resolve"),
+                    size: 256,
+                    usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                }),
+            )
+        });
 
         // Let the worker switch to CPU instead of repeatedly submitting to a
         // failed device or leaving the terminal permanently blank.
@@ -385,6 +430,11 @@ impl Gpu {
             adapter_name,
             world: None,
             world_frame: None,
+            shader: None,
+            shader_frame: None,
+            buffers_gen: 0,
+            timestamps,
+            scene_ms: None,
         };
         gpu.resize(width, height, max_cells);
         Some(gpu)
@@ -406,6 +456,7 @@ impl Gpu {
     }
 
     pub fn scene_frame(&mut self, name: &str, opts: &crate::scene::SceneOptions, seed: u64, seconds: f32, speed: f32) {
+        self.shader_frame = None;
         self.world_frame = Some((name.into(), opts.clone(), seed, seconds, speed));
     }
 
@@ -414,6 +465,7 @@ impl Gpu {
     /// filters, grading, smoothing and terminal packing.
     pub fn canvas_frame(&mut self) {
         self.world_frame = None;
+        self.shader_frame = None;
     }
 
     fn pixel_buffer(device: &wgpu::Device, px: usize, label: &str) -> wgpu::Buffer {
@@ -485,7 +537,8 @@ impl Gpu {
             mk(&self.buf_b, &self.buf_a, self),
         ];
 
-        let bytes = (max_cells.max(1) * CELL_WORDS * 4) as u64;
+        self.buffers_gen += 1;
+        let bytes = timing_offset((max_cells.max(1) * CELL_WORDS * 4) as u64) + TIMING_BYTES as u64;
         self.slots = (0..SLOTS)
             .map(|i| Slot {
                 buf: self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -498,6 +551,7 @@ impl Gpu {
                 failed: Arc::new(AtomicBool::new(false)),
                 serial: 0,
                 pending: None,
+                timed: false,
             })
             .collect();
 
@@ -649,7 +703,10 @@ impl Gpu {
     pub fn submit(&mut self, canvas: &Canvas, plan: &Plan) -> bool {
         if self.failed() { return false; }
         let (w, h) = self.dims;
-        debug_assert_eq!((canvas.width(), canvas.height()), (w, h));
+        let shader = self.shader_frame.is_some();
+        if !shader {
+            debug_assert_eq!((canvas.width(), canvas.height()), (w, h));
+        }
         let cells = plan.cols * plan.rows;
         if cells == 0 || cells > self.cell_capacity {
             return false;
@@ -666,9 +723,16 @@ impl Gpu {
             return false;
         }
 
-        // Pack the canvas. The glyph flag rides in the top byte so the shaders
-        // know which cells hold text without needing the characters.
-        if let Some((name, opts, seed, seconds, speed)) = &self.world_frame {
+        // Produce the frame's pixels in buf_a: a Studio scene pass (encoded
+        // below), a WGSL world, or the uploaded CPU canvas. The glyph flag
+        // rides in the top byte so the shaders know which cells hold text.
+        if let Some((spec, u)) = self.shader_frame {
+            let ready = self.shader.as_ref().is_some_and(|s| s.pipeline(spec.name).is_some());
+            if !ready || u.size[0] as usize != w || u.size[1] as usize != h {
+                return false;
+            }
+            self.shader.as_ref().unwrap().write_uniforms(&self.queue, &u);
+        } else if let Some((name, opts, seed, seconds, speed)) = &self.world_frame {
             let world = self.world.get_or_insert_with(|| world::World::new(&self.device, self.dims));
             world.render(&self.device, &self.queue, &self.buf_a, self.dims,
                 name, opts, *seed, *seconds, *speed);
@@ -682,19 +746,6 @@ impl Gpu {
             self.queue.write_buffer(&self.buf_a, 0, bytemuck::cast_slice(&self.upload));
         }
 
-        // Smoothing reads history; on the first frame at a new size there is
-        // none, so seed it with the current frame — same as the CPU path,
-        // which starts from a black `prev_canvas` and converges. Seeding with
-        // the current frame instead avoids a one-frame fade-in on resize.
-        if plan.smooth > 0.001 && !self.prev_valid {
-            let mut enc = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("seed") });
-            enc.copy_buffer_to_buffer(&self.buf_a, 0, &self.scratch, 0, (w * h * 4) as u64);
-            self.queue.submit([enc.finish()]);
-            self.prev_valid = true;
-        }
-
         // One uniform write for every pass, then dynamic offsets select them.
         let stride = self.params_stride as usize;
         let mut raw = vec![0u8; stride * passes.len()];
@@ -706,7 +757,39 @@ impl Gpu {
 
         let mut enc = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("post") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        let mut timed = false;
+        if let Some((spec, _)) = self.shader_frame {
+            let gen = self.buffers_gen;
+            let scenes = self.shader.as_mut().unwrap();
+            scenes.bind_group(&self.device, &self.buf_a, gen);
+            let scenes = self.shader.as_ref().unwrap();
+            let pipeline = scenes.pipeline(spec.name).unwrap();
+            let bind = scenes.current_bind();
+            let tw = self.timestamps.as_ref().map(|(qs, _)| wgpu::ComputePassTimestampWrites {
+                query_set: qs,
+                beginning_of_pass_write_index: Some(0),
+                end_of_pass_write_index: Some(1),
+            });
+            timed = tw.is_some();
+            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("studio-scene"),
+                timestamp_writes: tw,
+            });
+            cp.set_pipeline(pipeline);
+            cp.set_bind_group(0, bind, &[]);
+            cp.dispatch_workgroups((w as u32).div_ceil(8), (h as u32).div_ceil(8), 1);
+        }
+
+        // Smoothing reads history; on the first frame at a new size there is
+        // none, so seed it with the current frame — same as the CPU path,
+        // which starts from a black `prev_canvas` and converges. Seeding with
+        // the current frame instead avoids a one-frame fade-in on resize.
+        if plan.smooth > 0.001 && !self.prev_valid {
+            enc.copy_buffer_to_buffer(&self.buf_a, 0, &self.scratch, 0, (w * h * 4) as u64);
+            self.prev_valid = true;
+        }
+
         {
             let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("post"),
@@ -730,13 +813,13 @@ impl Gpu {
                 }
             }
         }
-        enc.copy_buffer_to_buffer(
-            &self.buf_cells,
-            0,
-            &self.slots[slot_idx].buf,
-            0,
-            (cells * CELL_WORDS * 4) as u64,
-        );
+        let cell_bytes = (cells * CELL_WORDS * 4) as u64;
+        enc.copy_buffer_to_buffer(&self.buf_cells, 0, &self.slots[slot_idx].buf, 0, cell_bytes);
+        if timed {
+            let (qs, resolve) = self.timestamps.as_ref().unwrap();
+            enc.resolve_query_set(qs, 0..2, resolve, 0);
+            enc.copy_buffer_to_buffer(resolve, 0, &self.slots[slot_idx].buf, timing_offset(cell_bytes), TIMING_BYTES as u64);
+        }
         self.queue.submit([enc.finish()]);
 
         let ready = self.slots[slot_idx].ready.clone();
@@ -744,9 +827,10 @@ impl Gpu {
         let cb_ready = ready.clone();
         let failed = self.slots[slot_idx].failed.clone();
         failed.store(false, Ordering::Release);
+        let mapped = if timed { timing_offset(cell_bytes) + TIMING_BYTES as u64 } else { cell_bytes };
         self.slots[slot_idx]
             .buf
-            .slice(..(cells * CELL_WORDS * 4) as u64)
+            .slice(..mapped)
             .map_async(wgpu::MapMode::Read, move |res| {
                 if res.is_ok() {
                     cb_ready.store(true, Ordering::Release);
@@ -755,6 +839,7 @@ impl Gpu {
                 }
             });
         self.slots[slot_idx].pending = Some(cells);
+        self.slots[slot_idx].timed = timed;
         self.slots[slot_idx].serial = self.frame;
         self.frame += 1;
         true
@@ -793,6 +878,16 @@ impl Gpu {
                     self.readback.extend_from_slice(bytemuck::cast_slice(&view[..]));
                     self.readback_cells = n;
                     self.readback_serial = Some(self.slots[i].serial);
+                }
+                if self.slots[i].timed {
+                    let at = timing_offset((n * CELL_WORDS * 4) as u64);
+                    if let Ok(view) = self.slots[i].buf.slice(at..at + TIMING_BYTES as u64).get_mapped_range() {
+                        let t: &[u32] = bytemuck::cast_slice(&view[..]);
+                        let t0 = t[0] as u64 | (t[1] as u64) << 32;
+                        let t1 = t[2] as u64 | (t[3] as u64) << 32;
+                        let ns = t1.saturating_sub(t0) as f64 * self.queue.get_timestamp_period() as f64;
+                        self.scene_ms = Some((ns / 1e6) as f32);
+                    }
                 }
             }
             self.reclaim(i);

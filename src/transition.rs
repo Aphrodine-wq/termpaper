@@ -82,6 +82,12 @@ impl Transition {
         }
     }
 
+    /// The scene a queued or in-progress switch will land on — lets the
+    /// renderer start compiling it while the old scene fades out.
+    pub fn pending(&self) -> Option<usize> {
+        self.pending
+    }
+
     #[cfg(test)]
     pub fn is_idle(&self) -> bool {
         self.phase == Phase::Steady && self.pending.is_none()

@@ -52,6 +52,8 @@ pub mod ribbons;
 pub mod ripple;
 pub mod sand;
 pub mod scroll;
+pub mod shader;
+pub mod shader_meta;
 pub mod shells;
 pub mod sonar;
 pub mod starfield;
@@ -475,28 +477,140 @@ pub const SCENES: &[SceneDef] = &[
     },
 ];
 
+/// The Classic (CPU) scenes, in registry order. Tests, `Playback` and the
+/// WGSL world shader's positional ids all work on this list; the UI uses
+/// [`all_names`], which also includes the Studio shader scenes.
 pub fn names() -> Vec<&'static str> {
     SCENES.iter().map(|s| s.name).collect()
 }
 
-/// All scenes for --list and the settings menu.
-pub fn catalog() -> Vec<(&'static str, &'static str)> {
-    SCENES.iter().map(|s| (s.name, s.desc)).collect()
+/// Every scene, Studio and Classic, in browser order (see [`entries`]).
+pub fn all_names() -> Vec<&'static str> {
+    entries().map(|e| e.name()).collect()
 }
 
-/// Look a scene up by name.
+/// All scenes as (name, desc) for --list and the settings menu, in the same
+/// order as [`all_names`].
+pub fn catalog() -> Vec<(&'static str, &'static str)> {
+    entries().map(|e| (e.name(), e.desc())).collect()
+}
+
+/// Look a Classic scene up by name. Studio scenes are not `SceneDef`s — use
+/// [`lookup`] for either kind.
 pub fn find(name: &str) -> Option<&'static SceneDef> {
     SCENES.iter().find(|s| s.name == name)
 }
 
-/// Named themes available for a scene (first = default).
+/// Named themes available for a scene of either kind (first = default).
 pub fn themes(name: &str) -> &'static [&'static str] {
-    find(name).map(|s| s.themes).unwrap_or(&[])
+    lookup(name).map(|e| e.themes()).unwrap_or(&[])
 }
 
-/// Build a scene by name with options.
+/// Build a Classic scene by name with options. Studio scenes have no CPU
+/// implementation and return `None` (their fallback is a Classic scene).
 pub fn create(name: &str, opts: &SceneOptions, rng: StdRng) -> Option<Box<dyn Scene>> {
     find(name).map(|s| (s.make)(rng, opts))
+}
+
+pub use shader::Category;
+
+/// A scene of either kind.
+#[derive(Clone, Copy)]
+pub enum Entry {
+    Cpu(&'static SceneDef),
+    Shader(&'static shader::ShaderSpec),
+}
+
+impl Entry {
+    pub fn name(self) -> &'static str {
+        match self {
+            Entry::Cpu(d) => d.name,
+            Entry::Shader(s) => s.name,
+        }
+    }
+    /// Display title ("Tokyo Alley"); Classic scenes use their name.
+    pub fn title(self) -> &'static str {
+        match self {
+            Entry::Cpu(d) => d.name,
+            Entry::Shader(s) => s.title,
+        }
+    }
+    pub fn desc(self) -> &'static str {
+        match self {
+            Entry::Cpu(d) => d.desc,
+            Entry::Shader(s) => s.desc,
+        }
+    }
+    pub fn themes(self) -> &'static [&'static str] {
+        match self {
+            Entry::Cpu(d) => d.themes,
+            Entry::Shader(s) => s.themes,
+        }
+    }
+    pub fn category(self) -> Category {
+        match self {
+            Entry::Cpu(_) => Category::Classic,
+            Entry::Shader(s) => s.category,
+        }
+    }
+    pub fn tags(self) -> &'static [&'static str] {
+        match self {
+            Entry::Cpu(d) => classic_tags(d.name),
+            Entry::Shader(s) => s.tags,
+        }
+    }
+    /// Sub-heading inside a category: Classic scenes are grouped by kind.
+    pub fn group(self) -> &'static str {
+        match self {
+            Entry::Cpu(d) => classic_tags(d.name).first().copied().unwrap_or("other"),
+            Entry::Shader(s) => s.category.label(),
+        }
+    }
+    /// Studio scenes render on the GPU; without one they show their fallback.
+    pub fn needs_gpu(self) -> bool {
+        matches!(self, Entry::Shader(_))
+    }
+}
+
+/// Every scene in browser order: Studio scenes by category, then Classic in
+/// registry order.
+pub fn entries() -> impl Iterator<Item = Entry> {
+    shader::SHADER_SCENES
+        .iter()
+        .map(Entry::Shader)
+        .chain(SCENES.iter().map(Entry::Cpu))
+}
+
+/// Find a scene of either kind.
+pub fn lookup(name: &str) -> Option<Entry> {
+    shader::find(name)
+        .map(Entry::Shader)
+        .or_else(|| find(name).map(Entry::Cpu))
+}
+
+pub fn exists(name: &str) -> bool {
+    lookup(name).is_some()
+}
+
+/// Classic scenes' browser groups and search tags; the first tag is the group.
+fn classic_tags(name: &str) -> &'static [&'static str] {
+    match name {
+        "rain" | "aurora" | "clouds" | "meadow" | "fireflies" | "frost" | "canopy" | "alpine"
+        | "airspace" | "scroll" => &["nature", "landscape"],
+        "ocean" | "koi" | "abyss" | "aquarium" | "ripple" => &["water", "nature"],
+        "starfield" | "meteors" | "nebula" | "orbits" => &["space"],
+        "plasma" | "tunnel" | "fire" | "pipes" | "dvd" | "bump" | "grid" | "mandel" => {
+            &["demoscene", "retro"]
+        }
+        "life" | "boids" | "sand" | "reaction" | "lava" | "harmonograph" | "pendulum"
+        | "inkdrop" | "mosaic" | "tide" | "ribbons" | "nexus" | "candy" => {
+            &["generative", "simulation"]
+        }
+        "city" | "traffic" | "drive" | "finale" => &["urban", "night"],
+        "circuits" | "sonar" | "clockwork" => &["machines"],
+        "den" | "incense" | "campfire" | "lanterns" => &["cozy"],
+        _ => &["other"],
+    }
 }
 
 /// Scenes drawn by their WGSL arm in `src/gpu/shaders/world.wgsl` when a GPU
@@ -926,7 +1040,8 @@ mod registry_tests {
     #[test]
     fn registry_is_internally_consistent() {
         assert_eq!(SCENES.len(), names().len());
-        assert_eq!(SCENES.len(), catalog().len());
+        // the catalog lists Studio scenes too
+        assert_eq!(SCENES.len() + shader::SHADER_SCENES.len(), catalog().len());
         for def in SCENES {
             assert!(!def.desc.is_empty(), "{} has no description", def.name);
             assert!(!def.themes.is_empty(), "{} has no themes", def.name);
