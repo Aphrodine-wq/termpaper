@@ -2,124 +2,216 @@
 
 use termpaper::{color_wheel, config, filter, link, menu, render, scene, transition, wall};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use config::CycleScope;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use menu::{Effect, Menu, MenuCtx};
 use rand::RngExt;
 use render::Pixels;
 use scene::{Detail, SceneOptions};
 use ratatui::{layout::Rect, style::Style, text::Text, widgets::Paragraph};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(
     name = "termpaper",
     version,
-    about = "Wallpaper Engine for the terminal — 120fps, 22 filters, sync clusters, seamless walls"
+    about = "Wallpaper Engine for the terminal — 120fps, 22 filters, sync clusters, seamless walls",
+    after_help = "Press ? in a running scene for the menu; `termpaper list` shows the catalog."
 )]
 struct Args {
-    /// Scene to run (see --list)
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Scene to run (see `termpaper list`)
+    #[arg(help_heading = "Scene", display_order = 0)]
     scene: Option<String>,
 
-    /// List available scenes and exit
-    #[arg(long)]
-    list: bool,
+    /// Scene color theme (e.g. nexus: cyan/amber/violet/mono)
+    #[arg(long, help_heading = "Scene")]
+    theme: Option<String>,
 
-    /// Rotate through all scenes every N seconds
-    #[arg(long)]
+    /// Move on to another scene every N seconds
+    #[arg(long, value_name = "SECS", help_heading = "Scene")]
     cycle: Option<f64>,
 
+    /// Animation speed multiplier
+    #[arg(long, help_heading = "Scene")]
+    speed: Option<f32>,
+
+    /// Screensaver mode: any key exits
+    #[arg(long, help_heading = "Scene")]
+    screensaver: bool,
+
+    /// Post-processing filter, repeatable (e.g. --filter crt --filter bloom)
+    #[arg(long, help_heading = "Look")]
+    filter: Vec<String>,
+
+    /// Pixel mode: half, quad or braille
+    #[arg(long, help_heading = "Look")]
+    pixels: Option<String>,
+
+    /// Bump text scale: 1, 2 or 3
+    #[arg(long, help_heading = "Look")]
+    text_scale: Option<u32>,
+
+    /// Force 256-color output even on truecolor terminals
+    #[arg(long, help_heading = "Look")]
+    no_truecolor: bool,
+
     /// Target frames per second
-    #[arg(long)]
+    #[arg(long, help_heading = "Performance")]
     fps: Option<u32>,
 
     /// Throttle to this fps while the terminal is unfocused (needs a
     /// terminal that reports focus; off unless set)
-    #[arg(long)]
+    #[arg(long, help_heading = "Performance")]
     idle_fps: Option<u32>,
 
-    /// Animation speed multiplier
-    #[arg(long)]
-    speed: Option<f32>,
-
-    /// Scene color theme (see --list; e.g. nexus: cyan/amber/violet/mono)
-    #[arg(long)]
-    theme: Option<String>,
-
-    /// Post-processing filter (repeatable): scanlines, vignette, grain,
-    /// warm, cool, hue, crt
-    #[arg(long)]
-    filter: Vec<String>,
-
-    /// Detail level: low, medium or high (particle/layer counts)
-    #[arg(long)]
+    /// Quality: low, medium or high (particle/layer counts)
+    #[arg(long, help_heading = "Performance")]
     detail: Option<String>,
-
-    /// Pixel mode: half, quad or braille
-    #[arg(long)]
-    pixels: Option<String>,
-
-    /// Bump text scale: 1, 2 or 3
-    #[arg(long)]
-    text_scale: Option<u32>,
-
-    /// Force 256-color output even on truecolor terminals
-    #[arg(long)]
-    no_truecolor: bool,
-
-    /// Legacy alias for --renderer gpu. Requires --features gpu and Vulkan;
-    /// falls back to CPU if unavailable (shown in the settings menu).
-    #[arg(long)]
-    gpu: bool,
 
     /// Rendering backend: auto = GPU post-processing when compiled and
     /// available, scenes run on the CPU; gpu = same, but reports if the GPU
     /// is missing; cpu = everything on the CPU; shader = draw every scene
     /// from its experimental WGSL world instead of the Rust scene
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, help_heading = "Performance")]
     renderer: Option<termpaper::engine::Renderer>,
 
-    /// Screensaver mode: any key exits
-    #[arg(long)]
-    screensaver: bool,
+    /// Legacy alias for --renderer gpu
+    #[arg(long, hide = true)]
+    gpu: bool,
 
     /// Enable instance linking (default on)
-    #[arg(long, overrides_with = "no_link")]
+    #[arg(long, overrides_with = "no_link", help_heading = "Linking & wall")]
     link: bool,
 
     /// Disable instance linking
-    #[arg(long)]
+    #[arg(long, help_heading = "Linking & wall")]
     no_link: bool,
 
-    /// List live termpaper instances and exit
-    #[arg(long)]
-    instances: bool,
-
-    /// Publish a scene switch to all running instances and exit
-    #[arg(long)]
-    switch: Option<String>,
-
     /// Link group for this instance (instances in the same group sync)
-    #[arg(long)]
+    #[arg(long, help_heading = "Linking & wall")]
     group: Option<String>,
-
-    /// With --switch, publish to every link group
-    #[arg(long)]
-    all_groups: bool,
 
     /// Never join a video wall: render the local canvas and hide this
     /// window's geometry from peers (linking still syncs scenes)
-    #[arg(long)]
+    #[arg(long, help_heading = "Linking & wall")]
     no_wall: bool,
 
     /// Manual video-wall tiling: COLSxROWS:INDEX (e.g. 2x1:0)
-    #[arg(long)]
+    #[arg(long, help_heading = "Linking & wall")]
     wall: Option<String>,
 
     /// Terminal padding in px (all sides) so wall crops line up across
     /// window borders despite the margin
-    #[arg(long)]
+    #[arg(long, help_heading = "Linking & wall")]
     pad: Option<i32>,
+
+    // Pre-subcommand spellings, kept working but out of --help.
+    /// Old spelling of `termpaper list`
+    #[arg(long, hide = true)]
+    list: bool,
+
+    /// Old spelling of `termpaper instances`
+    #[arg(long, hide = true)]
+    instances: bool,
+
+    /// Old spelling of `termpaper switch SCENE`
+    #[arg(long, hide = true, value_name = "SCENE")]
+    switch: Option<String>,
+
+    /// Old spelling of `termpaper switch SCENE --all`
+    #[arg(long, hide = true)]
+    all_groups: bool,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// List scenes by category and exit
+    List {
+        /// Only this category: coast, wilds, weather, city, cozy, space or classic
+        #[arg(long)]
+        category: Option<String>,
+    },
+    /// List live termpaper instances in every group and exit
+    Instances,
+    /// Switch running instances to a scene and exit
+    Switch {
+        /// Scene to switch to
+        scene: String,
+        /// Link group to switch (default: "default")
+        #[arg(long)]
+        group: Option<String>,
+        /// Switch every link group
+        #[arg(long, conflicts_with = "group")]
+        all: bool,
+    },
+}
+
+fn print_instances() {
+    let list = link::list_all_instances();
+    if list.is_empty() {
+        println!("no live termpaper instances");
+    }
+    for i in &list {
+        println!(
+            "pid {:<8} group {:<10} scene {:<12} up {}s",
+            i.pid,
+            i.group,
+            i.scene,
+            link::uptime_secs(i.started_at)
+        );
+    }
+}
+
+fn switch_remote(scene: &str, group: Option<&str>, all: bool) -> std::io::Result<()> {
+    if !scene::exists(scene) {
+        eprintln!("termpaper: unknown scene '{scene}'. See `termpaper list`.");
+        std::process::exit(2);
+    }
+    let seed: u64 = rand::rng().random();
+    let t0 = link::epoch_now_ms();
+    if all {
+        link::publish_remote_all_groups(scene, seed, t0)?;
+        println!("published switch to '{scene}' (all groups)");
+    } else {
+        let group = group
+            .map(link::sanitize_group)
+            .unwrap_or_else(|| "default".into());
+        link::publish_remote(scene, seed, t0, &group)?;
+        println!("published switch to '{scene}' (group {group})");
+    }
+    Ok(())
+}
+
+fn print_list(category: Option<&str>) {
+    let only = category.map(|s| {
+        scene::Category::parse(&s.to_lowercase()).unwrap_or_else(|| {
+            let slugs: Vec<_> = scene::Category::ALL.iter().map(|c| c.slug()).collect();
+            eprintln!("termpaper: unknown category '{s}'. Categories: {}", slugs.join(", "));
+            std::process::exit(2);
+        })
+    });
+    // one write: piping into `head` shouldn't panic on SIGPIPE
+    let mut out = String::new();
+    for cat in scene::Category::ALL {
+        if only.is_some_and(|c| c != cat) {
+            continue;
+        }
+        let group: Vec<_> = scene::entries().filter(|e| e.category() == cat).collect();
+        if group.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n{} ({})\n", cat.label(), group.len()));
+        for e in group {
+            out.push_str(&format!("  {:<14} {}\n", e.name(), e.desc()));
+        }
+    }
+    use std::io::Write;
+    let _ = std::io::stdout().write_all(out.as_bytes());
 }
 
 fn detect_truecolor() -> bool {
@@ -148,68 +240,40 @@ fn platform_default_pixels() -> Pixels {
 }
 
 fn main() -> std::io::Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     // termpaper is a color-art program: color output is the entire point.
     // crossterm honors NO_COLOR by stripping all colors, which would render
     // every scene as blank gray blocks — explicitly re-enable colors.
     crossterm::style::Colored::set_ansi_color_disabled(false);
 
-    if args.instances {
-        let list = link::list_all_instances();
-        if list.is_empty() {
-            println!("no live termpaper instances");
-        }
-        for i in &list {
-            println!(
-                "pid {:<8} group {:<10} scene {:<12} up {}s",
-                i.pid,
-                i.group,
-                i.scene,
-                link::uptime_secs(i.started_at)
-            );
-        }
-        return Ok(());
-    }
-
-    if let Some(scene) = &args.switch {
-        if !scene::exists(scene) {
-            eprintln!("termpaper: unknown scene '{scene}'. See --list.");
-            std::process::exit(2);
-        }
-        let seed: u64 = rand::rng().random();
-        let t0 = link::epoch_now_ms();
-        if args.all_groups {
-            link::publish_remote_all_groups(scene, seed, t0)?;
-            println!("published switch to '{scene}' (all groups)");
+    // the old flags map onto the subcommands (same precedence as before)
+    let command = args.command.take().or_else(|| {
+        if args.instances {
+            Some(Command::Instances)
+        } else if let Some(scene) = args.switch.clone() {
+            Some(Command::Switch { scene, group: None, all: args.all_groups })
+        } else if args.list {
+            Some(Command::List { category: None })
         } else {
-            let group = args
-                .group
-                .as_deref()
-                .map(link::sanitize_group)
-                .unwrap_or_else(|| "default".into());
-            link::publish_remote(scene, seed, t0, &group)?;
-            println!("published switch to '{scene}' (group {group})");
+            None
         }
-        return Ok(());
-    }
-
-    if args.list {
-        // one write: piping into `head` shouldn't panic on SIGPIPE
-        let mut out = String::new();
-        for cat in scene::Category::ALL {
-            let group: Vec<_> = scene::entries().filter(|e| e.category() == cat).collect();
-            if group.is_empty() {
-                continue;
-            }
-            out.push_str(&format!("\n{} ({})\n", cat.label(), group.len()));
-            for e in group {
-                out.push_str(&format!("  {:<14} {}\n", e.name(), e.desc()));
-            }
+    });
+    match command {
+        Some(Command::Instances) => {
+            print_instances();
+            return Ok(());
         }
-        use std::io::Write;
-        let _ = std::io::stdout().write_all(out.as_bytes());
-        return Ok(());
+        Some(Command::Switch { scene, group, all }) => {
+            // `termpaper --group G switch X` works as well as `switch X --group G`
+            let group = group.or_else(|| args.group.clone());
+            return switch_remote(&scene, group.as_deref(), all);
+        }
+        Some(Command::List { category }) => {
+            print_list(category.as_deref());
+            return Ok(());
+        }
+        None => {}
     }
 
     let cfg = config::load();
@@ -225,7 +289,7 @@ fn main() -> std::io::Result<()> {
         .scene
         .clone()
         .or_else(|| cfg.scene.clone())
-        .unwrap_or_else(|| "rain".to_string());
+        .unwrap_or_else(|| config::DEFAULT_SCENE.to_string());
     if !scene::exists(&scene_name) {
         eprintln!(
             "termpaper: unknown scene '{scene_name}'. Available: {}",
@@ -297,6 +361,7 @@ fn main() -> std::io::Result<()> {
         fade: cfg.fade.unwrap_or(0.25),
         clock: cfg.clock.unwrap_or(true),
         pad: args.pad.or(cfg.pad).unwrap_or(0),
+        cycle_scope: cfg.cycle_scope.as_deref().map(CycleScope::parse).unwrap_or_default(),
         cfg,
         keymap,
         text_scale,
@@ -357,6 +422,8 @@ struct Settings {
     idle_fps: Option<u32>,
     speed: f32,
     cycle: Option<f64>,
+    /// which scenes `cycle` rotates through
+    cycle_scope: CycleScope,
     hue_shift: f32,
     saturation: f32,
     contrast: f32,
@@ -426,49 +493,136 @@ fn settings_msg(settings: &Settings, opts: &SceneOptions, quick: &Option<String>
     }
 }
 
-/// Merge current runtime settings into the stored config and save it.
-fn persist(settings: &mut Settings, scene_name: &str, opts: &SceneOptions) {
-    let cfg = &mut settings.cfg;
-    cfg.scene = Some(scene_name.to_string());
-    cfg.pixels = Some(settings.pixels.name().to_string());
-    cfg.detail = Some(opts.detail.name().to_string());
-    cfg.filters = settings.filters.clone();
-    cfg.text_scale = settings.text_scale;
-    cfg.smooth = Some(settings.smooth);
-    cfg.dim = Some(settings.dim);
-    cfg.fade = Some(settings.fade);
-    cfg.clock = Some(settings.clock);
-    cfg.cycle = settings.cycle;
-    cfg.fps = Some(settings.fps);
-    cfg.renderer = Some(settings.renderer);
-    cfg.speed = Some(settings.speed);
-    cfg.hue_shift = if settings.hue_shift < 0.5 {
-        None
+/// Merge current runtime settings into the stored config and save it. Only
+/// values that differ from the defaults are written, floats rounded to two
+/// decimals (see `config::store`). Callers go through `SaveTimer` so rapid
+/// changes coalesce into one write.
+fn persist(settings: &mut Settings, scene_name: &str, theme: Option<&str>, detail: Detail) {
+    // --no-link / --group / --no-wall isolate one launch: while the live
+    // value is still the one the flag forced, keep what the config had
+    let link = if settings.cli_no_link && !settings.link_enabled {
+        settings.cfg.link.unwrap_or(config::DEFAULT_LINK)
     } else {
-        Some(settings.hue_shift)
+        settings.link_enabled
     };
-    cfg.saturation = if (settings.saturation - 1.0).abs() < 0.02 {
-        None
+    let group = if settings.cli_group.as_deref() == Some(settings.link_group.as_str()) {
+        settings.cfg.group.clone().unwrap_or_else(|| config::DEFAULT_GROUP.into())
     } else {
-        Some(settings.saturation)
+        settings.link_group.clone()
     };
-    cfg.contrast = if (settings.contrast - 1.0).abs() < 0.02 {
-        None
+    let wall = if settings.cli_no_wall && !settings.wall_enabled {
+        settings.cfg.wall.unwrap_or(true)
     } else {
-        Some(settings.contrast)
+        settings.wall_enabled
     };
-    cfg.link = if settings.link_enabled { None } else { Some(false) };
-    cfg.wall = if settings.wall_enabled { None } else { Some(false) };
-    cfg.group = if settings.link_group == "default" {
-        None
-    } else {
-        Some(settings.link_group.clone())
+    let live = config::Live {
+        scene: scene_name,
+        theme,
+        pixels: settings.pixels.name(),
+        default_pixels: platform_default_pixels().name(),
+        detail: detail.name(),
+        default_detail: platform_default_detail().name(),
+        filters: &settings.filters,
+        text_scale: settings.text_scale,
+        fps: settings.fps,
+        speed: settings.speed,
+        smooth: settings.smooth,
+        dim: settings.dim,
+        fade: settings.fade,
+        clock: settings.clock,
+        cycle: settings.cycle,
+        cycle_scope: settings.cycle_scope,
+        hue_shift: settings.hue_shift,
+        saturation: settings.saturation,
+        contrast: settings.contrast,
+        renderer: settings.renderer,
+        link,
+        group: &group,
+        wall,
     };
-    if let Some(t) = &opts.theme {
-        cfg.themes.insert(scene_name.to_string(), t.clone());
-    }
-    if let Err(e) = config::save(cfg) {
+    config::store(&mut settings.cfg, &live);
+    if let Err(e) = config::save(&settings.cfg) {
         eprintln!("termpaper: could not save config: {e}");
+    }
+}
+
+/// What a browser preview replaced: restored when the preview is dropped,
+/// forgotten when it is kept.
+struct PreviewOrigin {
+    idx: usize,
+    theme: Option<String>,
+    /// the group anchor the original scene was running on
+    sync: Option<(u64, u64)>,
+    /// scene being previewed now
+    showing: usize,
+}
+
+/// The scene the config should remember. A preview is only on loan, so the
+/// scene it replaced (with that scene's theme) is what counts.
+fn remembered_scene<'a>(
+    preview: &'a Option<PreviewOrigin>,
+    names: &[&'static str],
+    idx: usize,
+    opts: &'a SceneOptions,
+) -> (&'static str, Option<&'a str>) {
+    match preview {
+        Some(p) => (names[p.idx], p.theme.as_deref()),
+        None => (names[idx], opts.theme.as_deref()),
+    }
+}
+
+/// Snapshot what the menu shows and adjusts. The status lines and instance
+/// list only matter for drawing; key handling passes empties.
+fn menu_ctx(
+    settings: &Settings,
+    opts: &SceneOptions,
+    scene_name: &'static str,
+    renderer_status: String,
+    wall_status: String,
+    instances: Vec<String>,
+) -> MenuCtx {
+    MenuCtx {
+        gpu: menu::gpu_state(&renderer_status, cfg!(feature = "gpu"), settings.renderer),
+        renderer_status,
+        wall_status,
+        scene_name,
+        pixels: settings.pixels,
+        detail: opts.detail,
+        theme: opts.theme.clone(),
+        text_scale: settings.text_scale,
+        speed: settings.speed,
+        fps: settings.fps,
+        smooth: settings.smooth,
+        dim: settings.dim,
+        fade: settings.fade,
+        clock: settings.clock,
+        cycle: settings.cycle,
+        cycle_scope: settings.cycle_scope,
+        hue_shift: settings.hue_shift,
+        saturation: settings.saturation,
+        contrast: settings.contrast,
+        renderer: settings.renderer,
+        link_enabled: settings.link_enabled,
+        link_group: settings.link_group.clone(),
+        wall_enabled: settings.wall_enabled,
+        truecolor: settings.truecolor,
+        filters: settings.filters.clone(),
+        favorites: settings.cfg.favorites.clone(),
+        recents: settings.cfg.recents.clone(),
+        scene_themes: settings.cfg.themes.clone(),
+        key_display: config::ACTIONS
+            .iter()
+            .map(|&a| {
+                let k = settings
+                    .cfg
+                    .keys
+                    .get(a)
+                    .cloned()
+                    .unwrap_or_else(|| config::default_key(a).to_string());
+                (a.to_string(), k)
+            })
+            .collect(),
+        instances,
     }
 }
 
@@ -521,6 +675,7 @@ fn apply_defaults(
     settings.fade = config::DEFAULT_FADE;
     settings.clock = config::DEFAULT_CLOCK;
     settings.cycle = None;
+    settings.cycle_scope = CycleScope::All;
     settings.hue_shift = 0.0;
     settings.saturation = 1.0;
     settings.contrast = 1.0;
@@ -568,6 +723,11 @@ fn run(
     // restart, and lets the leader re-publish the exact same sim state
     let mut cur_sync: Option<(u64, u64)> = None;
     let mut menu = Menu::new();
+    // menu effects queue here and apply at the top of the next frame
+    let mut pending_fx: Vec<Effect> = Vec::new();
+    // set while the browser previews a scene on this pane only
+    let mut preview: Option<PreviewOrigin> = None;
+    let mut save = config::SaveTimer::default();
     let mut color_open = false;
     let mut color_param = color_wheel::Param::Hue;
     let mut opts = SceneOptions {
@@ -611,7 +771,7 @@ fn run(
     let mut wall_layout: Option<wall::WallLayout> = None;
     let mut wall_refresh = Instant::now() - Duration::from_secs(10);
     // hyprctl inside the frame loop stalls the frame it lands on
-    let geo_watcher = if (settings.link_enabled && settings.wall_enabled) || settings.wall_spec.is_some() {
+    let mut geo_watcher = if (settings.link_enabled && settings.wall_enabled) || settings.wall_spec.is_some() {
         Some(wall::GeoWatcher::spawn())
     } else {
         None
@@ -678,6 +838,263 @@ fn run(
         }
         let frame_dur = Duration::from_secs_f64(1.0 / fps_target as f64);
 
+        // menu: fire the preview timer, then apply what the menu asked for
+        if menu.open {
+            pending_fx.extend(menu.tick(now));
+        }
+        let mut effects: VecDeque<Effect> = std::mem::take(&mut pending_fx).into();
+        while let Some(fx) = effects.pop_front() {
+            match fx {
+                Effect::SwitchScene(name) => {
+                    let Some(i) = names.iter().position(|n| *n == name) else {
+                        continue;
+                    };
+                    menu::browser::push_recent(&mut settings.cfg.recents, name);
+                    save.mark(now);
+                    let kept = preview.take().is_some() && i == idx && transition.pending().is_none();
+                    if kept {
+                        // the preview becomes the real scene as it is: its
+                        // local clock turns into the group's anchor, so
+                        // nothing restarts here or on the peers
+                        let t0 = link::epoch_now_ms().saturating_sub((local_elapsed * 1000.0) as u64);
+                        cur_sync = Some((local_seed, t0));
+                        if let Some(g) = &mut guard {
+                            g.set_synced(true);
+                            g.publish(name, opts.theme.as_deref(), local_seed, t0);
+                        }
+                    } else {
+                        let seed: u64 = rand::rng().random();
+                        let t0 = link::epoch_now_ms();
+                        sync_params = Some((seed, t0));
+                        let theme = settings.cfg.themes.get(name).cloned()
+                            .or_else(|| settings.theme.clone());
+                        sync_theme = Some(theme.clone());
+                        transition.request(i);
+                        if let Some(g) = &mut guard {
+                            g.publish(name, theme.as_deref(), seed, t0);
+                        }
+                    }
+                    last_switch = now;
+                }
+                Effect::Preview(name) => {
+                    let Some(i) = names.iter().position(|n| *n == name) else {
+                        continue;
+                    };
+                    let p = preview.get_or_insert_with(|| PreviewOrigin {
+                        idx,
+                        theme: opts.theme.clone(),
+                        sync: cur_sync,
+                        showing: idx,
+                    });
+                    p.showing = i;
+                    // local only: no shared anchor and nothing published;
+                    // the scene's remembered theme applies at the swap
+                    sync_params = None;
+                    sync_theme = None;
+                    transition.request(i);
+                    last_switch = now;
+                }
+                Effect::EndPreview => {
+                    if let Some(p) = preview.take() {
+                        // restore only if the preview is still what is on
+                        // screen — a peer's switch meanwhile wins
+                        if idx == p.showing || transition.pending() == Some(p.showing) {
+                            sync_params = p.sync;
+                            sync_theme = Some(p.theme);
+                            transition.request(p.idx);
+                            last_switch = now;
+                        }
+                    }
+                }
+                Effect::SetSceneTheme { scene, theme } => {
+                    settings.cfg.themes.insert(scene.to_string(), theme.clone());
+                    save.mark(now);
+                    if let Some(p) = &mut preview {
+                        if names[p.idx] == scene {
+                            p.theme = Some(theme.clone());
+                        }
+                    }
+                    if scene == names[idx] {
+                        if preview.is_some() {
+                            // a previewed scene re-themes locally
+                            opts.theme = Some(theme);
+                        } else {
+                            effects.push_front(Effect::SetTheme(Some(theme)));
+                        }
+                    }
+                }
+                Effect::ToggleFavorite(name) => {
+                    menu::browser::toggle_favorite(&mut settings.cfg.favorites, name);
+                    save.mark(now);
+                }
+                Effect::SetPixels(p) => {
+                    settings.pixels = p;
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetDetail(d) => {
+                    opts.detail = d;
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetTheme(t) => {
+                    if let Some(g) = &mut guard {
+                        let seed: u64 = rand::rng().random();
+                        let t0 = link::epoch_now_ms();
+                        sync_params = Some((seed, t0));
+                        sync_theme = Some(t.clone());
+                        transition.request(idx);
+                        g.publish(names[idx], t.as_deref(), seed, t0);
+                    }
+                    opts.theme = t;
+                    save.mark(now);
+                }
+                Effect::SetTextScale(ts) => {
+                    settings.text_scale = ts;
+                    opts.text_scale = ts;
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetSpeed(sp) => {
+                    settings.speed = sp;
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetFps(fps) => {
+                    settings.fps = fps;
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetSmooth(sm) => {
+                    settings.smooth = sm;
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetDim(d) => {
+                    settings.dim = d;
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetFade(fd) => {
+                    settings.fade = fd;
+                    transition.set_fade_secs(fd);
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetClock(c) => {
+                    settings.clock = c;
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetCycle(c) => {
+                    // local-only: rotations don't propagate
+                    settings.cycle = c;
+                    last_switch = now;
+                    save.mark(now);
+                }
+                Effect::SetCycleScope(s) => {
+                    settings.cycle_scope = s;
+                    save.mark(now);
+                }
+                Effect::SetRenderer(r) => {
+                    // a fresh worker picks the backend; the old one winds
+                    // down on its own when dropped
+                    settings.renderer = r;
+                    worker = termpaper::engine::Worker::new(r);
+                    rendered = None;
+                    worker_status = None;
+                    save.mark(now);
+                }
+                Effect::SetLink(on) => {
+                    settings.link_enabled = on;
+                    reset_link_guard(
+                        &mut guard,
+                        on,
+                        &settings.link_group,
+                        names[idx],
+                        (settings.pad, settings.pad),
+                    );
+                    if !on && settings.wall_spec.is_none() {
+                        // the wall refresh stops with linking: drop the crop now
+                        wall_layout = None;
+                    }
+                    save.mark(now);
+                }
+                Effect::SetLinkGroup(g) => {
+                    settings.link_group = g;
+                    reset_link_guard(
+                        &mut guard,
+                        settings.link_enabled,
+                        &settings.link_group,
+                        names[idx],
+                        (settings.pad, settings.pad),
+                    );
+                    save.mark(now);
+                }
+                Effect::SetWall(on) => {
+                    settings.wall_enabled = on;
+                    if on && geo_watcher.is_none() {
+                        geo_watcher = Some(wall::GeoWatcher::spawn());
+                    }
+                    if !on && settings.wall_spec.is_none() {
+                        wall_layout = None;
+                    }
+                    // re-lay the wall (and republish geometry) next frame
+                    wall_refresh = Instant::now() - Duration::from_secs(10);
+                    save.mark(now);
+                }
+                Effect::ToggleFilter(f) => {
+                    if let Some(pos) = settings.filters.iter().position(|x| *x == f) {
+                        settings.filters.remove(pos);
+                    } else {
+                        settings.filters.push(f);
+                    }
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetFilters(v) => {
+                    settings.filters = v;
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::OpenColorGrade => {
+                    color_open = true;
+                    color_param = color_wheel::Param::Hue;
+                }
+                // placeholder until the alignment tool lands
+                Effect::OpenCalibration => menu.flash("Align monitors: coming soon"),
+            }
+        }
+        // config writes coalesce while the menu or wheel is up; otherwise
+        // (including right after either closes) they go out immediately
+        let write = if menu.open || color_open { save.due(now) } else { save.take() };
+        if write {
+            let (scene_name, theme) = remembered_scene(&preview, &names, idx, &opts);
+            persist(&mut settings, scene_name, theme, opts.detail);
+        }
+
         // scene cycling
         if let Some(secs) = settings.cycle {
             if now.duration_since(last_switch).as_secs_f64() >= secs {
@@ -686,7 +1103,12 @@ fn run(
                 if let Some(g) = &mut guard {
                     g.set_synced(false);
                 }
-                transition.request((idx + 1) % names.len());
+                transition.request(menu::browser::cycle_next(
+                    &names,
+                    idx,
+                    settings.cycle_scope,
+                    &settings.cfg.favorites,
+                ));
                 last_switch = now;
             }
         }
@@ -982,51 +1404,18 @@ fn run(
 
             // the menu floats over the live scene
             if menu.open {
-                let ctx = MenuCtx {
-                    renderer_status: worker_status.clone().or_else(|| rendered.as_ref().map(|f| format!("{} · worker {:.1} ms", f.backend, f.render_ms)))
-                        .unwrap_or_else(|| "Renderer initializing…".into()),
-                    wall_status: match wall_layout {
-                        Some(l) => format!("wall: {}x{} cells @ ({},{})", l.virtual_w, l.virtual_h, l.crop_x, l.crop_y),
-                        None => "wall: local".into(),
-                    },
-                    scene_name: names[idx],
-                    scene_idx: idx,
-                    pixels: settings.pixels,
-                    detail: opts.detail,
-                    theme: opts.theme.clone(),
-                    text_scale: settings.text_scale,
-                    speed: settings.speed,
-                    fps: settings.fps,
-                    smooth: settings.smooth,
-                    dim: settings.dim,
-                    fade: settings.fade,
-                    clock: settings.clock,
-                    cycle: settings.cycle,
-                    hue_shift: settings.hue_shift,
-                    saturation: settings.saturation,
-                    contrast: settings.contrast,
-                    link_enabled: settings.link_enabled,
-                    link_group: settings.link_group.clone(),
-                    truecolor: settings.truecolor,
-                    filters: settings.filters.clone(),
-                    instances: if settings.link_enabled {
-                        peers.menu_lines.clone()
-                    } else {
-                        vec!["linking disabled (solo art)".into()]
-                    },
-                    key_display: config::ACTIONS
-                        .iter()
-                        .map(|&a| {
-                            let k = settings
-                                .cfg
-                                .keys
-                                .get(a)
-                                .cloned()
-                                .unwrap_or_else(|| config::default_key(a).to_string());
-                            (a.to_string(), k)
-                        })
-                        .collect(),
+                let status = worker_status.clone().or_else(|| rendered.as_ref().map(|f| format!("{} · worker {:.1} ms", f.backend, f.render_ms)))
+                    .unwrap_or_else(|| "Renderer initializing…".into());
+                let wall_status = match wall_layout {
+                    Some(l) => format!("wall: {}x{} cells @ ({},{})", l.virtual_w, l.virtual_h, l.crop_x, l.crop_y),
+                    None => "wall: local".into(),
                 };
+                let instances = if settings.link_enabled {
+                    peers.menu_lines.clone()
+                } else {
+                    vec!["linking disabled (solo art)".into()]
+                };
+                let ctx = menu_ctx(&settings, &opts, names[idx], status, wall_status, instances);
                 menu::view::render(f, area, &menu, &ctx);
             }
             if color_open {
@@ -1085,7 +1474,7 @@ fn run(
                     if color_open {
                         if key.code == KeyCode::Esc || km.matches("color", key.code) {
                             color_open = false;
-                            persist(&mut settings, names[idx], &opts);
+                            save.mark(Instant::now());
                             break;
                         }
                         if key.code == KeyCode::Tab {
@@ -1141,6 +1530,29 @@ fn run(
                         continue;
                     }
 
+                    // Ctrl-C quits from anywhere, menu or not
+                    let ctrl_c = key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL);
+
+                    if menu.open && !ctrl_c {
+                        // modal: every key goes to the menu — including `0`,
+                        // so the reset below can't fire from inside it
+                        let remapped_close = !menu.typing()
+                            && key.code != KeyCode::Char('?')
+                            && km.matches("menu", key.code);
+                        if remapped_close {
+                            pending_fx.extend(menu.close());
+                        } else if let Some(input) = menu::Input::from_key(key) {
+                            let ctx = menu_ctx(&settings, &opts, names[idx], String::new(), String::new(), Vec::new());
+                            pending_fx.extend(menu.handle(input, &ctx));
+                        }
+                        // apply before the next key reads a stale snapshot
+                        if !pending_fx.is_empty() || !menu.open {
+                            break;
+                        }
+                        continue;
+                    }
+
                     if km.matches("reset", key.code) {
                         apply_defaults(
                             &mut settings,
@@ -1150,7 +1562,8 @@ fn run(
                             &mut guard,
                             &mut quick_filter,
                         );
-                        persist(&mut settings, names[idx], &opts);
+                        save.take();
+                        persist(&mut settings, names[idx], opts.theme.as_deref(), opts.detail);
                         if let Some(g) = &mut guard {
                             g.publish_settings(&settings_msg(
                                 &settings,
@@ -1161,217 +1574,20 @@ fn run(
                         continue;
                     }
 
-                    if menu.open {
-                        // modal: Esc or the menu key closes, rest routes in
-                        if key.code == KeyCode::Esc || km.matches("menu", key.code) {
-                            menu.close();
-                            continue;
-                        }
-                        let input = match key.code {
-                            KeyCode::Up => Some(menu::Input::Up),
-                            KeyCode::Down => Some(menu::Input::Down),
-                            KeyCode::Left => Some(menu::Input::Left),
-                            KeyCode::Right => Some(menu::Input::Right),
-                            KeyCode::Enter => Some(menu::Input::Enter),
-                            _ => None,
-                        };
-                        if let Some(input) = input {
-                            let ctx = MenuCtx {
-                                renderer_status: String::new(),
-                                wall_status: String::new(),
-                                scene_name: names[idx],
-                                scene_idx: idx,
-                                pixels: settings.pixels,
-                                detail: opts.detail,
-                                theme: opts.theme.clone(),
-                                text_scale: settings.text_scale,
-                                speed: settings.speed,
-                                fps: settings.fps,
-                                smooth: settings.smooth,
-                                dim: settings.dim,
-                                fade: settings.fade,
-                                clock: settings.clock,
-                                cycle: settings.cycle,
-                                hue_shift: settings.hue_shift,
-                                saturation: settings.saturation,
-                                contrast: settings.contrast,
-                                link_enabled: settings.link_enabled,
-                                link_group: settings.link_group.clone(),
-                                truecolor: settings.truecolor,
-                                filters: settings.filters.clone(),
-                                instances: Vec::new(),
-                                key_display: Vec::new(),
-                            };
-                            let effects = menu.handle(input, &ctx);
-                            for fx in effects {
-                                match fx {
-                                    Effect::SwitchScene(i) => {
-                                        let i = i % names.len();
-                                        let seed: u64 = rand::rng().random();
-                                        let t0 = link::epoch_now_ms();
-                                        sync_params = Some((seed, t0));
-                                        let theme = settings.cfg.themes.get(names[i]).cloned()
-                                            .or_else(|| settings.theme.clone());
-                                        sync_theme = Some(theme.clone());
-                                        transition.request(i);
-                                        if let Some(g) = &mut guard {
-                                            g.publish(names[i], theme.as_deref(), seed, t0);
-                                        }
-                                        last_switch = Instant::now();
-                                    }
-                                    Effect::SetPixels(p) => {
-                                        settings.pixels = p;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetDetail(d) => {
-                                        opts.detail = d;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetTheme(t) => {
-                                        if let Some(g) = &mut guard {
-                                            let seed: u64 = rand::rng().random();
-                                            let t0 = link::epoch_now_ms();
-                                            sync_params = Some((seed, t0));
-                                            sync_theme = Some(t.clone());
-                                            transition.request(idx);
-                                            g.publish(names[idx], t.as_deref(), seed, t0);
-                                        }
-                                        opts.theme = t;
-                                    }
-                                    Effect::SetTextScale(ts) => {
-                                        settings.text_scale = ts;
-                                        opts.text_scale = ts;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetSpeed(sp) => {
-                                        settings.speed = sp;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetFps(fps) => {
-                                        settings.fps = fps;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetSmooth(sm) => {
-                                        settings.smooth = sm;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetDim(d) => {
-                                        settings.dim = d;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetFade(fd) => {
-                                        settings.fade = fd;
-                                        transition.set_fade_secs(fd);
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetClock(c) => {
-                                        settings.clock = c;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetCycle(c) => {
-                                        // local-only: rotations don't propagate
-                                        settings.cycle = c;
-                                        last_switch = Instant::now();
-                                    }
-                                    Effect::SetHueShift(h) => {
-                                        settings.hue_shift = h;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(
-                                                &settings,
-                                                &opts,
-                                                &quick_filter,
-                                            ));
-                                        }
-                                    }
-                                    Effect::SetSaturation(s) => {
-                                        settings.saturation = s;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(
-                                                &settings,
-                                                &opts,
-                                                &quick_filter,
-                                            ));
-                                        }
-                                    }
-                                    Effect::SetContrast(c) => {
-                                        settings.contrast = c;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(
-                                                &settings,
-                                                &opts,
-                                                &quick_filter,
-                                            ));
-                                        }
-                                    }
-                                    Effect::SetLink(on) => {
-                                        settings.link_enabled = on;
-                                        reset_link_guard(
-                                            &mut guard,
-                                            on,
-                                            &settings.link_group,
-                                            names[idx],
-                                            (settings.pad, settings.pad),
-                                        );
-                                        persist(&mut settings, names[idx], &opts);
-                                    }
-                                    Effect::SetLinkGroup(g) => {
-                                        settings.link_group = g;
-                                        reset_link_guard(
-                                            &mut guard,
-                                            settings.link_enabled,
-                                            &settings.link_group,
-                                            names[idx],
-                                            (settings.pad, settings.pad),
-                                        );
-                                        persist(&mut settings, names[idx], &opts);
-                                    }
-                                    Effect::ToggleFilter(f) => {
-                                        if let Some(pos) =
-                                            settings.filters.iter().position(|x| *x == f)
-                                        {
-                                            settings.filters.remove(pos);
-                                        } else {
-                                            settings.filters.push(f);
-                                        }
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::Persist => persist(&mut settings, names[idx], &opts),
-                                }
-                            }
-                        }
-                        continue;
-                    }
-
                     let quit = settings.screensaver
                         || km.matches("quit", key.code)
                         || matches!(key.code, KeyCode::Esc)
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL));
+                        || ctrl_c;
                     if quit {
+                        if save.take() {
+                            let (scene_name, theme) = remembered_scene(&preview, &names, idx, &opts);
+                            persist(&mut settings, scene_name, theme, opts.detail);
+                        }
                         return Ok(());
                     }
                     if km.matches("menu", key.code) {
-                        menu.toggle(idx);
+                        let ctx = menu_ctx(&settings, &opts, names[idx], String::new(), String::new(), Vec::new());
+                        menu.open(&ctx);
                         continue;
                     }
                     if km.matches("color", key.code) {
@@ -1385,7 +1601,7 @@ fn run(
                                 settings.hue_shift = 45.0;
                             }
                         } else {
-                            persist(&mut settings, names[idx], &opts);
+                            save.mark(Instant::now());
                         }
                         continue;
                     }
@@ -1447,25 +1663,25 @@ fn run(
                         if let Some(g) = &mut guard {
                             g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                         }
-                        persist(&mut settings, names[idx], &opts);
+                        save.mark(Instant::now());
                     } else if km.matches("fps_down", key.code) {
                         settings.fps = menu::fps_step(settings.fps, false);
                         if let Some(g) = &mut guard {
                             g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                         }
-                        persist(&mut settings, names[idx], &opts);
+                        save.mark(Instant::now());
                     } else if km.matches("speed_up", key.code) {
                         settings.speed = menu::speed_step(settings.speed, true);
                         if let Some(g) = &mut guard {
                             g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                         }
-                        persist(&mut settings, names[idx], &opts);
+                        save.mark(Instant::now());
                     } else if km.matches("speed_down", key.code) {
                         settings.speed = menu::speed_step(settings.speed, false);
                         if let Some(g) = &mut guard {
                             g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                         }
-                        persist(&mut settings, names[idx], &opts);
+                        save.mark(Instant::now());
                     }
                 }
                 }
@@ -1604,5 +1820,67 @@ mod sync_tests {
         assert_eq!(n, 1);
         assert!((dts[0] - 4.0 / 60.0).abs() < 1e-6);
         assert!(debt < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn parse(argv: &[&str]) -> Args {
+        Args::try_parse_from(std::iter::once("termpaper").chain(argv.iter().copied()))
+            .unwrap_or_else(|e| panic!("{argv:?}: {e}"))
+    }
+
+    #[test]
+    fn clap_definition_is_valid() {
+        Args::command().debug_assert();
+    }
+
+    #[test]
+    fn positional_scene_still_works() {
+        let a = parse(&["koi", "--fps", "60"]);
+        assert_eq!(a.scene.as_deref(), Some("koi"));
+        assert!(a.command.is_none());
+        assert_eq!(a.fps, Some(60));
+    }
+
+    #[test]
+    fn subcommands_parse() {
+        match parse(&["list", "--category", "coast"]).command {
+            Some(Command::List { category }) => assert_eq!(category.as_deref(), Some("coast")),
+            _ => panic!("expected list"),
+        }
+        assert!(matches!(parse(&["instances"]).command, Some(Command::Instances)));
+        match parse(&["switch", "fire", "--group", "art"]).command {
+            Some(Command::Switch { scene, group, all }) => {
+                assert_eq!((scene.as_str(), group.as_deref(), all), ("fire", Some("art"), false));
+            }
+            _ => panic!("expected switch"),
+        }
+        assert!(matches!(
+            parse(&["switch", "fire", "--all"]).command,
+            Some(Command::Switch { all: true, .. })
+        ));
+        assert!(Args::try_parse_from(["termpaper", "switch", "fire", "--all", "--group", "x"]).is_err());
+    }
+
+    #[test]
+    fn old_flags_are_hidden_aliases() {
+        let a = parse(&["--list"]);
+        assert!(a.list && a.command.is_none());
+        let a = parse(&["--switch", "fire", "--all-groups"]);
+        assert_eq!(a.switch.as_deref(), Some("fire"));
+        assert!(a.all_groups);
+        assert!(parse(&["--instances"]).instances);
+        assert!(parse(&["--gpu"]).gpu);
+        let help = Args::command().render_long_help().to_string();
+        for hidden in ["--list", "--instances", "--switch", "--all-groups", "--gpu"] {
+            assert!(!help.contains(hidden), "{hidden} should be hidden from --help");
+        }
+        for heading in ["Scene:", "Look:", "Performance:", "Linking & wall:"] {
+            assert!(help.contains(heading), "missing heading {heading}\n{help}");
+        }
     }
 }

@@ -17,7 +17,7 @@ One line to install. One word to start: `termpaper fire`.
 ```sh
 termpaper rain --fps 120     # high-refresh rain on glass
 termpaper life --speed 4     # crank the simulation
-termpaper --list             # the catalog
+termpaper list               # the catalog
 termpaper                    # press ? — full command center
 ```
 
@@ -101,10 +101,10 @@ export PATH="$HOME/.cargo/bin:$PATH"   # add to ~/.bashrc or ~/.zshrc
 Then try:
 
 ```sh
-termpaper --list          # scenes + themes
+termpaper list            # the catalog, by category
 termpaper rain            # default scene
 termpaper life --fps 120    # high-refresh
-termpaper                 # press ? for settings
+termpaper                 # press ? for the menu
 ```
 
 **Screensaver / fullscreen:** any pane, tmux split, or dedicated window — go
@@ -119,18 +119,18 @@ saved to `~/.config/termpaper/config.toml`.
 
 | Layer | What you control | How |
 |-------|------------------|-----|
-| **Motion** | FPS (10→240, **120** preset), speed (0.25×→4×), pause | `?` Settings, `[`/`]` fps, `,`/`.` speed, `--fps 120` |
-| **Look** | 3 pixel modes, 3 detail levels, 2–4 themes per scene | Settings rows + `--pixels` `--detail` `--theme` |
-| **Color** | Global hue, saturation, contrast + 100-step wheel | `c` in-scene, Settings rows 3–5 |
-| **Post** | 22 stackable filters + quick-preview on `f` | Settings filter list, `--filter` (repeatable) |
-| **Feel** | Temporal smooth, dim, fade, clock overlay | Settings + config |
+| **Motion** | FPS (10→240, **120** preset), speed (0.25×→4×), pause | `?` → Playback / Display, `[`/`]` fps, `,`/`.` speed, `--fps 120` |
+| **Look** | 3 pixel modes, 3 quality levels, 2–4 themes per scene | `?` → Look / Display + `--pixels` `--detail` `--theme` |
+| **Color** | Global hue, saturation, contrast on a 100-step wheel | `c` in-scene, `?` → Look → Color grade… |
+| **Post** | 22 stackable filters, 4 presets, quick-preview on `f` | `?` → Look → Filters…, `--filter` (repeatable) |
+| **Feel** | Temporal smooth, dim, fade, clock overlay | `?` menu + config |
 | **Layout** | Wall crop, terminal padding, link group, solo mode | `--wall` `--pad` `--group` `--no-link` |
 | **Input** | 13 remappable actions | `[keys]` in config.toml |
-| **Memory** | Per-scene theme, full config persistence | `[themes]` table, menu auto-save |
+| **Memory** | Per-scene theme, favourites, recents | `[themes]`, `favorites`, menu auto-save |
 
-**FPS presets** (Settings ◂/▸ or `[` / `]`): `10 · 24 · 30 · 60 · 90 · **120** · 144 · 165 · 240`
+**FPS presets** (`?` → Display ◂/▸ or `[` / `]`): `10 · 24 · 30 · 60 · 90 · **120** · 144 · 165 · 240`
 
-**Speed presets** (Settings or `,` / `.`): `0.25 · 0.5 · 0.75 · 1 · 1.25 · 1.5 · 2 · 3 · 4`
+**Speed presets** (`?` → Playback or `,` / `.`): `0.25 · 0.5 · 0.75 · 1 · 1.25 · 1.5 · 2 · 3 · 4`
 
 **Example — a fully loaded profile:**
 
@@ -176,28 +176,36 @@ with `--no-truecolor` if you want the fallback look.
 
 ## The menu — press `?`
 
-A glass panel over the **live** scene — animation keeps running behind it.
-Every tab opens with a fastfetch-style header: ASCII logo, version, scene,
-display mode, link status. The **About** tab goes full cinema poster.
+A drawer slides in on the left; the **live** scene keeps playing on the right
+(and dimly through the glass). Five pages — `Tab` / `Shift-Tab` switch:
 
-- **Scenes** — the catalog at your fingertips. `↑/↓` browse, `Enter` switch.
-  `n of 49`.
-- **Instances** — who's linked in your cluster right now (pid, scene, uptime).
-  `(you)` marks this window. Know your swarm before you flip the whole wall.
-- **Settings** — the full mixing desk: Pixels, Detail, Theme, Hue, Saturation,
-  Contrast, **Link**, **Group**, Text scale, **Speed**, **FPS** (presets through
-  **120**), Smooth, Dim, Fade, Clock, Cycle, and all 22 filters. ◂/▸ adjusts;
-  everything persists to config.
-- **Keybinds** — your control map.
-- **About** — the full product page. Logo, stats, vibes.
+- **Scenes** — the browser. Categories on the left (★ Favorites, ◷ Recent,
+  Coast & Water, Mountains & Wild, … and Classic with its sub-groups), their
+  scenes on the right, and a detail panel with description, themes, tags and a
+  GPU badge. Rest on a scene for a moment and it **previews** behind the drawer
+  on this pane only; `Enter` keeps it (and switches your linked group), `Esc`
+  puts the original back. `/` filters by name, description and tags, `f` stars
+  a scene, `t` cycles its theme.
+- **Look** — Theme, Color grade… (the colour wheel), Filters… (grouped Colour /
+  Texture / Geometry, Clean · Film · CRT · Dream presets, the active stack in
+  order), Dim, Text size.
+- **Playback** — Speed, Cycle (off / 1 / 5 / 15 / 30 min), Cycle through
+  (all scenes / this category / favourites), Fade.
+- **Display** — Quality, Pixels, FPS, Smooth, Clock, Renderer.
+- **Wall** — Link, Group, Wall mode, Align monitors…, and the live instances in
+  your group (`(you)` marks this window).
 
-`Esc` or `?` closes. The art never stops.
+`↑`/`↓` move, `←`/`→` change a value (or switch column in the browser), `Enter`
+toggles or opens, `Esc` backs out and closes. `?` inside the menu lists every
+key plus version and renderer info. The footer only shows keys that do
+something right now. Changes are saved a moment after you stop pressing keys —
+and only the ones that differ from the defaults. The art never stops.
 
 ## Quick start
 
 ```sh
 termpaper rain --fps 120    # high-refresh default vibe
-termpaper --list            # the catalog
+termpaper list              # the catalog
 termpaper fire --theme frost
 termpaper --cycle 30        # let it rotate
 termpaper --no-link candy   # solo — off the swarm
@@ -208,37 +216,43 @@ Press **`?`** for the command center · **`[`/`]`** fps · **`,`/`.`** speed · 
 ## Usage
 
 ```
-termpaper [SCENE] [OPTIONS]
+Usage: termpaper [OPTIONS] [SCENE] [COMMAND]
 
-Arguments:
-  [SCENE]               Scene to run (see --list)
+Commands:
+  list       List scenes by category and exit   (--category coast|wilds|…|classic)
+  instances  List live termpaper instances in every group and exit
+  switch     Switch running instances to a scene and exit   (--group G | --all)
 
-Options:
-      --list              List scenes and exit
-      --cycle <SECS>      Rotate through all scenes every N seconds
-      --fps <N>           Target FPS — 10–240 (120 for high-refresh panels)
-      --idle-fps <N>      FPS cap while the terminal is unfocused (off unless set;
-                          needs a terminal that reports focus)
-      --speed <MULT>      Animation speed multiplier [default: 1.0]
-      --theme <NAME>      Scene color theme (per scene; e.g. fire: classic|frost|inferno)
-      --detail <LEVEL>    low|medium|high — particle/layer/emitter counts
-      --pixels <MODE>     half|quad|braille
-      --text-scale <N>    1|2|3 — bump font scale
-      --filter <NAME>     Repeatable: scanlines, vignette, grain, warm, cool, hue,
-                          crt, bloom, duotone, pixelate, chroma
-      --no-truecolor      Force 256-color output
-      --screensaver       Any key exits
-      --no-link             Unlink this terminal — solo art, no sync
-      --group <NAME>        Link group (instances in the same group sync)
-      --instances           List every live termpaper (all groups) and exit
-      --switch <SCENE>      Publish a scene switch to linked instances and exit
-      --all-groups          With --switch, publish to every link group
-      --wall <COLSxROWS:IDX> Manual video-wall tile (e.g. 2x1:0)
-      --no-wall             Never join a video wall (local canvas, geometry hidden from peers)
-      --pad <PX>          Terminal padding in px (all sides) so wall crops
-                          line up across window borders
-  -h, --help              Print help
+Scene:
+  [SCENE]              Scene to run (see `termpaper list`)
+      --theme <THEME>  Scene color theme (e.g. nexus: cyan/amber/violet/mono)
+      --cycle <SECS>   Move on to another scene every N seconds
+      --speed <SPEED>  Animation speed multiplier
+      --screensaver    Screensaver mode: any key exits
+
+Look:
+      --filter <FILTER>          Post-processing filter, repeatable
+      --pixels <PIXELS>          Pixel mode: half, quad or braille
+      --text-scale <TEXT_SCALE>  Bump text scale: 1, 2 or 3
+      --no-truecolor             Force 256-color output even on truecolor terminals
+
+Performance:
+      --fps <FPS>            Target frames per second
+      --idle-fps <IDLE_FPS>  Throttle while the terminal is unfocused
+      --detail <DETAIL>      Quality: low, medium or high (particle/layer counts)
+      --renderer <RENDERER>  auto, gpu, cpu or shader
+
+Linking & wall:
+      --link           Enable instance linking (default on)
+      --no-link        Disable instance linking
+      --group <GROUP>  Link group for this instance (instances in the same group sync)
+      --no-wall        Never join a video wall
+      --wall <WALL>    Manual video-wall tiling: COLSxROWS:INDEX (e.g. 2x1:0)
+      --pad <PAD>      Terminal padding in px so wall crops line up across windows
 ```
+
+The pre-subcommand spellings (`--list`, `--instances`, `--switch`,
+`--all-groups`, `--gpu`) still work; they are just no longer listed.
 
 ## The swarm — instances, sync & multi-monitor walls
 
@@ -264,13 +278,13 @@ Stale entries vanish when a process exits. No ghosts in the swarm.
 **Roll call:**
 
 ```sh
-termpaper --instances
+termpaper instances
 # pid 12345    group wallpaper   scene rain       up 842s
 # pid 12389    group wallpaper   scene rain       up 841s
 # pid 12401    group desk        scene candy      up 12s
 ```
 
-Or **`?` → Instances** — live peers in your cluster, `(you)` on this window.
+Or **`?` → Wall** — live peers in your cluster, `(you)` on this window.
 
 Spin up a second monitor? It adopts the group's saved scene anchor and
 replays toward the shared frame. Catch-up is spread across display frames;
@@ -280,14 +294,14 @@ joining a long-running scene can take time.
 
 Same link group = same heartbeat:
 
-- Scene switches (`←` / `→`, menu, `termpaper --switch`) — one command, every window
+- Scene switches (`←` / `→`, menu, `termpaper switch`) — one command, every window
 - Live settings — pixels, detail, filters, theme, speed, fps, smooth, dim,
   fade, color grade, `f` quick-filter preview
 - **Frame lock** — identical animation state, like one wallpaper torn across panes
 
 `--cycle` auto-rotation stays local. Your desk doesn't have to follow your wall.
 
-**Presets** (Settings → Group): `default`, `wallpaper`, `desk`, `art`. Split
+**Presets** (`?` → Wall → Group): `default`, `wallpaper`, `desk`, `art`. Split
 clusters so your work terminal and your wallpaper rig live separate lives:
 
 ```sh
@@ -306,22 +320,22 @@ Any instance can **leave the swarm** without killing the art:
 
 | Method | When | Persists? |
 |--------|------|-----------|
-| `termpaper --no-link` | Launch | yes (`link = false` in config) |
-| **`?` → Settings → Link → off** | Runtime | yes |
-| `termpaper --group desk` | Launch | yes — different cluster, not unlinked but isolated |
+| `termpaper --no-link` | Launch | no — this launch only (`link = false` in config makes it stick) |
+| **`?` → Wall → Link → off** | Runtime | yes |
+| `termpaper --group desk` | Launch | no — different cluster for this launch, not unlinked but isolated |
 
-When unlinked, **Instances** reads `linking disabled (solo art)`. This window
-dances alone — no publishes in, no orders out.
+When unlinked, the Wall page's instance list reads `linking disabled (solo
+art)`. This window dances alone — no publishes in, no orders out.
 
-Rejoin the swarm: **Link → on** in Settings, or relaunch with
+Rejoin the swarm: **Link → on** on the menu's Wall page, or relaunch with
 `termpaper --group wallpaper`.
 
 **Command the fleet** from anywhere:
 
 ```sh
-termpaper --switch fire                 # default group only
-termpaper --switch fire --group wallpaper
-termpaper --switch fire --all-groups
+termpaper switch fire                   # default group only
+termpaper switch fire --group wallpaper
+termpaper switch fire --all
 ```
 
 ### One canvas. Every monitor.
@@ -356,15 +370,15 @@ back to local mode.
 ### Fleet commands
 
 ```sh
-termpaper --instances              # list all groups (pid, group, scene, uptime)
+termpaper instances                # list all groups (pid, group, scene, uptime)
 termpaper --no-link                # unlink — solo art
 termpaper --group wallpaper        # join / isolate a sync cluster
-termpaper --switch fire --group wallpaper
+termpaper switch fire --group wallpaper
 ```
 
-The menu **Settings** tab has **Link** (on/off) and **Group** rows.
-Presets cycle through `default`, `wallpaper`, `desk`, and `art`. The
-**Instances** section shows who's in your group. Menu settings edits
+The menu's **Wall** page has **Link** (on/off) and **Group** rows.
+Presets cycle through `default`, `wallpaper`, `desk`, and `art`, and the
+page lists who's in your group. Menu settings edits
 (pixels, detail, filters, theme, text scale, speed, fps, smooth, dim,
 fade) and the `f` quick filter also propagate live to linked instances in
 the same group — remote applies are session-only and never touch your
@@ -440,11 +454,13 @@ Cinematic post on every frame — **22 filters**, stack them, order matters:
 `scanlines`, `vignette`, `grain`, `warm`, `cool`, `hue`, `crt`, `bloom`,
 `duotone`, `pixelate`, `chroma`, `spectrum`, `edges`, `thermal`, `warp`,
 `invert`, `sepia`, `posterize`, `gamma`, `sharpen`, `mirror`, `noir`.
-Toggle any from **`?` → Settings**; preview one live with **`f`**.
+Toggle any from **`?` → Look → Filters…** — grouped Colour / Texture /
+Geometry, with Clean · Film · CRT · Dream presets — or preview one live with
+**`f`**.
 
 **Temporal smoothing** (`smooth = 0.3` by default) blends each frame toward
 the last — silk at any fps. Glyph cells never blur. Kill it with `smooth = 0`
-or dial it in live from Settings.
+or dial it in live from `?` → Display.
 
 ```sh
 termpaper fire --filter crt
@@ -484,7 +500,7 @@ simulation on a resolution-independent 192×192 lattice. The worlds are new
 interpretations, not pixel-identical ports; use the same backend, seed and
 settings across linked monitors.
 
-The default target is 120 FPS, with 144 available in Settings. This is a cap,
+The default target is 120 FPS, with 144 available in the menu. This is a cap,
 not a guarantee: terminal escape-sequence throughput can still limit display
 rate. The worker timing in the menu is CPU submission time, not GPU timing or
 measured display FPS. For hardware measurements and scene image captures
@@ -510,7 +526,7 @@ positional hash. Same range, same per-frame determinism, different noise.
 | Key     | Action                                  |
 | ------- | --------------------------------------- |
 | `q`     | quit (`Esc` / `Ctrl-C` always work too) |
-| `?`     | settings menu — full mixing desk        |
+| `?`     | menu: scene browser + settings (`?` inside it for help) |
 | `←`/`→` | previous / next scene                   |
 | `c`     | 100-step color wheel (hue/sat/contrast) |
 | `f`     | cycle quick filter preview              |
@@ -518,12 +534,14 @@ positional hash. Same range, same per-frame determinism, different noise.
 | `[`/`]` | fps down / up (through presets incl. **120**) |
 | `,`/`.` | speed down / up                         |
 | `space` | pause (freeze animation)                |
-| `0`     | reset all settings to defaults          |
+| `0`     | reset all settings to defaults (not while the menu is open) |
 
 ## Config
 
 `~/.config/termpaper/config.toml` — read at startup, **written back** by the
-menu (atomically, temp + rename). Everything optional; CLI flags override.
+menu (atomically, temp + rename, a moment after the last change). Only values
+that differ from the defaults are written. Everything optional; CLI flags
+override.
 
 ```toml
 scene = "life"
@@ -544,7 +562,9 @@ group = "wallpaper"     # sync cluster
 wall = true             # false = never crop into a video wall
 clock = true
 text_scale = 2          # 1|2|3 — bump scene only
-# cycle = 30            # auto-rotate scenes (local only)
+# cycle = 300           # auto-rotate scenes every N seconds (local only)
+# cycle_scope = "favorites"   # all|category|favorites
+favorites = ["bigsur", "koi"] # ★ in the menu browser
 
 [themes]
 life = "ember"
@@ -583,7 +603,7 @@ Full recipe, trait API, themes, filters, and design bar:
 
 ## Scenes (49)
 
-The catalog — one word each, full descriptions in `termpaper --list`:
+The catalog — one word each, full descriptions in `termpaper list`:
 
 **rain** · **starfield** · **fire** · **pipes** · **plasma** · **aurora** · **life** · **boids** ·
 **lava** · **tunnel** · **dvd** · **bump** · **canopy** ·
@@ -594,10 +614,10 @@ The catalog — one word each, full descriptions in `termpaper --list`:
 **tide** · **clockwork** · **grid** · **inkdrop** · **mosaic** ·
 **harmonograph** · **nebula** · **pendulum** · **reaction** · **meadow** ·
 **airspace** · **aquarium** · **drive** · **candy** · **scroll**
-— run `termpaper --list` for one-line descriptions.
+— run `termpaper list` for one-line descriptions.
 
 A dim clock (`HH:MM`) sits in the top-right corner of every scene —
-toggle it in Settings → Clock.
+toggle it in `?` → Display → Clock.
 
 Every scene has 2–4 named themes (`termpaper koi --theme ink`,
 `termpaper fire --theme frost`, `termpaper city --theme noir`…); pick them
@@ -613,7 +633,7 @@ and feed/filter/shadow events. **candy** pushes saturation hard — glossy
 specular orbs on a neon gradient, hues drawn from two tight anchor families
 rather than at random, across three graded depth planes, with a sugar-rush
 wavefront that flares each orb as it sweeps past. Press **c** for the 100-step color wheel (white center
-hole, hue ring + saturation/contrast rows). Same controls in Settings. **orbits** runs true Kepler ellipses — eccentric anomaly solved
+hole, hue ring + saturation/contrast rows), also at `?` → Look → Color grade…. **orbits** runs true Kepler ellipses — eccentric anomaly solved
 per frame — with comet-ribbon trails and eased syzygy transits. **frost**
 grows fern-like dendrites that taper to glowing tips, then melts and
 reseeds. **finale** fires 11 shell types (peony, willow, strobe,
