@@ -346,6 +346,12 @@ pub struct InstanceInfo {
     pub proto: u32,
 }
 
+/// Whether a process is still running (a live peer, a calibration
+/// controller).
+pub fn process_alive(pid: u32) -> bool {
+    pid_alive(pid)
+}
+
 pub fn epoch_now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

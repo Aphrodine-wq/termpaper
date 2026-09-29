@@ -120,12 +120,14 @@ pub fn search(query: &str) -> Vec<Entry> {
             if !words.iter().all(|w| hay.contains(w.as_str())) {
                 return None;
             }
-            let rank = if name.starts_with(first.as_str()) || title.starts_with(first.as_str()) {
+            let rank = if name == *first || title == *first {
                 0
-            } else if name.contains(first.as_str()) || title.contains(first.as_str()) {
+            } else if name.starts_with(first.as_str()) || title.starts_with(first.as_str()) {
                 1
-            } else {
+            } else if name.contains(first.as_str()) || title.contains(first.as_str()) {
                 2
+            } else {
+                3
             };
             Some((rank, e))
         })

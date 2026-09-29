@@ -193,6 +193,14 @@ pub struct ViewKey {
     pub cell_aspect: f32,
     /// bumped by the caller for view changes the fields do not show
     pub rev: u64,
+    /// Studio scenes on a planned wall: this pane's cell grid in composition
+    /// space (per CELL; exact in millimetres across monitors and fonts).
+    /// Overrides `canvas`/`crop`/`cell_aspect` for Studio scenes.
+    pub comp: Option<crate::desk::CompView>,
+    /// Classic scenes on a planned wall: the pane's cell grid in the shared
+    /// canvas, as (origin in cells, canvas cells per pane cell). A view that
+    /// is not a whole-pixel crop is drawn by resampling on the CPU.
+    pub classic_map: Option<([f64; 2], [f64; 2])>,
 }
 
 impl ViewKey {
@@ -468,6 +476,16 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
                 backend = Backend::ShaderFallback(spec.fallback);
             }
         }
+        // a fractional Classic view is resampled from the whole canvas at
+        // draw time, so the frame must be that canvas, post-processed on
+        // the CPU (the GPU packer only crops whole pixels)
+        if let Some((o, st)) = v.classic_map {
+            if crate::render::view_is_crop(o, st, v.pixels).is_none()
+                && matches!(backend, Backend::GpuPost | Backend::GpuWorld)
+            {
+                backend = Backend::Cpu;
+            }
+        }
         #[allow(unused_mut)]
         let mut label = describe_backend(renderer, adapter.as_deref(), errored, backend);
         #[allow(unused_mut)]
@@ -515,8 +533,21 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
                 .and_then(|t| spec.themes.iter().position(|s| *s == t))
                 .unwrap_or(0) as u32;
             let spp = governor.spp();
+            let view = match v.comp {
+                // planned wall: per-pixel steps from the per-cell mapping,
+                // shifted out by the apron (y is up in composition space)
+                Some(c) => {
+                    let step = [c.step[0] / pw as f64, c.step[1] / ph as f64];
+                    crate::gpu::ShaderView {
+                        origin: [c.origin[0] - apron as f64 * step[0], c.origin[1] + apron as f64 * step[1]],
+                        step,
+                        half: c.half,
+                    }
+                }
+                None => crate::gpu::ShaderView::for_window(v.canvas, origin, v.pixel_aspect() as f64),
+            };
             let u = crate::gpu::uniforms(&crate::gpu::FrameDesc {
-                view: crate::gpu::ShaderView::for_window(v.canvas, origin, v.pixel_aspect() as f64),
+                view,
                 window,
                 time: crate::gpu::shader_time(request.elapsed_ms, sim.speed),
                 speed: sim.speed,
@@ -751,6 +782,8 @@ mod tests {
                 pixels: Pixels::Half,
                 cell_aspect: DEFAULT_CELL_ASPECT,
                 rev: 0,
+                comp: None,
+                classic_map: None,
             },
             elapsed_ms: 100,
             paused: false,

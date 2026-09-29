@@ -16,8 +16,21 @@ pub struct LaunchPlan {
     pub monitor: String,
     pub class: String,
     pub font_pt: f32,
-    /// the command passed to `hyprctl dispatch exec`
+    /// the shell command that opens the terminal
     pub command: String,
+}
+
+impl LaunchPlan {
+    /// Lua-config Hyprland (0.55+): `hl.dsp.exec_cmd(cmd, rules)`. A long
+    /// bracket string needs no escaping whatever quotes the command holds.
+    pub fn lua_dispatch(&self) -> String {
+        format!("hl.dsp.exec_cmd([==[{}]==], {{ monitor = \"{}\" }})", self.command, self.monitor)
+    }
+
+    /// Classic hyprlang config: `exec [monitor X] cmd`.
+    pub fn legacy_dispatch(&self) -> String {
+        format!("[monitor {}] {}", self.monitor, self.command)
+    }
 }
 
 fn shell_quote(s: &str) -> String {
@@ -56,10 +69,9 @@ pub fn plan_wall_up(
             let mut term = vec![shell_quote(termpaper), "--group".into(), shell_quote(group)];
             term.extend(extra.iter().map(|e| shell_quote(e)));
             let command = format!(
-                "[monitor {}] kitty --class {} -o font_size={} -o window_padding_width=0 \
+                "kitty --class {} -o font_size={} -o window_padding_width=0 \
                  -o placement_strategy=top-left -o repaint_delay=5 -o input_delay=0 \
                  -o sync_to_monitor=yes -o confirm_os_window_close=0 -e {}",
-                d.mon.name,
                 class,
                 pt,
                 term.join(" ")
@@ -83,12 +95,19 @@ pub fn run_wall_up(plans: &[LaunchPlan], dry_run: bool) -> std::io::Result<Vec<L
             continue;
         }
         if !dry_run {
-            let st = std::process::Command::new("hyprctl")
-                .args(["dispatch", "exec", &p.command])
-                .stdout(std::process::Stdio::null())
-                .status()?;
-            if !st.success() {
-                return Err(std::io::Error::other(format!("hyprctl dispatch exec failed for {}", p.monitor)));
+            // Lua config first; hyprctl answers "ok" when it took it
+            let lua = std::process::Command::new("hyprctl").args(["dispatch", &p.lua_dispatch()]).output()?;
+            if !String::from_utf8_lossy(&lua.stdout).trim_start().starts_with("ok") {
+                let legacy = std::process::Command::new("hyprctl")
+                    .args(["dispatch", "exec", &p.legacy_dispatch()])
+                    .output()?;
+                if !String::from_utf8_lossy(&legacy.stdout).trim_start().starts_with("ok") {
+                    return Err(std::io::Error::other(format!(
+                        "hyprctl could not start the terminal on {}: {}",
+                        p.monitor,
+                        String::from_utf8_lossy(&legacy.stdout).trim()
+                    )));
+                }
             }
         }
         launched.push(p.clone());
@@ -150,8 +169,11 @@ mod tests {
         let plans = plan_wall_up(&desk(), "/home/me/my bin/termpaper", 11.0, None, "wallpaper", &["DP-1".into()], &["--fps".into(), "60".into()]);
         assert_eq!(plans.len(), 1);
         let c = &plans[0].command;
-        assert!(c.starts_with("[monitor DP-1] kitty --class termpaper-wallpaper-DP-1"), "{c}");
+        assert!(c.starts_with("kitty --class termpaper-wallpaper-DP-1"), "{c}");
         assert!(c.contains("window_padding_width=0"));
         assert!(c.ends_with("-e '/home/me/my bin/termpaper' --group wallpaper --fps 60"), "{c}");
+        assert!(plans[0].lua_dispatch().starts_with("hl.dsp.exec_cmd([==[kitty "));
+        assert!(plans[0].lua_dispatch().ends_with("]==], { monitor = \"DP-1\" })"));
+        assert!(plans[0].legacy_dispatch().starts_with("[monitor DP-1] kitty "));
     }
 }

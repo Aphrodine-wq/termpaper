@@ -150,6 +150,96 @@ enum Command {
         #[arg(long, conflicts_with = "group")]
         all: bool,
     },
+    /// Show the physical desk (monitors in millimetres) and the wall plan
+    Desk,
+    /// Line the monitors up: every wall pane shows a millimetre test
+    /// pattern while this terminal nudges monitor offsets, bezels and scale
+    Calibrate,
+    /// Start or stop one wall terminal per monitor
+    Wall {
+        #[command(subcommand)]
+        action: WallCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum WallCmd {
+    /// Open a kitty on every monitor (fonts matched to pixel pitch, zero
+    /// padding) running termpaper in one group; skips monitors that have one
+    Up {
+        /// Print the commands instead of running them
+        #[arg(long)]
+        dry_run: bool,
+        /// Font size in points on the reference (first landscape) monitor
+        #[arg(long, default_value_t = 11.0)]
+        font: f32,
+        /// Only these outputs (repeatable), e.g. --monitor DP-1
+        #[arg(long)]
+        monitor: Vec<String>,
+        /// Extra arguments for each termpaper (after --)
+        #[arg(last = true)]
+        extra: Vec<String>,
+    },
+    /// Close every wall terminal
+    Down,
+}
+
+/// `termpaper desk`: the desk, and the group's current plan if any.
+fn print_desk(group: &str) {
+    let Some(mons) = termpaper::hypr::monitors() else {
+        eprintln!("termpaper: not running under Hyprland");
+        std::process::exit(1);
+    };
+    let cfg = termpaper::desk::load_desk();
+    let desk = termpaper::desk::Desk::from_hypr(&mons, &cfg);
+    print!("{}", termpaper::desk::describe(&desk));
+    println!(
+        "align {} · bezel {} mm · frame {} · portrait {} · config {}",
+        cfg.align.name(),
+        cfg.bezel_mm,
+        cfg.frame,
+        cfg.portrait,
+        termpaper::desk::desk_path().map(|p| p.display().to_string()).unwrap_or_default()
+    );
+    let plan = link::group_dir(group).and_then(|d| termpaper::wallplan::WallPlan::load(&d));
+    match plan {
+        Some(p) => {
+            println!(
+                "\nwall plan (group {group}, rev {}, leader {}): frame {:.0}x{:.0} mm, classic canvas {}x{} cells",
+                p.rev, p.leader, p.frame.w, p.frame.h, p.classic_cells.0, p.classic_cells.1
+            );
+            for pp in &p.panes {
+                println!(
+                    "  pid {:<8} {:<10} content x {:>7.1} y {:>6.1} w {:>6.1} h {:>6.1} mm{}",
+                    pp.pid,
+                    pp.monitor,
+                    pp.content.x,
+                    pp.content.y,
+                    pp.content.w,
+                    pp.content.h,
+                    if pp.portrait { "  (portrait)" } else { "" }
+                );
+            }
+        }
+        None => println!("\nno wall plan in group {group} (start panes with `termpaper wall up`)"),
+    }
+}
+
+/// The group's panes as the wall planner sees them.
+fn panes_of(group: &str) -> Vec<termpaper::wallplan::PaneGeom> {
+    link::list_instances_in_group(group)
+        .into_iter()
+        .filter(|i| i.geo.is_some())
+        .map(|i| termpaper::wallplan::PaneGeom {
+            pid: i.pid,
+            ancestors: termpaper::hypr::ancestors(i.pid),
+            cols: i.cols.min(u16::MAX as usize) as u16,
+            rows: i.rows.min(u16::MAX as usize) as u16,
+            cell: i.cell.map(|(w, h)| (w as f64, h as f64)),
+            pad: (i.pad.0 as f64, i.pad.1 as f64),
+            centered: i.placement == wall::Placement::Center,
+        })
+        .collect()
 }
 
 fn print_instances() {
@@ -290,6 +380,43 @@ fn main() -> std::io::Result<()> {
         }
         Some(Command::List { category }) => {
             print_list(category.as_deref());
+            return Ok(());
+        }
+        Some(Command::Desk) => {
+            let cfg = config::load();
+            let group = args.group.clone().or(cfg.group.clone()).map(|g| link::sanitize_group(&g))
+                .unwrap_or_else(|| "default".into());
+            print_desk(&group);
+            return Ok(());
+        }
+        Some(Command::Calibrate) => {
+            let cfg = config::load();
+            let group = args.group.clone().or(cfg.group.clone()).map(|g| link::sanitize_group(&g))
+                .unwrap_or_else(|| "default".into());
+            return termpaper::calibrate::run_standalone(&group);
+        }
+        Some(Command::Wall { action: WallCmd::Down }) => {
+            let n = termpaper::launch::wall_down()?;
+            println!("closed {n} wall terminal(s)");
+            return Ok(());
+        }
+        Some(Command::Wall { action: WallCmd::Up { dry_run, font, monitor, extra } }) => {
+            let Some(mons) = termpaper::hypr::monitors() else {
+                eprintln!("termpaper: `wall up` needs Hyprland");
+                std::process::exit(1);
+            };
+            let desk = termpaper::desk::Desk::from_hypr(&mons, &termpaper::desk::load_desk());
+            let group = args.group.clone().map(|g| link::sanitize_group(&g)).unwrap_or_else(|| "wallpaper".into());
+            let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "termpaper".into());
+            let plans = termpaper::launch::plan_wall_up(&desk, &exe, font, None, &group, &monitor, &extra);
+            let launched = termpaper::launch::run_wall_up(&plans, dry_run)?;
+            for p in &plans {
+                let state = if launched.contains(p) { if dry_run { "would start" } else { "started" } } else { "already running" };
+                println!("{:<10} {:>5.2} pt  {state}", p.monitor, p.font_pt);
+                if dry_run {
+                    println!("  hyprctl dispatch '{}'", p.lua_dispatch());
+                }
+            }
             return Ok(());
         }
         None => {}
@@ -1090,6 +1217,22 @@ fn run(
     } else {
         None
     };
+    // The physical wall plan (Hyprland): one leader computes it for the
+    // whole group from the desk model and every pane adopts it — portrait
+    // and landscape monitors line up in millimetres. The cell-count layout
+    // stays as the fallback everywhere else.
+    let hypr_ok = termpaper::hypr::monitors().is_some();
+    let mut planner: Option<termpaper::wallplan::Planner> = None;
+    let mut plan_watcher: Option<termpaper::wallplan::PlanWatcher> = None;
+    let mut calib_watcher: Option<termpaper::calibrate::Watcher> = None;
+    let mut wall_plan: Option<termpaper::wallplan::WallPlan> = None;
+    let mut plan_group = String::new();
+    // resampling buffer for Classic panes whose cells differ from the canvas
+    let mut classic_scratch = termpaper::canvas::Canvas::new(1, 1);
+    // monitors for the calibration pattern, refreshed with the wall
+    let mut calib_monitors: Vec<termpaper::hypr::HyprMonitor> = Vec::new();
+    // this pane drives a calibration opened from the menu
+    let mut calib_ctl: Option<termpaper::calibrate::Controller> = None;
 
     // one registry snapshot shared by the leader duties, wall layout, and menu.
     // Scanning the registry means readdir + a /proc stat per entry + a file
@@ -1354,7 +1497,20 @@ fn run(
                     color_param = color_wheel::Param::Hue;
                 }
                 // placeholder until the alignment tool lands
-                Effect::OpenCalibration => menu.flash("Align monitors: coming soon"),
+                Effect::OpenCalibration => {
+                    let ctl = link::group_dir(&settings.link_group).and_then(|d| {
+                        let _ = std::fs::create_dir_all(&d);
+                        termpaper::calibrate::Controller::start(d)
+                    });
+                    match ctl {
+                        Some(c) if settings.link_enabled => {
+                            calib_ctl = Some(c);
+                            menu.close();
+                        }
+                        Some(_) => menu.flash("Align monitors: turn Link on first"),
+                        None => menu.flash("Align monitors needs Hyprland"),
+                    }
+                }
             }
         }
         // config writes coalesce while the menu or wheel is up; otherwise
@@ -1546,6 +1702,32 @@ fn run(
             if wall_layout != old_layout {
                 view_rev += 1;
             }
+            // physical plan: attach to the group's plan and calibration files
+            let physical = hypr_ok && settings.link_enabled && settings.wall_enabled && settings.wall_spec.is_none();
+            if physical {
+                if plan_watcher.is_none() || plan_group != settings.link_group {
+                    plan_group = settings.link_group.clone();
+                    wall_plan = None;
+                    planner = None;
+                    if let Some(dir) = link::group_dir(&plan_group) {
+                        let group = plan_group.clone();
+                        planner = Some(termpaper::wallplan::Planner::spawn(dir.clone(), std::process::id(), move || panes_of(&group)));
+                        plan_watcher = Some(termpaper::wallplan::PlanWatcher::new(dir.clone()));
+                        calib_watcher = Some(termpaper::calibrate::Watcher::new(dir));
+                    }
+                    view_rev += 1;
+                }
+                if let Some(p) = &planner {
+                    p.set_active(is_leader(&peers.list, st.synced));
+                }
+                calib_monitors = termpaper::hypr::monitors().unwrap_or_default();
+            } else if plan_watcher.is_some() {
+                planner = None;
+                plan_watcher = None;
+                calib_watcher = None;
+                wall_plan = None;
+                view_rev += 1;
+            }
         }
 
         // clock overlay: one cheap `date` call per 10s, handles TZ/DST
@@ -1559,6 +1741,15 @@ fn run(
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .unwrap_or_default();
         }
+
+        // a newly published plan, and any calibration in progress
+        if let Some(w) = &mut plan_watcher {
+            if let Some(p) = w.poll() {
+                wall_plan = Some(p);
+                view_rev += 1;
+            }
+        }
+        let calib_state = calib_watcher.as_mut().and_then(|w| w.poll().cloned());
 
         // DEC 2026 synchronized output: the terminal holds the old frame
         // until the end marker, so a frame never shows half-written. The
@@ -1582,11 +1773,26 @@ fn run(
         terminal.draw(|f| {
             let area = f.area();
             let (pw, ph) = shown_pixels.cell_size();
-            let size = match wall_layout {
-                Some(l) => (l.virtual_w * pw, l.virtual_h * ph),
-                None => (area.width as usize * pw, area.height as usize * ph),
+            let me = std::process::id();
+            let my_plan = wall_plan.as_ref().and_then(|p| p.pane(me).map(|pp| (p.classic_cells, pp.clone())));
+            let local = (area.width as usize * pw, area.height as usize * ph);
+            // Classic canvas and this pane's window onto it: the physical
+            // plan's shared canvas, else the cell-count wall, else local
+            let (size, crop, classic_map) = if let Some((cells, pp)) = &my_plan {
+                match pp.classic {
+                    Some((o, stp)) => {
+                        let crop = render::view_is_crop(o, stp, shown_pixels)
+                            .map(|(x, y)| (x.max(0) as usize, y.max(0) as usize))
+                            .unwrap_or((0, 0));
+                        ((cells.0 * pw, cells.1 * ph), crop, Some((o, stp)))
+                    }
+                    None => (local, (0, 0), None),
+                }
+            } else if let Some(l) = wall_layout {
+                ((l.virtual_w * pw, l.virtual_h * ph), (l.crop_x * pw, l.crop_y * ph), None)
+            } else {
+                (local, (0, 0), None)
             };
-            let crop = wall_layout.map(|l| (l.crop_x * pw, l.crop_y * ph)).unwrap_or((0, 0));
             let request = termpaper::engine::Request {
                 generation: 0,
                 // what is simulated: a change rebuilds (and replays out of sight)
@@ -1604,6 +1810,8 @@ fn run(
                         None => cell_px.map(|(w, h)| h / w).unwrap_or(termpaper::engine::DEFAULT_CELL_ASPECT),
                     },
                     rev: view_rev,
+                    comp: my_plan.as_ref().map(|(_, pp)| pp.comp),
+                    classic_map,
                 },
                 // a paused anchor freezes elapsed itself: the worker keeps
                 // replaying up to it (a pane joining a paused wall catches up)
@@ -1630,7 +1838,52 @@ fn run(
             if rendered.as_ref().is_some_and(|frame| frame.generation != worker.generation()) {
                 rendered = None;
             }
-            if let Some(frame) = &rendered {
+            // calibration: every pane shows the millimetre pattern instead
+            let geo_now = geo_watcher.as_ref().and_then(|w| w.latest());
+            let calib_drawn = match (&calib_state, geo_now) {
+                (Some(cs), Some(g)) => {
+                    let geom = termpaper::wallplan::PaneGeom {
+                        pid: me,
+                        ancestors: Vec::new(),
+                        cols: area.width,
+                        rows: area.height,
+                        cell: cell_px.map(|(w, h)| (w as f64, h as f64)),
+                        pad: (settings.pad.0 as f64, settings.pad.1 as f64),
+                        centered: settings.placement == wall::Placement::Center,
+                    };
+                    let win = [g.x as f64, g.y as f64, g.w as f64, g.h as f64];
+                    match termpaper::calibrate::pane_pattern(cs, &calib_monitors, win, &geom, Pixels::Half) {
+                        Some((canvas, label)) => {
+                            render::draw_crop(&canvas, 0, 0, area, f.buffer_mut(), settings.truecolor, Pixels::Half);
+                            let w = (label.chars().count() as u16).min(area.width.saturating_sub(2));
+                            f.render_widget(
+                                Paragraph::new(Text::raw(label)).style(
+                                    Style::new()
+                                        .fg(ratatui::style::Color::Rgb(245, 245, 245))
+                                        .bg(ratatui::style::Color::Rgb(24, 26, 34)),
+                                ),
+                                Rect { x: area.x + 1, y: area.y + 2, width: w, height: 1 },
+                            );
+                            true
+                        }
+                        None => false,
+                    }
+                }
+                _ => false,
+            };
+            if let Some(c) = calib_ctl.as_ref().filter(|_| calib_drawn || calib_state.is_some()) {
+                // the controller's instructions along the bottom of this pane
+                let lines = termpaper::calibrate::help_lines(&c.state);
+                let h = (lines.len() as u16).min(area.height);
+                let rect = Rect { x: area.x, y: area.y + area.height.saturating_sub(h), width: area.width, height: h };
+                f.render_widget(
+                    Paragraph::new(Text::raw(lines.join("\n"))).style(
+                        Style::new().fg(ratatui::style::Color::Rgb(235, 235, 235)).bg(ratatui::style::Color::Rgb(16, 18, 26)),
+                    ),
+                    rect,
+                );
+            }
+            if let Some(frame) = rendered.as_ref().filter(|_| !calib_drawn) {
                 #[allow(unused_mut)]
                 let mut drawn = false;
                 #[cfg(feature = "gpu")]
@@ -1645,8 +1898,13 @@ fn run(
                     drawn = true;
                 }
                 if !drawn {
-                    render::draw_crop(&frame.canvas, crop.0 as i32, crop.1 as i32, area,
-                        f.buffer_mut(), settings.truecolor, shown_pixels);
+                    match classic_map.filter(|(o, s)| render::view_is_crop(*o, *s, shown_pixels).is_none()) {
+                        // a pane whose cells differ from the shared canvas
+                        Some((o, stp)) => render::draw_view(&frame.canvas, o, stp, area, f.buffer_mut(),
+                            settings.truecolor, shown_pixels, &mut classic_scratch),
+                        None => render::draw_crop(&frame.canvas, crop.0 as i32, crop.1 as i32, area,
+                            f.buffer_mut(), settings.truecolor, shown_pixels),
+                    }
                 }
             }
             // bottom-left hint, fading out over its last second
@@ -1694,9 +1952,15 @@ fn run(
             if menu.open {
                 let status = worker_status.clone().or_else(|| rendered.as_ref().map(|f| format!("{} · worker {:.1} ms · lead {}", f.backend, f.render_ms, lead.lead())))
                     .unwrap_or_else(|| "Renderer initializing…".into());
-                let wall_status = match wall_layout {
-                    Some(l) => format!("wall: {}x{} cells @ ({},{})", l.virtual_w, l.virtual_h, l.crop_x, l.crop_y),
-                    None => "wall: local".into(),
+                let wall_status = match (my_plan.as_ref(), wall_layout) {
+                    (Some((_, pp)), _) => format!(
+                        "wall: physical plan r{} · {} panes · this one on {}",
+                        wall_plan.as_ref().map(|p| p.rev).unwrap_or(0),
+                        wall_plan.as_ref().map(|p| p.panes.len()).unwrap_or(0),
+                        pp.monitor
+                    ),
+                    (None, Some(l)) => format!("wall: {}x{} cells @ ({},{})", l.virtual_w, l.virtual_h, l.crop_x, l.crop_y),
+                    _ => "wall: local".into(),
                 };
                 let instances = if settings.link_enabled {
                     peers.menu_lines.clone()
@@ -1791,6 +2055,17 @@ fn run(
                 if let Event::Key(key) = ev {
                 if key.kind == KeyEventKind::Press {
                     let km = &settings.keymap;
+
+                    // a calibration opened from the menu takes every key
+                    if let Some(c) = &mut calib_ctl {
+                        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                        let alt = key.modifiers.contains(KeyModifiers::ALT);
+                        match c.key(key.code, shift, alt) {
+                            termpaper::calibrate::Outcome::Continue => {}
+                            _ => calib_ctl = None,
+                        }
+                        break;
+                    }
 
                     if color_open {
                         if key.code == KeyCode::Esc || km.matches("color", key.code) {

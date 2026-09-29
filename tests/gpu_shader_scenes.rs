@@ -257,6 +257,8 @@ fn the_worker_delivers_cells_for_a_studio_scene() {
                 pixels: Pixels::Half,
                 cell_aspect: DEFAULT_CELL_ASPECT,
                 rev: 0,
+                comp: None,
+                classic_map: None,
             },
             elapsed_ms: start.elapsed().as_millis() as u64,
             paused: false,

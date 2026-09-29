@@ -25,11 +25,15 @@ pub struct PaneGeom {
     pub ancestors: Vec<u32>,
     pub cols: u16,
     pub rows: u16,
-    /// true cell size in device pixels, when the terminal reports it
-    pub cell_px: Option<(u16, u16)>,
+    /// measured cell size in logical (layout) px, when the terminal
+    /// reports it
+    pub cell: Option<(f64, f64)>,
     /// padding between the window edge and the cell grid, logical px
     /// (left, top)
     pub pad: (f64, f64),
+    /// the terminal centres the grid in the window (leftover split evenly)
+    /// instead of leaving it at the right and bottom
+    pub centered: bool,
 }
 
 /// Where one pane sits.
@@ -87,16 +91,26 @@ impl WallPlan {
 }
 
 /// The cell grid of a pane in logical px of the compositor layout.
-fn content_logical(win: &HyprClient, g: &PaneGeom, scale: f64) -> [f64; 4] {
-    let (wx, wy) = (win.at[0] as f64, win.at[1] as f64);
-    let (ww, wh) = (win.size[0] as f64, win.size[1] as f64);
+fn content_logical(win: &HyprClient, g: &PaneGeom) -> [f64; 4] {
+    content_rect([win.at[0] as f64, win.at[1] as f64, win.size[0] as f64, win.size[1] as f64], g)
+}
+
+/// A pane's cell grid, in logical px, inside its window `[x, y, w, h]`.
+pub fn content_rect(win: [f64; 4], g: &PaneGeom) -> [f64; 4] {
+    let (wx, wy) = (win[0], win[1]);
+    let (ww, wh) = (win[2], win[3]);
     let (cols, rows) = (g.cols.max(1) as f64, g.rows.max(1) as f64);
-    let (cw, ch) = match g.cell_px {
-        Some((w, h)) if w > 0 && h > 0 => (w as f64 / scale, h as f64 / scale),
+    let (cw, ch) = match g.cell {
+        Some((w, h)) if w > 0.0 && h > 0.0 => (w, h),
         // estimate: the window minus padding, split evenly
         _ => ((ww - 2.0 * g.pad.0).max(1.0) / cols, (wh - 2.0 * g.pad.1).max(1.0) / rows),
     };
-    [wx + g.pad.0, wy + g.pad.1, cw * cols, ch * rows]
+    let (gw, gh) = (cw * cols, ch * rows);
+    if g.centered {
+        [wx + ((ww - gw) / 2.0).max(0.0), wy + ((wh - gh) / 2.0).max(0.0), gw, gh]
+    } else {
+        [wx + g.pad.0, wy + g.pad.1, gw, gh]
+    }
 }
 
 /// Compute the plan for the panes the compositor can place.
@@ -116,7 +130,8 @@ pub fn plan(desk: &Desk, cfg: &DeskConfig, clients: &[HyprClient], panes: &[Pane
         else {
             continue;
         };
-        let r = content_logical(win, g, dm.mon.scale);
+        let _ = dm;
+        let r = content_logical(win, g);
         let Some((content, dm)) = desk.logical_to_mm(r) else { continue };
         placed.push(Placed { g, monitor: dm.mon.name.clone(), content, portrait: dm.mon.portrait() });
     }
@@ -197,6 +212,7 @@ pub fn plan(desk: &Desk, cfg: &DeskConfig, clients: &[HyprClient], panes: &[Pane
 /// same result twice, so a window mid-drag does not thrash every pane).
 pub struct Planner {
     active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Planner {
@@ -207,12 +223,17 @@ impl Planner {
     {
         use std::sync::atomic::Ordering;
         let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = active.clone();
+        let quit = stop.clone();
         let _ = std::thread::Builder::new().name("termpaper-planner".into()).spawn(move || {
             let mut candidate: Option<WallPlan> = None;
             let mut published: Option<WallPlan> = WallPlan::load(&dir);
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(500));
+                if quit.load(Ordering::Acquire) {
+                    return;
+                }
                 if !flag.load(Ordering::Acquire) {
                     candidate = None;
                     continue;
@@ -237,12 +258,18 @@ impl Planner {
                 candidate = Some(next);
             }
         });
-        Planner { active }
+        Planner { active, stop }
     }
 
     /// Only the leader plans; followers keep the thread idle.
     pub fn set_active(&self, on: bool) {
         self.active.store(on, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Drop for Planner {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -303,7 +330,15 @@ mod tests {
     }
 
     fn pane(pid: u32, cols: u16, rows: u16, cell: (u16, u16)) -> PaneGeom {
-        PaneGeom { pid, ancestors: vec![pid], cols, rows, cell_px: Some(cell), pad: (0.0, 0.0) }
+        PaneGeom {
+            pid,
+            ancestors: vec![pid],
+            cols,
+            rows,
+            cell: Some((cell.0 as f64, cell.1 as f64)),
+            pad: (0.0, 0.0),
+            centered: false,
+        }
     }
 
     fn setup() -> (Desk, DeskConfig, Vec<HyprClient>, Vec<PaneGeom>) {

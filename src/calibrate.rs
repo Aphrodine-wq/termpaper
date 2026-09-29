@@ -10,9 +10,12 @@
 //! desk offset, bezel and scale until every line runs straight, then saves
 //! `desk.toml`.
 use crate::canvas::Canvas;
-use crate::desk::{Align, DeskConfig, MonitorCfg, RectMm};
-use crate::wallplan::PanePlan;
+use crate::desk::{Align, Desk, DeskConfig, MonitorCfg, RectMm};
+use crate::hypr::HyprMonitor;
+use crate::render::Pixels;
+use crate::wallplan::PaneGeom;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// What the controller is doing, shared through `calib.json` so every pane
 /// previews the same working copy.
@@ -78,12 +81,12 @@ fn to_grid(v: f64, step: f64) -> f64 {
 /// Draw the pattern for one pane. `seams` are the x positions (mm) where
 /// monitors meet; `selected` marks this pane's monitor as the one being
 /// adjusted (it gets a coloured frame).
-pub fn draw_pattern(canvas: &mut Canvas, pane: &PanePlan, frame: RectMm, seams: &[f64], selected: bool) {
+pub fn draw_pattern(canvas: &mut Canvas, content: RectMm, frame: RectMm, seams: &[f64], selected: bool) {
     let (w, h) = (canvas.width(), canvas.height());
     if w == 0 || h == 0 {
         return;
     }
-    let c = pane.content;
+    let c = content;
     let mx = c.w / w as f64; // mm per canvas pixel
     let my = c.h / h as f64;
     let line = mx.max(my) * 0.75; // a line is about one pixel wide
@@ -138,6 +141,216 @@ pub fn draw_pattern(canvas: &mut Canvas, pane: &PanePlan, frame: RectMm, seams: 
     }
 }
 
+pub const FILE: &str = "calib.json";
+
+/// The calibration in progress in a group directory, if its controller is
+/// still running.
+pub fn read_state(dir: &Path) -> Option<CalibState> {
+    let s: CalibState = serde_json::from_str(&std::fs::read_to_string(dir.join(FILE)).ok()?).ok()?;
+    crate::link::process_alive(s.controller).then_some(s)
+}
+
+/// Watches a group directory for calibration with one `stat` per call.
+pub struct Watcher {
+    dir: PathBuf,
+    stamp: Option<std::time::SystemTime>,
+    state: Option<CalibState>,
+    checked: std::time::Instant,
+}
+
+impl Watcher {
+    pub fn new(dir: PathBuf) -> Self {
+        Self { dir, stamp: None, state: None, checked: std::time::Instant::now() }
+    }
+
+    /// The current calibration, if one is running.
+    pub fn poll(&mut self) -> Option<&CalibState> {
+        let m = std::fs::metadata(self.dir.join(FILE)).ok().and_then(|m| m.modified().ok());
+        // re-check a dead controller now and then even if the file is stale
+        if m != self.stamp || self.checked.elapsed() > std::time::Duration::from_secs(1) {
+            self.stamp = m;
+            self.checked = std::time::Instant::now();
+            self.state = m.and_then(|_| read_state(&self.dir));
+        }
+        self.state.as_ref()
+    }
+}
+
+/// The pattern for one pane from its own window geometry and the working
+/// desk config — computed locally, so every nudge shows at once. Returns
+/// the canvas and a label for the pane.
+pub fn pane_pattern(state: &CalibState, monitors: &[HyprMonitor], win: [f64; 4], g: &PaneGeom, pixels: Pixels) -> Option<(Canvas, String)> {
+    let desk = Desk::from_hypr(monitors, &state.desk);
+    let (content, dm) = desk.logical_to_mm(crate::wallplan::content_rect(win, g))?;
+    let row: Vec<RectMm> = desk.monitors.iter().filter(|d| !d.mon.portrait()).map(|d| d.rect).collect();
+    let frame = row
+        .iter()
+        .copied()
+        .reduce(|a, b| a.union(&b))
+        .or_else(|| desk.monitors.iter().map(|d| d.rect).reduce(|a, b| a.union(&b)))?;
+    let n = desk.monitors.len();
+    let seams: Vec<f64> = desk.monitors.iter().take(n.saturating_sub(1)).map(|d| d.rect.right()).collect();
+    let (pw, ph) = pixels.cell_size();
+    let mut canvas = Canvas::new(g.cols.max(1) as usize * pw, g.rows.max(1) as usize * ph);
+    let selected = dm.mon.name == state.selected;
+    draw_pattern(&mut canvas, content, frame, &seams, selected);
+    let label = format!(
+        " {} · {:.4} mm/px{} ",
+        dm.mon.name,
+        dm.mm_per_px,
+        if selected { " · adjusting" } else { "" }
+    );
+    Some((canvas, label))
+}
+
+/// The interactive side: owns `calib.json` while it runs and removes it
+/// when done (saved or cancelled).
+pub struct Controller {
+    pub state: CalibState,
+    dir: PathBuf,
+    /// adjustable monitors, left to right (the leftmost is the reference)
+    order: Vec<String>,
+}
+
+pub enum Outcome {
+    Continue,
+    Saved,
+    Cancelled,
+}
+
+impl Controller {
+    pub fn start(dir: PathBuf) -> Option<Self> {
+        let mut mons = crate::hypr::monitors()?;
+        mons.sort_by_key(|m| (m.x, m.y));
+        let order: Vec<String> = mons.iter().map(|m| m.name.clone()).collect();
+        let selected = order.get(1).or(order.first())?.clone();
+        let c = Controller {
+            state: CalibState { controller: std::process::id(), rev: 1, selected, desk: crate::desk::load_desk() },
+            dir,
+            order,
+        };
+        c.write().ok()?;
+        Some(c)
+    }
+
+    fn write(&self) -> std::io::Result<()> {
+        let tmp = self.dir.join(format!(".{FILE}.{}", std::process::id()));
+        std::fs::write(&tmp, serde_json::to_vec(&self.state).map_err(std::io::Error::other)?)?;
+        std::fs::rename(tmp, self.dir.join(FILE))
+    }
+
+    fn finish(&self) {
+        let _ = std::fs::remove_file(self.dir.join(FILE));
+    }
+
+    /// Apply one key. `shift` = 10 mm steps, `alt` = 0.2 mm steps.
+    pub fn key(&mut self, code: crossterm::event::KeyCode, shift: bool, alt: bool) -> Outcome {
+        use crossterm::event::KeyCode as K;
+        let step = if shift { 10.0 } else if alt { 0.2 } else { 1.0 };
+        let nudge = match code {
+            K::Left => Some(Nudge::Move(-step, 0.0)),
+            K::Right => Some(Nudge::Move(step, 0.0)),
+            K::Up => Some(Nudge::Move(0.0, -step)),
+            K::Down => Some(Nudge::Move(0.0, step)),
+            K::Char('[') => Some(Nudge::Bezel(-0.5)),
+            K::Char(']') => Some(Nudge::Bezel(0.5)),
+            K::Char('-') => Some(Nudge::Scale(1.0 / 1.0025)),
+            K::Char('=') | K::Char('+') => Some(Nudge::Scale(1.0025)),
+            K::Char('a') => Some(Nudge::CycleAlign),
+            K::Char('r') => Some(Nudge::Reset),
+            _ => None,
+        };
+        if let Some(n) = nudge {
+            self.state.apply(n);
+            let _ = self.write();
+            return Outcome::Continue;
+        }
+        match code {
+            K::Tab | K::BackTab => {
+                // the leftmost monitor anchors the desk; cycle the others
+                let adj: Vec<&String> = self.order.iter().skip(1).collect();
+                if !adj.is_empty() {
+                    let i = adj.iter().position(|m| **m == self.state.selected).unwrap_or(0);
+                    let j = if code == K::Tab { (i + 1) % adj.len() } else { (i + adj.len() - 1) % adj.len() };
+                    self.state.selected = adj[j].clone();
+                    self.state.rev += 1;
+                    let _ = self.write();
+                }
+                Outcome::Continue
+            }
+            K::Enter => {
+                let saved = crate::desk::save_desk(&self.state.desk).is_ok();
+                self.finish();
+                if saved { Outcome::Saved } else { Outcome::Cancelled }
+            }
+            K::Esc | K::Char('q') => {
+                self.finish();
+                Outcome::Cancelled
+            }
+            _ => Outcome::Continue,
+        }
+    }
+}
+
+impl Drop for Controller {
+    fn drop(&mut self) {
+        // a crash or a closed terminal must not leave every pane stuck on
+        // the pattern (readers also check the controller is alive)
+        if read_state(&self.dir).is_some_and(|s| s.controller == std::process::id()) {
+            self.finish();
+        }
+    }
+}
+
+/// `termpaper calibrate`: run the controller in this terminal while the
+/// wall panes show the pattern.
+pub fn run_standalone(group: &str) -> std::io::Result<()> {
+    use crossterm::event::{self, Event, KeyEventKind, KeyModifiers};
+    use std::io::Write;
+    let Some(dir) = crate::link::group_dir(group) else {
+        eprintln!("termpaper: no runtime directory ($XDG_RUNTIME_DIR)");
+        std::process::exit(1);
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let Some(mut c) = Controller::start(dir) else {
+        eprintln!("termpaper: calibration needs Hyprland (monitor geometry comes from it)");
+        std::process::exit(1);
+    };
+    if crate::link::list_instances_in_group(group).is_empty() {
+        eprintln!("termpaper: no panes in group '{group}' — start them first (termpaper wall up)");
+    }
+    crossterm::terminal::enable_raw_mode()?;
+    let mut out = std::io::stdout();
+    let result = (|| -> std::io::Result<Outcome> {
+        loop {
+            crossterm::execute!(out, crossterm::terminal::Clear(crossterm::terminal::ClearType::All), crossterm::cursor::MoveTo(0, 0))?;
+            for l in help_lines(&c.state) {
+                write!(out, "{l}\r\n")?;
+            }
+            out.flush()?;
+            if let Event::Key(k) = event::read()? {
+                if k.kind != KeyEventKind::Press {
+                    continue;
+                }
+                if k.code == crossterm::event::KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                    c.finish();
+                    return Ok(Outcome::Cancelled);
+                }
+                match c.key(k.code, k.modifiers.contains(KeyModifiers::SHIFT), k.modifiers.contains(KeyModifiers::ALT)) {
+                    Outcome::Continue => {}
+                    done => return Ok(done),
+                }
+            }
+        }
+    })();
+    crossterm::terminal::disable_raw_mode()?;
+    match result? {
+        Outcome::Saved => println!("saved {}", crate::desk::desk_path().map(|p| p.display().to_string()).unwrap_or_default()),
+        _ => println!("calibration cancelled"),
+    }
+    Ok(())
+}
+
 /// The on-screen instructions for the controller.
 pub fn help_lines(state: &CalibState) -> Vec<String> {
     let m = state.desk.monitors.get(&state.selected).cloned().unwrap_or_default();
@@ -161,18 +374,7 @@ pub fn help_lines(state: &CalibState) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::desk::CompView;
 
-    fn pane(content: RectMm) -> PanePlan {
-        PanePlan {
-            pid: 1,
-            monitor: "DP-3".into(),
-            content,
-            portrait: false,
-            comp: CompView { origin: [0.0; 2], step: [0.0; 2], half: [0.0; 2] },
-            classic: None,
-        }
-    }
 
     #[test]
     fn nudges_edit_the_selected_monitor() {
@@ -195,12 +397,12 @@ mod tests {
     fn level_lines_land_at_the_same_desk_height_on_both_panes() {
         let frame = RectMm { x: 0.0, y: 0.0, w: 1000.0, h: 300.0 };
         // two panes of different pixel pitch meeting at x = 500
-        let a = pane(RectMm { x: 0.0, y: 0.0, w: 500.0, h: 300.0 });
-        let b = pane(RectMm { x: 500.0, y: 0.0, w: 500.0, h: 300.0 });
+        let a = RectMm { x: 0.0, y: 0.0, w: 500.0, h: 300.0 };
+        let b = RectMm { x: 500.0, y: 0.0, w: 500.0, h: 300.0 };
         let mut ca = Canvas::new(200, 120);
         let mut cb = Canvas::new(160, 96);
-        draw_pattern(&mut ca, &a, frame, &[500.0], false);
-        draw_pattern(&mut cb, &b, frame, &[500.0], false);
+        draw_pattern(&mut ca, a, frame, &[500.0], false);
+        draw_pattern(&mut cb, b, frame, &[500.0], false);
         let yellow = |c: &Canvas, x: i32| (0..c.height() as i32).find(|&y| c.get(x, y).color == (240, 200, 60) && y > 5);
         // middle level line (150 mm) at the right edge of A and left edge of B
         let ya = yellow(&ca, 199).unwrap() as f64 / 120.0 * 300.0;
