@@ -2,7 +2,7 @@
 //!
 //! While calibrating, every pane of the wall draws the same pattern at the
 //! same desk coordinates: a 10 mm grid, level lines across the whole desk, 30°
-//! diagonals, circles centred on each seam and a 100 mm ruler per monitor.
+//! diagonals and a circle crossing on each seam, and a 100 mm ruler per monitor.
 //! Where two monitors meet, a misplaced monitor shows up as a broken line —
 //! vertical offset breaks the level lines, a wrong bezel or scale bends the
 //! diagonals and flattens the circles — and a physical ruler held to the
@@ -110,10 +110,13 @@ pub fn draw_pattern(canvas: &mut Canvas, content: RectMm, frame: RectMm, seams: 
                     col = (240, 200, 60);
                 }
             }
-            // 30° diagonals through the frame centre
-            let (dx, dy) = (x - fc.0, y - fc.1);
-            if near((dx * s30 - dy * c30).abs(), line * 1.8) || near((dx * s30 + dy * c30).abs(), line * 1.8) {
-                col = (80, 200, 230);
+            // 30° diagonals crossing on every seam at the middle level: a
+            // wrong bezel or scale shows as a kink where they pass the gap
+            for &sx in seams {
+                let (dx, dy) = (x - sx, y - fc.1);
+                if near((dx * s30 - dy * c30).abs(), line * 1.8) || near((dx * s30 + dy * c30).abs(), line * 1.8) {
+                    col = (80, 200, 230);
+                }
             }
             // a 100 mm circle on every seam, centred on the level line
             for &sx in seams {
