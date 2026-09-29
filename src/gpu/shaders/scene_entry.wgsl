@@ -43,6 +43,23 @@ fn entry_ctx() -> Ctx {
     return c;
 }
 
+// Past the frame's left/right edge (a portrait monitor beside a landscape
+// row, say), plain perspective packs fewer and fewer degrees into each
+// pixel, so everything smears sideways — stars turn into dashes 60-70° off
+// axis. Beyond the edge, continue as a cylinder instead: the view angle
+// keeps growing at the rate it had at the edge. Only x changes, so horizons
+// stay level across monitors; identity inside the frame (single monitors are
+// untouched) and continuous at its edge, so the seams stay exact. z is a
+// typical camera (about 53° across the short side); flat 2D scenes simply
+// continue a little faster.
+fn entry_wide(p: vec2f, hx: f32) -> vec2f {
+    let a = abs(p.x);
+    if (a <= hx) { return p; }
+    let z = 1.0;
+    let t = min(atan(hx / z) + (a - hx) * z / (z * z + hx * hx), 1.45);
+    return vec2f(sign(p.x) * z * tan(t), p.y);
+}
+
 fn entry_eval(p: vec2f, ctx: Ctx) -> vec3f {
     var c = scene(p, ctx);
     if (F.time.z < 1.0) {
@@ -76,6 +93,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (spp > 1u) { o = fract(vec2f(0.5) + vec2f(0.7548776662, 0.5698402910) * f32(i)); }
         var p = vec2f(F.map.x + (lp.x + o.x) * F.map.z, F.map.y - (lp.y + o.y) * F.map.w);
         if ((F.size.w & 1u) != 0u) { p.x = -p.x; }
+        p = entry_wide(p, F.view.x);
         ctx.jitter = fract(ign + f32(i) * 0.6180340);
         ctx.sample = i;
         acc += entry_eval(p, ctx);
