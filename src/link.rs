@@ -91,14 +91,24 @@ pub struct SettingsMsg {
     /// only the look (and its theme) are meant: sent from outside the group
     /// (`termpaper theme apply`), which cannot know the rest
     pub look_only: bool,
+    /// how scenes give way to each other: the same on every pane of a wall
+    pub transition: Option<crate::prefs::TransitionStyle>,
+    /// the sender's display settings; receivers take the parts a wall shows
+    /// alike (clock, scene name, night dimming)
+    pub display: Option<crate::prefs::DisplayPrefs>,
+    /// false: the sender keeps a look of its own (Sync look off), which
+    /// receivers leave alone
+    pub look_shared: bool,
 }
 
-/// Just the `look` of a settings message, read with serde (the rest of the
-/// message goes through the hand-rolled flat parser).
+/// Just the `look` and `display` of a settings message, read with serde
+/// (the rest of the message goes through the hand-rolled flat parser).
 #[derive(serde::Deserialize)]
 struct LookOnly {
     #[serde(default)]
     look: Option<crate::look::Look>,
+    #[serde(default)]
+    display: Option<crate::prefs::DisplayPrefs>,
 }
 
 impl Default for SettingsMsg {
@@ -117,6 +127,9 @@ impl Default for SettingsMsg {
             look: None,
             look_theme: None,
             look_only: false,
+            transition: None,
+            display: None,
+            look_shared: true,
         }
     }
 }
@@ -360,6 +373,15 @@ impl SettingsMsg {
         if self.look_only {
             theme.push_str(",\"look_only\":true");
         }
+        if !self.look_shared {
+            theme.push_str(",\"look_shared\":false");
+        }
+        if let Some(t) = self.transition {
+            theme.push_str(&format!(",\"transition\":\"{}\"", t.name()));
+        }
+        if let Some(d) = self.display.as_ref().and_then(|d| serde_json::to_string(d).ok()) {
+            theme.push_str(&format!(",\"display\":{d}"));
+        }
         format!(
             "\"filters\":[{}],\"fps\":{},\"smooth\":{},\"dim\":{},\"fade\":{},\"clock\":{},\"quick\":{},\"hue_shift\":{},\"saturation\":{},\"contrast\":{}{}",
             filters,
@@ -378,6 +400,7 @@ impl SettingsMsg {
 
     fn parse_fields(text: &str) -> SettingsMsg {
         let d = SettingsMsg::default();
+        let mut parts = serde_json::from_str::<LookOnly>(text).ok();
         let num = |k: &str, dflt: f32| json_get(text, k).and_then(|v| v.parse().ok()).unwrap_or(dflt);
         SettingsMsg {
             filters: parse_str_array(text, "filters"),
@@ -390,9 +413,12 @@ impl SettingsMsg {
             hue_shift: num("hue_shift", d.hue_shift),
             saturation: num("saturation", d.saturation),
             contrast: num("contrast", d.contrast),
-            look: serde_json::from_str::<LookOnly>(text).ok().and_then(|w| w.look),
+            look: parts.as_mut().and_then(|p| p.look.take()),
             look_theme: json_get(text, "look_theme").map(str::to_string),
             look_only: json_get(text, "look_only") == Some("true"),
+            transition: json_get(text, "transition").and_then(crate::prefs::TransitionStyle::parse),
+            look_shared: json_get(text, "look_shared") != Some("false"),
+            display: parts.and_then(|p| p.display),
         }
     }
 }
@@ -1640,6 +1666,9 @@ mod settings_sync_tests {
             look: None,
             look_theme: None,
             look_only: false,
+            transition: None,
+            display: None,
+            look_shared: true,
         };
         let text = format!("{{\"kind\":\"settings\",{},\"epoch\":7,\"seq\":2,\"from_pid\":5}}", m.fields_json());
         let c = parse_control(&text).unwrap();
@@ -1661,6 +1690,14 @@ mod settings_sync_tests {
         assert_eq!(back.fade, 0.5, "top-level fade, not grade.fade");
         assert_eq!(back.look, Some(look));
         assert_eq!(back.look_theme.as_deref(), Some("tokyo-night"));
+        // the transition and display settings ride along
+        let display = crate::prefs::DisplayPrefs { night: true, night_level: 0.3, clock_style: crate::prefs::ClockStyle::Large, ..Default::default() };
+        let wall = SettingsMsg { transition: Some(crate::prefs::TransitionStyle::Iris), display: Some(display.clone()), ..rich.clone() };
+        let text = format!("{{\"kind\":\"settings\",{},\"epoch\":7,\"seq\":2,\"from_pid\":5}}", wall.fields_json());
+        let back = parse_control(&text).unwrap().settings.unwrap();
+        assert_eq!(back.transition, Some(crate::prefs::TransitionStyle::Iris));
+        assert_eq!(back.display, Some(display));
+        assert_eq!((back.fps, back.clock, back.dim), (wall.fps, wall.clock, wall.dim), "top-level keys still win");
         // an older binary's settings message: only its appearance fields count
         let old = parse_control(
             "{\"kind\":\"settings\",\"pixels\":\"braille\",\"detail\":\"high\",\"filters\":[\"crt\"],\"theme\":\"amber\",\"text_scale\":3,\"speed\":1.5,\"fps\":48,\"smooth\":0.45,\"dim\":0.8,\"fade\":0.5,\"clock\":false,\"quick\":null,\"hue_shift\":45,\"saturation\":1.4,\"contrast\":1.2,\"epoch\":7,\"seq\":2,\"from_pid\":5}",

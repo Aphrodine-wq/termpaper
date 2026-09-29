@@ -99,7 +99,7 @@ fn base_plan<'a>(look: &'a Look, pixels: Pixels, cols: usize, rows: usize) -> Pl
         lut: None,
         quick_filter: None,
         t: 1.5,
-        dim: 1.0,
+        dim: 1.0, mask: None,
         smooth: 0.0,
         pixels,
         cols,
@@ -166,14 +166,16 @@ fn pixel_parity(gpu: &mut Gpu, canvas: &Canvas, filters: &[String]) -> i32 {
 
 // ------------------------------------------------------------------- stage 2
 
-/// Invert `render::quad_glyph` / `render::braille_glyph` so a rendered cell can
-/// be turned back into the mask that produced it.
+/// Invert `render::quad_glyph` / `render::braille_glyph` /
+/// `render::sextant_glyph` so a rendered cell can be turned back into the
+/// mask that produced it.
 fn mask_of_glyph(cp: u32, pixels: Pixels) -> Option<u8> {
     let ch = char::from_u32(cp)?;
     match pixels {
         Pixels::Quad => (0u8..16).find(|&m| render::quad_glyph(m) == ch),
         Pixels::Braille => (0u8..=255).find(|&m| render::braille_glyph(m) == ch),
-        Pixels::Half => None,
+        Pixels::Sextant => (0u8..64).find(|&m| render::sextant_glyph(m) == ch),
+        Pixels::Half | Pixels::Ascii | Pixels::Blocks => None,
     }
 }
 
@@ -197,7 +199,15 @@ fn block_lums(c: &Canvas, ox: usize, oy: usize, pixels: Pixels) -> (Vec<u32>, u3
                 }
             }
         }
-        Pixels::Half => {}
+        // rows top to bottom, left then right
+        Pixels::Sextant => {
+            for dy in 0..3 {
+                for dx in 0..2 {
+                    lums.push(lum(c.get((ox + dx) as i32, (oy + dy) as i32).color));
+                }
+            }
+        }
+        Pixels::Half | Pixels::Ascii | Pixels::Blocks => {}
     }
     let avg = lums.iter().sum::<u32>() / lums.len().max(1) as u32;
     (lums, avg)
@@ -288,7 +298,7 @@ fn main() {
     println!("adapter: {}\n", gpu.adapter_name());
     let mut failures = 0usize;
 
-    let modes = [Pixels::Half, Pixels::Quad, Pixels::Braille];
+    let modes = Pixels::ALL;
     let sizes: Vec<(usize, usize)> = modes
         .iter()
         .map(|p| {

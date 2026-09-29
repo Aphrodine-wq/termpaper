@@ -317,7 +317,46 @@ fn noir(@builtin(global_invocation_id) g: vec3<u32>) {
 @compute @workgroup_size(8, 8)
 fn dim(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
-    dst[idx(g.x, g.y)] = pack(floor(load(g.x, g.y) * P.fp.y));
+    let f = P.fp.y * transition_mask(gx(g.x), gy(g.y));
+    dst[idx(g.x, g.y)] = pack(floor(load(g.x, g.y) * f));
+}
+
+// `transition::hash2`
+fn mask_hash(x: u32, y: u32) -> u32 {
+    var h = (x * 0x8da6b343u) ^ (y * 0xd8163841u);
+    h ^= h >> 15u; h *= 0x2c1b3c6du;
+    h ^= h >> 12u; h *= 0x297a2d39u;
+    h ^= h >> 15u;
+    return h;
+}
+
+// `transition::Mask::factor` at wall pixel (x, y): flags.y the style (0 none,
+// 1 dissolve, 2 wipe, 3 iris, 4 blinds), flags.z arriving, flags.w the slat
+// height; fp.z the edge, fp.w 1/soft; fp2 1/span, 1/radius, the centre.
+fn transition_mask(x: i32, y: i32) -> f32 {
+    var t = 0.0;
+    switch P.flags.y {
+        case 1u: {
+            t = f32(mask_hash(bitcast<u32>(x), bitcast<u32>(y)) >> 8u) * (1.0 / 16777216.0);
+        }
+        case 2u: {
+            let u = (f32(x) + 0.5) * P.fp2.x;
+            t = select(1.0 - u, u, P.flags.z != 0u);
+        }
+        case 3u: {
+            let dx = f32(x) + 0.5 - P.fp2.z;
+            let dy = f32(y) + 0.5 - P.fp2.w;
+            t = sqrt(dx * dx + dy * dy) * P.fp2.y;
+        }
+        case 4u: {
+            let s = i32(P.flags.w);
+            t = (f32(((y % s) + s) % s) + 0.5) * P.fp2.x;
+        }
+        default: {
+            return 1.0;
+        }
+    }
+    return clamp((P.fp.z - clamp(t, 0.0, 1.0)) * P.fp.w, 0.0, 1.0);
 }
 
 // ---------------------------------------------------------- neighbourhood ops
@@ -897,7 +936,7 @@ fn pack_cells(@builtin(global_invocation_id) g: vec3<u32>) {
         let s = split_block(px, 4u);
         store_cell(ci, quad_glyph(s.mask), s.fg, s.bg);
         return;
-    } else {
+    } else if (mode == 2u) {
         for (var dx = 0u; dx < 2u; dx = dx + 1u) {
             for (var dy = 0u; dy < 4u; dy = dy + 1u) {
                 px[dx * 4u + dy] = load_or_black(ox + dx, oy + dy);
@@ -906,5 +945,38 @@ fn pack_cells(@builtin(global_invocation_id) g: vec3<u32>) {
         let s = split_block(px, 8u);
         store_cell(ci, braille_glyph(s.mask), s.fg, s.bg);
         return;
+    } else if (mode == 3u) {
+        // sextant: 2x3, rows top to bottom
+        for (var dy = 0u; dy < 3u; dy = dy + 1u) {
+            for (var dx = 0u; dx < 2u; dx = dx + 1u) {
+                px[dy * 2u + dx] = load_or_black(ox + dx, oy + dy);
+            }
+        }
+        let s = split_block(px, 6u);
+        store_cell(ci, sextant_glyph(s.mask), s.fg, s.bg);
+        return;
+    } else if (mode == 4u) {
+        // ascii: the two pixels' mean, as a ramp character on black
+        let c = floor((unpack(tl_raw) + load_or_black(ox, oy + 1u)) * 0.5);
+        let l = u32(c.x) * 3u + u32(c.y) * 6u + u32(c.z);
+        store_cell(ci, RAMP[min(l * 10u / 2551u, 9u)], c, vec3<f32>(0.0));
+        return;
+    } else {
+        // blocks: one colour a cell, in the background
+        store_cell(ci, 0x20u, vec3<f32>(0.0), unpack(tl_raw));
+        return;
     }
 }
+
+// `render::sextant_glyph`
+fn sextant_glyph(mask: u32) -> u32 {
+    let m = mask & 63u;
+    if (m == 0u) { return 0x20u; }
+    if (m == 21u) { return 0x258cu; }
+    if (m == 42u) { return 0x2590u; }
+    if (m == 63u) { return 0x2588u; }
+    return 0x1fb00u + m - 1u - select(0u, 1u, m > 21u) - select(0u, 1u, m > 42u);
+}
+
+// `render::RAMP`
+const RAMP = array<u32, 10>(0x20u, 0x2eu, 0x3au, 0x2du, 0x3du, 0x2bu, 0x2au, 0x23u, 0x25u, 0x40u);

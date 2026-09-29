@@ -158,6 +158,8 @@ pub struct Plan<'a> {
     pub quick_filter: Option<&'a str>,
     pub t: f32,
     pub dim: f32,
+    /// a styled transition's shape over the dim (None: uniform)
+    pub mask: Option<crate::transition::Mask>,
     /// The engine's `settings.smooth`; the shader wants `1.0 - smooth`.
     pub smooth: f32,
     pub pixels: Pixels,
@@ -697,11 +699,7 @@ impl Gpu {
             fp: [plan.t, 0.0, 0.0, 0.0],
             fp2: [0.0; 4],
             flags: [
-                match plan.pixels {
-                    Pixels::Half => 0,
-                    Pixels::Quad => 1,
-                    Pixels::Braille => 2,
-                },
+                plan.pixels.code(),
                 0,
                 0,
                 0,
@@ -819,9 +817,18 @@ impl Gpu {
             filter_pass(q, 1.0, &mut push);
         }
 
-        if plan.dim < 0.999 {
+        if plan.dim < 0.999 || plan.mask.is_some() {
             let mut p = base;
             p.fp[1] = plan.dim;
+            // the transition mask's constants, computed once on the CPU
+            if let Some(m) = &plan.mask {
+                p.flags[1] = m.code();
+                p.flags[2] = m.arriving as u32;
+                p.flags[3] = m.slat;
+                p.fp[2] = m.edge;
+                p.fp[3] = m.inv_soft;
+                p.fp2 = [m.inv_span, m.inv_r, m.half.0, m.half.1];
+            }
             push("dim", p, Target::Pong);
         }
 

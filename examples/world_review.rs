@@ -34,7 +34,7 @@ fn main() {
         lut: None,
         quick_filter: None,
         t: 8.0,
-        dim: 1.0,
+        dim: 1.0, mask: None,
         smooth: 0.0,
         pixels: Pixels::Half,
         cols: w,

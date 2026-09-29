@@ -3,6 +3,7 @@
 
 use super::MenuCtx;
 use crate::config::CycleScope;
+use crate::prefs::CycleOrder;
 use crate::scene::{self, Category, Entry};
 
 /// How many recently switched-to scenes are remembered.
@@ -258,29 +259,56 @@ pub fn toggle_favorite(favorites: &mut Vec<String>, name: &str) -> bool {
 }
 
 /// The scene the auto-cycle moves to after `names[current]`, within
-/// `scope`. An empty scope (no favourites yet) cycles through everything;
-/// a scope holding only the current scene stays on it.
+/// `scope`: the next in list order, or with `Shuffle` any other one, `pick`
+/// choosing. An empty scope (no favourites yet) cycles through everything;
+/// a scope holding only the current scene stays on it, and so does the
+/// Variants scope (see [`cycle_variant`]).
 pub fn cycle_next(
     names: &[&'static str],
     current: usize,
     scope: CycleScope,
     favorites: &[String],
+    order: CycleOrder,
+    pick: u64,
 ) -> usize {
     let n = names.len();
     if n == 0 {
         return 0;
     }
     let current = current % n;
+    if scope == CycleScope::Variants {
+        return current;
+    }
     let category = |name: &str| scene::lookup(name).map(|e| e.category());
     let here = category(names[current]);
     let in_scope = |name: &str| match scope {
-        CycleScope::All => true,
+        CycleScope::All | CycleScope::Variants => true,
         CycleScope::Category => category(name) == here,
         CycleScope::Favorites => favorites.iter().any(|f| f == name),
+        CycleScope::Studio => scene::lookup(name).is_some_and(|e| e.needs_gpu()),
+        CycleScope::Classic => scene::lookup(name).is_some_and(|e| !e.needs_gpu()),
     };
     let scoped = names.iter().any(|n| in_scope(n));
-    (1..=n)
-        .map(|step| (current + step) % n)
-        .find(|&i| !scoped || in_scope(names[i]))
-        .unwrap_or(current)
+    let others: Vec<usize> = (1..n).map(|step| (current + step) % n).filter(|&i| !scoped || in_scope(names[i])).collect();
+    match (others.len(), order) {
+        (0, _) => current,
+        (_, CycleOrder::InOrder) => others[0],
+        (k, CycleOrder::Shuffle) => others[(pick % k as u64) as usize],
+    }
+}
+
+/// The variant the Variants cycle moves to after `current` (None is the
+/// scene's default, its first): the next, or with `Shuffle` any other.
+/// None when the scene has fewer than two.
+pub fn cycle_variant(variants: &[&'static str], current: Option<&str>, order: CycleOrder, pick: u64) -> Option<&'static str> {
+    let n = variants.len();
+    if n < 2 {
+        return None;
+    }
+    let at = current.and_then(|c| variants.iter().position(|v| *v == c)).unwrap_or(0);
+    let step = match order {
+        CycleOrder::InOrder => 1,
+        CycleOrder::Shuffle => 1 + (pick % (n as u64 - 1)) as usize,
+    };
+    Some(variants[(at + step) % n])
 }

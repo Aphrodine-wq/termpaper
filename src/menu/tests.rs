@@ -1,6 +1,7 @@
 use super::browser::{self, Column, Shelf};
 use super::settings::{self, Kind, SettingId};
 use super::*;
+use crate::prefs::CycleOrder;
 use crate::scene::{self, Category};
 use ratatui::{backend::TestBackend, Terminal};
 
@@ -649,6 +650,10 @@ fn mid() -> MenuCtx {
         renderer: Renderer::Gpu,
         link_group: "wallpaper".into(),
         active_theme: Some("nord".into()),
+        // the night rows only work with night dimming on
+        display: crate::prefs::DisplayPrefs { night: true, ..Default::default() },
+        hypr: true,
+        wall: crate::prefs::WallPrefs { pad: 6.0, bezel_mm: 4.0, ..Default::default() },
         // every look slider mid-range, so it can move both ways
         look: {
             let mut l = crate::look::Look::default();
@@ -686,9 +691,25 @@ fn focus(m: &mut Menu, c: &MenuCtx, id: SettingId) {
 
 #[test]
 fn every_setting_steps_both_ways() {
-    let c = mid();
+    let mid = mid();
+    // the grid rows work on a grid layout
+    let grid = MenuCtx {
+        wall: crate::prefs::WallPrefs { mode: crate::prefs::WallMode::Grid, grid: (3, 2, 2), ..mid.wall.clone() },
+        ..mid.clone()
+    };
     for page in Page::ALL {
         for s in settings::page(page) {
+            let c = if matches!(s.id, SettingId::Grid | SettingId::GridPos) { &grid } else { &mid };
+            let c = c.clone();
+            if !settings::enabled(s.id, &c) {
+                // only the GPU rows, and only in a build without the GPU
+                assert!(
+                    !cfg!(feature = "gpu") && matches!(s.id, SettingId::Gpu | SettingId::StudioBudget | SettingId::StudioFps),
+                    "{:?} is off in the mid context",
+                    s.id
+                );
+                continue;
+            }
             let back = settings::step(s.id, &c, -1);
             let fwd = settings::step(s.id, &c, 1);
             match s.kind {
@@ -698,7 +719,9 @@ fn every_setting_steps_both_ways() {
                         "{:?} must step both ways",
                         s.id
                     );
-                    assert_ne!(back, fwd, "{:?}: ← and → should differ", s.id);
+                    // a choice of two lands on the other either way
+                    let two_way = matches!(s.id, SettingId::Order | SettingId::Battery | SettingId::ClockSize | SettingId::Placement);
+                    assert!(two_way || back != fwd, "{:?}: ← and → should differ", s.id);
                 }
                 Kind::Toggle => {
                     assert!(back.is_some(), "{:?}", s.id);
@@ -730,7 +753,7 @@ fn ordered_values_clamp_and_choices_wrap() {
         fps: 240,
         speed: 4.0,
         detail: Detail::High,
-        cycle: Some(1800.0),
+        cycle: Some(3600.0),
         ..mid()
     };
     assert_eq!(step(SettingId::Dim, &top, 1), None);
@@ -756,7 +779,7 @@ fn ordered_values_clamp_and_choices_wrap() {
     assert_eq!(step(SettingId::Cycle, &bottom, -1), None);
     assert_eq!(
         step(SettingId::Cycle, &bottom, 1),
-        Some(Effect::SetCycle(Some(60.0)))
+        Some(Effect::SetCycle(Some(30.0)))
     );
     // no float drift from repeated steps
     assert_eq!(
@@ -774,7 +797,7 @@ fn ordered_values_clamp_and_choices_wrap() {
     );
     assert_eq!(
         step(SettingId::Cycle, &custom, -1),
-        Some(Effect::SetCycle(None))
+        Some(Effect::SetCycle(Some(30.0)))
     );
 
     // unordered choices wrap both ways
@@ -789,7 +812,7 @@ fn ordered_values_clamp_and_choices_wrap() {
     };
     assert_eq!(
         step(SettingId::Pixels, &first, -1),
-        Some(Effect::SetPixels(Pixels::Braille))
+        Some(Effect::SetPixels(Pixels::Blocks))
     );
     assert_eq!(
         step(SettingId::Variant, &first, -1),
@@ -809,7 +832,7 @@ fn ordered_values_clamp_and_choices_wrap() {
     );
     assert_eq!(
         step(SettingId::CycleScope, &first, -1),
-        Some(Effect::SetCycleScope(CycleScope::Favorites))
+        Some(Effect::SetCycleScope(CycleScope::Variants))
     );
     // Group does nothing while Link is off
     let solo = MenuCtx {
@@ -877,12 +900,7 @@ fn settings_navigation_and_actions() {
     // Shift-Tab wraps round to the last page; Wall's Align emits its placeholder
     keys(&mut m, &c, &[Input::BackTab, Input::BackTab, Input::BackTab]);
     assert_eq!(m.page, Page::Wall);
-    keys(
-        &mut m,
-        &c,
-        &[Input::Home, Input::Down, Input::Down, Input::Down],
-    );
-    assert_eq!(settings::WALL[m.row()].id, SettingId::Align);
+    focus(&mut m, &c, SettingId::Align);
     assert_eq!(
         keys(&mut m, &c, &[Input::Enter]),
         vec![Effect::OpenCalibration]
@@ -890,6 +908,42 @@ fn settings_navigation_and_actions() {
     // the page's focused row is remembered across tab switches
     keys(&mut m, &c, &[Input::Tab, Input::BackTab]);
     assert_eq!(settings::WALL[m.row()].id, SettingId::Align);
+}
+
+#[test]
+fn wall_page_groups_grids_and_actions() {
+    let c = mid();
+    let mut m = opened(&c);
+    m.goto(Page::Wall);
+    // a new group by name
+    focus(&mut m, &c, SettingId::NewGroup);
+    assert!(keys(&mut m, &c, &[Input::Enter]).is_empty());
+    assert!(m.typing());
+    type_text(&mut m, &c, "Living Room");
+    assert_eq!(
+        keys(&mut m, &c, &[Input::Enter]),
+        vec![Effect::SetLinkGroup(crate::link::sanitize_group("Living Room"))]
+    );
+    // the grid rows wait for the grid layout
+    assert!(!settings::enabled(SettingId::Grid, &c));
+    focus(&mut m, &c, SettingId::Layout);
+    let Some(Effect::SetWallPrefs(w)) = keys(&mut m, &c, &[Input::Right]).pop() else {
+        panic!("layout steps")
+    };
+    assert_eq!(w.mode, crate::prefs::WallMode::Grid);
+    let g = MenuCtx { wall: w, ..c.clone() };
+    assert!(settings::enabled(SettingId::Grid, &g));
+    // a smaller grid pulls this pane's cell inside it
+    let big = MenuCtx { wall: crate::prefs::WallPrefs { grid: (3, 3, 8), ..g.wall.clone() }, ..g.clone() };
+    let Some(Effect::SetWallPrefs(w)) = settings::step(SettingId::Grid, &big, 1) else { panic!() };
+    assert_eq!(w.grid, (2, 1, 1));
+    assert_eq!(settings::value(SettingId::GridPos, &big), "column 3, row 3");
+    // actions answer Enter
+    focus(&mut m, &c, SettingId::PauseWall);
+    assert_eq!(keys(&mut m, &c, &[Input::Enter]), vec![Effect::PauseWall]);
+    let solo = MenuCtx { hypr: false, ..c.clone() };
+    assert_eq!(settings::value(SettingId::WallUp, &solo), "needs Hyprland");
+    assert_eq!(settings::step(SettingId::WallUp, &solo, 1), None);
 }
 
 #[test]
@@ -1044,23 +1098,44 @@ fn cycle_next_respects_scope() {
     let names = scene::all_names();
     let at = |n: &str| names.iter().position(|x| *x == n).unwrap();
     let favs = vec!["koi".to_string(), "fire".to_string()];
-    let i = browser::cycle_next(&names, at("rain"), CycleScope::All, &favs);
+    let i = browser::cycle_next(&names, at("rain"), CycleScope::All, &favs, CycleOrder::InOrder, 0);
     assert_eq!(i, (at("rain") + 1) % names.len());
     // favourites: only starred scenes, wrapping round
-    let a = browser::cycle_next(&names, at("rain"), CycleScope::Favorites, &favs);
-    let b = browser::cycle_next(&names, a, CycleScope::Favorites, &favs);
+    let a = browser::cycle_next(&names, at("rain"), CycleScope::Favorites, &favs, CycleOrder::InOrder, 0);
+    let b = browser::cycle_next(&names, a, CycleScope::Favorites, &favs, CycleOrder::InOrder, 0);
     let mut got = vec![names[a], names[b]];
     got.sort_unstable();
     assert_eq!(got, vec!["fire", "koi"]);
     // no favourites yet: every scene
-    let i = browser::cycle_next(&names, at("rain"), CycleScope::Favorites, &[]);
+    let i = browser::cycle_next(&names, at("rain"), CycleScope::Favorites, &[], CycleOrder::InOrder, 0);
     assert_eq!(i, (at("rain") + 1) % names.len());
     // category: stays inside the current scene's category
-    let i = browser::cycle_next(&names, at("rain"), CycleScope::Category, &[]);
+    let i = browser::cycle_next(&names, at("rain"), CycleScope::Category, &[], CycleOrder::InOrder, 0);
     assert_eq!(
         scene::lookup(names[i]).unwrap().category(),
         Category::Classic
     );
+    // Studio and Classic scenes only, however it shuffles
+    for pick in 0..40 {
+        let i = browser::cycle_next(&names, at("rain"), CycleScope::Studio, &[], CycleOrder::Shuffle, pick);
+        assert!(scene::lookup(names[i]).unwrap().needs_gpu(), "{}", names[i]);
+        let j = browser::cycle_next(&names, at("hongkong"), CycleScope::Classic, &[], CycleOrder::Shuffle, pick);
+        assert!(!scene::lookup(names[j]).unwrap().needs_gpu(), "{}", names[j]);
+        assert_ne!(browser::cycle_next(&names, at("rain"), CycleScope::All, &[], CycleOrder::Shuffle, pick), at("rain"));
+    }
+    // shuffle reaches everything in scope
+    let seen: std::collections::HashSet<usize> =
+        (0..200).map(|p| browser::cycle_next(&names, at("rain"), CycleScope::Favorites, &favs, CycleOrder::Shuffle, p)).collect();
+    assert_eq!(seen.len(), 2);
+    // variants: the scene stays, its variants take turns
+    assert_eq!(browser::cycle_next(&names, at("rain"), CycleScope::Variants, &[], CycleOrder::Shuffle, 7), at("rain"));
+    let v = scene::themes("rain");
+    assert_eq!(browser::cycle_variant(v, None, CycleOrder::InOrder, 0), Some(v[1]));
+    assert_eq!(browser::cycle_variant(v, Some(v[v.len() - 1]), CycleOrder::InOrder, 0), Some(v[0]));
+    for pick in 0..20 {
+        assert_ne!(browser::cycle_variant(v, Some(v[1]), CycleOrder::Shuffle, pick), Some(v[1]));
+    }
+    assert_eq!(browser::cycle_variant(&["only"], None, CycleOrder::InOrder, 0), None);
 }
 
 #[test]

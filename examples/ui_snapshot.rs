@@ -309,6 +309,33 @@ fn frame(name: &str, cols: u16, rows: u16) -> Canvas {
     canvas
 }
 
+/// Each transition style leaving (level 0.75, 0.5, 0.25) and arriving
+/// (0.25, 0.5, 0.75), a row per style.
+fn transition_sheet(scene: &str) -> Buffer {
+    use ratatui::layout::Rect;
+    use termpaper::prefs::TransitionStyle;
+    const TW: u16 = 40;
+    const TH: u16 = 11;
+    let base = frame(scene, TW, TH - 1);
+    let steps: [(f32, bool); 6] = [(0.75, false), (0.5, false), (0.25, false), (0.25, true), (0.5, true), (0.75, true)];
+    let styles = TransitionStyle::ALL;
+    let mut buf = Buffer::empty(Rect::new(0, 0, TW * steps.len() as u16, TH * styles.len() as u16));
+    for (row, style) in styles.iter().enumerate() {
+        for (col, (level, arriving)) in steps.iter().enumerate() {
+            let (x, y) = (col as u16 * TW, row as u16 * TH);
+            let mut cv = base.clone();
+            let (w, h) = (cv.width() as u32, cv.height() as u32);
+            let mask = termpaper::transition::Mask::new(*style, *level, *arriving, w, h);
+            let dim = if mask.is_some() { 1.0 } else { *level };
+            termpaper::canvas::dim_masked(&mut cv, dim, mask.as_ref());
+            render::draw(&cv, Rect::new(x, y, TW, TH - 1), &mut buf, true, Pixels::Half);
+            let label = format!(" {} {} {:.0}%", style.label(), if *arriving { "in" } else { "out" }, level * 100.0);
+            buf.set_string(x, y + TH - 1, label, ratatui::style::Style::new().fg(Color::Rgb(220, 220, 220)));
+        }
+    }
+    buf
+}
+
 /// Every built-in theme over one frame of `scene`, six to a row, named.
 fn theme_sheet(scene: &str) -> Buffer {
     use ratatui::layout::Rect;
@@ -372,6 +399,12 @@ fn main() {
         if page == Page::Look {
             // focus a slider so its bar shows as active
             for _ in 0..3 {
+                m.handle(Input::Down, &c);
+            }
+        }
+        if page == Page::Display {
+            // down among the overlays, so the page has scrolled
+            for _ in 0..16 {
                 m.handle(Input::Down, &c);
             }
         }
@@ -494,8 +527,8 @@ fn main() {
         println!("{}", path.display());
     }
 
-    for scene in ["koi", "city", "clouds"] {
-        let buf = theme_sheet(scene);
+    let sheets = [("koi", theme_sheet("koi")), ("city", theme_sheet("city")), ("clouds", theme_sheet("clouds")), ("transitions", transition_sheet("clouds"))];
+    for (scene, buf) in sheets {
         let (w, h) = (buf.area.width as usize, buf.area.height as usize);
         let mut p = Painter {
             w: w * CW,
@@ -507,7 +540,7 @@ fn main() {
             cache: HashMap::new(),
         };
         p.paint(&buf);
-        let path = out.join(format!("themes_{scene}.png"));
+        let path = out.join(if scene == "transitions" { "transitions.png".to_string() } else { format!("themes_{scene}.png") });
         p.save(&path);
         println!("{}", path.display());
     }

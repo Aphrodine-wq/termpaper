@@ -44,18 +44,52 @@ pub enum SettingId {
     Speed,
     Cycle,
     CycleScope,
+    Order,
+    TimeOfDay,
+    OnLaunch,
+    Transition,
     Fade,
     // Display
-    Quality,
+    Colors,
     Pixels,
-    Fps,
+    Quality,
     Smooth,
-    Clock,
+    CellShape,
+    Fps,
+    AdaptFps,
+    Unfocused,
+    Battery,
+    Bandwidth,
     Renderer,
+    Gpu,
+    StudioBudget,
+    StudioFps,
+    Clock,
+    ClockSize,
+    ClockFormat,
+    ClockCorner,
+    Caption,
+    Hud,
+    Mouse,
+    Night,
+    NightFrom,
+    NightTo,
+    NightLevel,
+    TerminalCheck,
     // Wall
     Link,
     Group,
-    Wall,
+    NewGroup,
+    SyncLook,
+    Layout,
+    Grid,
+    GridPos,
+    Padding,
+    Placement,
+    Bezel,
+    PauseWall,
+    WallUp,
+    WallDown,
     Align,
     Instances,
 }
@@ -125,28 +159,62 @@ pub const LOOK: &[Setting] = &[
 #[rustfmt::skip]
 pub const PLAYBACK: &[Setting] = &[
     row(S::Speed, "Speed", Choice, "Animation speed. Also , and . outside the menu."),
-    row(S::Cycle, "Cycle", Choice, "Move on to another scene every few minutes; off stays put."),
-    row(S::CycleScope, "Cycle through", Choice, "Where Cycle picks from: every scene, this category, or favourites."),
-    row(S::Fade, "Transition", Slider, "How long a scene change takes to fade across."),
+    row(S::Cycle, "Cycle", Choice, "Move on to another scene every so often; off stays put."),
+    row(S::CycleScope, "Cycle through", Choice, "Where Cycle picks from: every scene, this category, favourites, Studio or Classic scenes, or this scene's variants."),
+    row(S::Order, "Order", Choice, "Take them in list order, or shuffled."),
+    row(S::TimeOfDay, "Follow the clock", Toggle, "Switch to the scene's dawn, day, dusk or night variant as the day goes on, where it has them."),
+    row(S::OnLaunch, "On launch", Choice, "What termpaper opens on: the scene you left, a random favourite, or any scene."),
+    row(S::Transition, "Transition", Choice, "How one scene gives way to the next."),
+    row(S::Fade, "Length", Slider, "How long a scene change takes."),
 ];
 
 #[rustfmt::skip]
 pub const DISPLAY: &[Setting] = &[
+    row(S::Colors, "Colours", Choice, "24-bit colour, or 256 colours for terminals that cannot show more. Auto asks the terminal."),
+    row(S::Pixels, "Pixels", Choice, "How each cell splits into pixels: half blocks, quadrants, braille, sextants, text shading, or solid blocks."),
     row(S::Quality, "Quality", Choice, "Particle and layer density; lower it on laptops. Also d."),
-    row(S::Pixels, "Pixels", Choice, "Cell packing: half blocks, quadrants (sharper) or braille (finest)."),
+    row(S::Smooth, "Smooth", Slider, "Blends each frame into the last to soften flicker."),
+    row(S::CellShape, "Cell shape", Choice, "A character cell's height over its width, for round circles and seamless walls. Auto asks the terminal."),
     row(S::Fps, "FPS", Choice, "Frame-rate cap. Also [ and ] outside the menu."),
-    row(S::Smooth, "Smooth", Slider, "Temporal smoothing: blends frames to soften flicker."),
-    row(S::Clock, "Clock", Toggle, "A small HH:MM in the top-right corner."),
+    row(S::AdaptFps, "Adapt FPS", Toggle, "Lower the frame rate while the terminal cannot keep up, and raise it again when it can."),
+    row(S::Unfocused, "When unfocused", Choice, "What to do while another window has the focus."),
+    row(S::Battery, "On battery", Choice, "Save power on battery: at most 30 fps, and the integrated GPU when GPU is auto."),
+    row(S::Bandwidth, "Output", Choice, "Balanced skips colour changes too small to see in Studio scenes; light skips more everywhere; full sends everything."),
     row(S::Renderer, "Renderer", Choice, "auto uses the GPU when present; cpu never does. Applies now."),
+    row(S::Gpu, "GPU", Choice, "Which graphics chip draws Studio scenes. Auto takes the fast one, or the integrated one on battery."),
+    row(S::StudioBudget, "Studio budget", Slider, "GPU time a Studio scene may take per frame before its detail steps down."),
+    row(S::StudioFps, "Studio FPS", Choice, "Frame-rate cap while a Studio scene shows."),
+    row(S::Clock, "Clock", Toggle, "A clock over the scene."),
+    row(S::ClockSize, "Clock size", Choice, "Small text, or large digits that lighten the picture under them."),
+    row(S::ClockFormat, "Clock shows", Choice, "24-hour, 12-hour, with seconds, or with the date."),
+    row(S::ClockCorner, "Clock position", Choice, "Which corner the clock sits in, or the centre."),
+    row(S::Caption, "Scene name", Toggle, "Show the scene's name for a few seconds when it changes."),
+    row(S::Hud, "Performance", Toggle, "Frame rate, frame time and output size in the top-left corner."),
+    row(S::Mouse, "Mouse", Toggle, "Click, drag and scroll in the menu. Off leaves the mouse to the terminal (text selection)."),
+    row(S::Night, "Night dimming", Toggle, "Dim the picture at night, on a schedule."),
+    row(S::NightFrom, "From", Choice, "When night dimming starts."),
+    row(S::NightTo, "Until", Choice, "When night dimming ends."),
+    row(S::NightLevel, "Night brightness", Slider, "How bright the picture is at night."),
+    row(S::TerminalCheck, "Terminal check…", Open, "See what this terminal can show, and set Colours and Pixels to match."),
 ];
 
 #[rustfmt::skip]
 pub const WALL: &[Setting] = &[
     row(S::Link, "Link", Toggle, "Sync scene and settings with the other termpaper panes in your group."),
     row(S::Group, "Group", Choice, "Panes only sync within a group. Needs Link on."),
-    row(S::Wall, "Wall mode", Toggle, "auto spans linked panes into one picture; off keeps this pane whole."),
+    row(S::NewGroup, "New group…", Open, "Name a group of your own; panes you start with --group NAME join it."),
+    row(S::SyncLook, "Sync look", Toggle, "Take the group's theme, grade and effects. Off keeps this pane's own look."),
+    row(S::Layout, "Layout", Choice, "auto spans linked panes into one picture from where their windows are (Hyprland); grid is one you set; off keeps this pane whole."),
+    row(S::Grid, "Grid", Choice, "Columns × rows of the grid layout: set the same on every pane."),
+    row(S::GridPos, "This pane", Choice, "Which cell of the grid this pane shows."),
+    row(S::Padding, "Padding", Slider, "The terminal's inner padding, so the picture lines up across window borders."),
+    row(S::Placement, "Placement", Choice, "Where the terminal leaves its spare pixels when the window is not a whole number of cells."),
+    row(S::Bezel, "Bezels", Slider, "Monitor frame width: the picture carries on behind the bezels (Hyprland)."),
+    row(S::PauseWall, "Pause the wall", Action, "Freeze every pane in the group, or carry on. Also space."),
+    row(S::WallUp, "Start wall", Action, "Open a termpaper on every monitor, in this group (Hyprland)."),
+    row(S::WallDown, "Stop wall", Action, "Close the terminals Start wall opened."),
     row(S::Align, "Align monitors…", Open, "Line the picture up across monitors with gaps or bezels."),
-    row(S::Instances, "Instances", Info, "Live termpaper panes in your group, listed below."),
+    row(S::Instances, "Instances", Info, "Live termpaper panes in your group, listed below (★ leads)."),
 ];
 
 /// The rows of a settings page (Scenes has none: it is the browser).
@@ -164,12 +232,21 @@ pub fn page(p: Page) -> &'static [Setting] {
 pub fn sections(p: Page) -> &'static [(usize, &'static str)] {
     match p {
         Page::Look => &[(0, "Presets"), (2, "Colour"), (11, "Palette"), (14, "Effects"), (19, "Light & text")],
+        Page::Playback => &[(0, "Scenes"), (6, "Transitions")],
+        Page::Display => &[(0, "Picture"), (5, "Speed & power"), (14, "On screen"), (21, "Night"), (25, "Terminal")],
+        Page::Wall => &[(0, "Linking"), (4, "Layout"), (10, "The wall")],
         _ => &[],
     }
 }
 
 /// Auto-cycle intervals (seconds) the Cycle row steps through, after off.
-pub const CYCLE_STEPS: &[f64] = &[60.0, 300.0, 900.0, 1800.0];
+pub const CYCLE_STEPS: &[f64] = &[30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0];
+
+/// Studio frame-rate caps the Studio FPS row steps through.
+pub const STUDIO_FPS_STEPS: &[u32] = &[30, 45, 60, 90, 120];
+
+/// Cell shapes (height over width) after auto.
+pub const CELL_SHAPES: &[f32] = &[1.6, 1.8, 2.0, 2.2, 2.4];
 
 const TEXT_SCALES: [Option<u32>; 4] = [None, Some(1), Some(2), Some(3)];
 const QUALITIES: [Detail; 3] = [Detail::Low, Detail::Medium, Detail::High];
@@ -202,9 +279,41 @@ pub fn renderer_name(r: Renderer) -> &'static str {
 fn cycle_label(c: Option<f64>) -> String {
     match c {
         None => "off".into(),
+        Some(s) if s >= 3600.0 && (s % 3600.0).abs() < 1e-6 => format!("{:.0} h", s / 3600.0),
         Some(s) if s >= 60.0 && (s % 60.0).abs() < 1e-6 => format!("{:.0} min", s / 60.0),
         Some(s) => format!("{s:.0} s"),
     }
+}
+
+/// The next of `all` from `cur`, wrapping.
+fn step_in<T: Copy + PartialEq>(all: &[T], cur: T, dir: i32) -> T {
+    let i = all.iter().position(|v| *v == cur).unwrap_or(0);
+    all[wrap(i, all.len(), dir)]
+}
+
+/// The Display prefs with one change.
+fn with_display(ctx: &MenuCtx, f: impl FnOnce(&mut crate::prefs::DisplayPrefs)) -> Option<Effect> {
+    let mut d = ctx.display.clone();
+    f(&mut d);
+    (d != ctx.display).then_some(Effect::SetDisplay(d))
+}
+
+/// The Wall prefs with one change.
+fn with_wall(ctx: &MenuCtx, f: impl FnOnce(&mut crate::prefs::WallPrefs)) -> Option<Effect> {
+    let mut w = ctx.wall.clone();
+    f(&mut w);
+    (w != ctx.wall).then_some(Effect::SetWallPrefs(w))
+}
+
+/// The Playback prefs with one change.
+fn with_playback(ctx: &MenuCtx, f: impl FnOnce(&mut crate::prefs::PlaybackPrefs)) -> Option<Effect> {
+    let mut p = ctx.playback.clone();
+    f(&mut p);
+    (p != ctx.playback).then_some(Effect::SetPlayback(p))
+}
+
+fn hour_label(h: u8) -> String {
+    format!("{h:02}:00")
 }
 
 /// Speeds and scales without trailing zeros: 1×, 0.25×, 1.5×.
@@ -306,6 +415,10 @@ pub fn num(id: SettingId) -> Option<Num> {
         S::Dim => n(0.2, 1.0, 0.1, 1.0, 1),
         S::Smooth => n(0.0, 0.9, 0.1, 0.0, 1),
         S::Fade => n(0.1, 1.0, 0.05, 0.1, 2),
+        S::StudioBudget => n(1.0, 12.0, 0.5, crate::prefs::STUDIO_BUDGET_MS, 1),
+        S::NightLevel => n(0.1, 1.0, 0.05, 1.0, 2),
+        S::Padding => n(0.0, 24.0, 1.0, 0.0, 0),
+        S::Bezel => n(0.0, 30.0, 0.5, 0.0, 1),
         _ => return None,
     })
 }
@@ -337,6 +450,10 @@ pub fn num_value(id: SettingId, ctx: &MenuCtx) -> Option<f32> {
         S::Dim => ctx.dim,
         S::Smooth => ctx.smooth,
         S::Fade => ctx.fade,
+        S::StudioBudget => ctx.display.studio_budget_ms,
+        S::NightLevel => ctx.display.night_level,
+        S::Padding => ctx.wall.pad,
+        S::Bezel => ctx.wall.bezel_mm,
         _ => {
             let fx = quick_effect(id)?;
             let e = &ctx.look.effects;
@@ -384,6 +501,10 @@ fn set_num(id: SettingId, ctx: &MenuCtx, v: f32) -> Option<Effect> {
         S::Dim => return Some(Effect::SetDim(v)),
         S::Smooth => return Some(Effect::SetSmooth(v)),
         S::Fade => return Some(Effect::SetFade(v)),
+        S::StudioBudget => return with_display(ctx, |d| d.studio_budget_ms = v),
+        S::NightLevel => return with_display(ctx, |d| d.night_level = v),
+        S::Padding => return with_wall(ctx, |w| w.pad = v),
+        S::Bezel => return with_wall(ctx, |w| w.bezel_mm = v),
         _ => return quick_effect(id).map(|fx| Effect::SetLook(with_effect(&ctx.look, fx, v))),
     }
     Some(Effect::SetLook(look))
@@ -447,8 +568,15 @@ fn strength(v: f32) -> String {
 /// palette strength a palette to be strong in).
 pub fn enabled(id: SettingId, ctx: &MenuCtx) -> bool {
     match id {
-        S::Group => ctx.link_enabled,
+        S::Group | S::NewGroup | S::SyncLook | S::PauseWall => ctx.link_enabled,
+        S::Grid | S::GridPos => ctx.wall.mode == crate::prefs::WallMode::Grid,
+        S::Bezel => ctx.hypr && ctx.wall.mode == crate::prefs::WallMode::Auto,
+        S::WallUp | S::WallDown => ctx.hypr,
         S::PaletteStrength => matches!(ctx.look.palette.mode, PaletteMode::Map | PaletteMode::Tint),
+        S::ClockSize | S::ClockFormat | S::ClockCorner => ctx.clock,
+        S::NightFrom | S::NightTo | S::NightLevel => ctx.display.night,
+        S::Order => ctx.cycle.is_some(),
+        S::Gpu | S::StudioBudget | S::StudioFps => cfg!(feature = "gpu"),
         _ => true,
     }
 }
@@ -512,20 +640,66 @@ pub fn value(id: SettingId, ctx: &MenuCtx) -> String {
             CycleScope::All => "all scenes".into(),
             CycleScope::Category => "this category".into(),
             CycleScope::Favorites => "favourites".into(),
+            CycleScope::Studio => "Studio scenes".into(),
+            CycleScope::Classic => "Classic scenes".into(),
+            CycleScope::Variants => "this scene's variants".into(),
         },
+        S::Order => ctx.playback.order.label().into(),
+        S::TimeOfDay => on_off(ctx.playback.time_of_day),
+        S::OnLaunch => ctx.playback.on_launch.label().into(),
+        S::Transition => ctx.playback.transition.label().into(),
         S::Fade => format!("{} s", short(ctx.fade)),
+        S::Colors if ctx.display.colors == crate::prefs::Colors::Auto => {
+            format!("auto ({})", if ctx.term_truecolor { "24-bit" } else { "256" })
+        }
+        S::Colors => ctx.display.colors.label().into(),
         S::Quality => ctx.detail.name().into(),
         S::Pixels => ctx.pixels.name().into(),
+        S::CellShape => ctx.display.cell_aspect.map_or("auto".into(), |a| format!("{a:.1} : 1")),
         S::Fps => ctx.fps.to_string(),
+        S::AdaptFps => on_off(ctx.display.adapt_fps),
+        S::Unfocused => ctx.display.unfocused.label().into(),
+        S::Battery => ctx.display.battery.label().into(),
+        S::Bandwidth => ctx.display.bandwidth.label().into(),
         S::Smooth if ctx.smooth < 0.05 => "off".into(),
         S::Smooth => format!("{:.1}", ctx.smooth),
         S::Clock => on_off(ctx.clock),
+        S::ClockSize => ctx.display.clock_style.label().into(),
+        S::ClockFormat => ctx.display.clock_format.label().into(),
+        S::ClockCorner => ctx.display.clock_corner.label().into(),
+        S::Caption => on_off(ctx.display.caption),
+        S::Hud => on_off(ctx.display.hud),
+        S::Mouse => on_off(ctx.display.mouse),
+        S::Night => on_off(ctx.display.night),
+        S::NightFrom => hour_label(ctx.display.night_from),
+        S::NightTo => hour_label(ctx.display.night_to),
+        S::NightLevel => format!("{:.0}%", ctx.display.night_level * 100.0),
+        S::TerminalCheck => String::new(),
         S::Renderer => renderer_name(ctx.renderer).into(),
+        S::Gpu => ctx.display.gpu.label().into(),
+        S::StudioBudget => format!("{} ms", short(ctx.display.studio_budget_ms)),
+        S::StudioFps => ctx.display.studio_fps.to_string(),
         S::Link if ctx.link_enabled => "on".into(),
         S::Link => "off (solo)".into(),
         S::Group if ctx.link_enabled => ctx.link_group.clone(),
         S::Group => "—".into(),
-        S::Wall => if ctx.wall_enabled { "auto" } else { "off" }.into(),
+        S::NewGroup => String::new(),
+        S::SyncLook => on_off(ctx.wall.sync_look),
+        S::Layout => ctx.wall.mode.label().into(),
+        S::Grid => format!("{} × {}", ctx.wall.grid.0, ctx.wall.grid.1),
+        S::GridPos => {
+            let (c, _, i) = ctx.wall.grid;
+            format!("column {}, row {}", i % c.max(1) + 1, i / c.max(1) + 1)
+        }
+        S::Padding => format!("{} px", short(ctx.wall.pad)),
+        S::Placement => match ctx.wall.placement {
+            crate::wall::Placement::TopLeft => "top-left".into(),
+            crate::wall::Placement::Center => "centre".into(),
+        },
+        S::Bezel => format!("{} mm", short(ctx.wall.bezel_mm)),
+        S::PauseWall => if ctx.paused { "paused" } else { "playing" }.into(),
+        S::WallUp | S::WallDown if !ctx.hypr => "needs Hyprland".into(),
+        S::WallUp | S::WallDown => String::new(),
         S::Align => String::new(),
         S::Instances if !ctx.link_enabled => "solo".into(),
         S::Instances => format!("{} live", ctx.instances.len()),
@@ -600,16 +774,41 @@ pub fn step(id: SettingId, ctx: &MenuCtx, dir: i32) -> Option<Effect> {
             let i = all.iter().position(|s| *s == ctx.cycle_scope).unwrap_or(0);
             Some(Effect::SetCycleScope(all[wrap(i, all.len(), dir)]))
         }
+        S::Order => with_playback(ctx, |p| p.order = step_in(crate::prefs::CycleOrder::ALL, p.order, dir)),
+        S::TimeOfDay => with_playback(ctx, |p| p.time_of_day = !p.time_of_day),
+        S::OnLaunch => with_playback(ctx, |p| p.on_launch = step_in(crate::prefs::OnLaunch::ALL, p.on_launch, dir)),
+        S::Transition => with_playback(ctx, |p| p.transition = step_in(crate::prefs::TransitionStyle::ALL, p.transition, dir)),
+        S::Colors => with_display(ctx, |d| d.colors = step_in(crate::prefs::Colors::ALL, d.colors, dir)),
+        S::CellShape => with_display(ctx, |d| {
+            // auto, then the shapes
+            let all: Vec<Option<f32>> = std::iter::once(None).chain(CELL_SHAPES.iter().map(|a| Some(*a))).collect();
+            let i = all.iter().position(|a| a.map(|v| (v * 10.0).round()) == d.cell_aspect.map(|v| (v * 10.0).round())).unwrap_or(0);
+            d.cell_aspect = all[wrap(i, all.len(), dir)];
+        }),
+        S::AdaptFps => with_display(ctx, |d| d.adapt_fps = !d.adapt_fps),
+        S::Unfocused => with_display(ctx, |d| d.unfocused = step_in(crate::prefs::Unfocused::ALL, d.unfocused, dir)),
+        S::Battery => with_display(ctx, |d| d.battery = step_in(crate::prefs::Battery::ALL, d.battery, dir)),
+        S::Bandwidth => with_display(ctx, |d| d.bandwidth = step_in(crate::prefs::Bandwidth::ALL, d.bandwidth, dir)),
+        S::Gpu => with_display(ctx, |d| d.gpu = step_in(crate::prefs::GpuChoice::ALL, d.gpu, dir)),
+        S::StudioFps => with_display(ctx, |d| {
+            let i = STUDIO_FPS_STEPS.iter().position(|f| *f >= d.studio_fps).unwrap_or(STUDIO_FPS_STEPS.len() - 1);
+            d.studio_fps = STUDIO_FPS_STEPS[clamp_step(i, STUDIO_FPS_STEPS.len(), dir)];
+        }),
+        S::ClockSize => with_display(ctx, |d| d.clock_style = step_in(crate::prefs::ClockStyle::ALL, d.clock_style, dir)),
+        S::ClockFormat => with_display(ctx, |d| d.clock_format = step_in(crate::prefs::ClockFormat::ALL, d.clock_format, dir)),
+        S::ClockCorner => with_display(ctx, |d| d.clock_corner = step_in(crate::prefs::Corner::ALL, d.clock_corner, dir)),
+        S::Caption => with_display(ctx, |d| d.caption = !d.caption),
+        S::Hud => with_display(ctx, |d| d.hud = !d.hud),
+        S::Mouse => with_display(ctx, |d| d.mouse = !d.mouse),
+        S::Night => with_display(ctx, |d| d.night = !d.night),
+        S::NightFrom => with_display(ctx, |d| d.night_from = (d.night_from as i32 + dir.signum()).rem_euclid(24) as u8),
+        S::NightTo => with_display(ctx, |d| d.night_to = (d.night_to as i32 + dir.signum()).rem_euclid(24) as u8),
         S::Quality => {
             let i = QUALITIES.iter().position(|q| *q == ctx.detail).unwrap_or(1);
             let next = QUALITIES[clamp_step(i, QUALITIES.len(), dir)];
             (next != ctx.detail).then_some(Effect::SetDetail(next))
         }
-        S::Pixels => Some(Effect::SetPixels(if up {
-            ctx.pixels.next()
-        } else {
-            ctx.pixels.next().next()
-        })),
+        S::Pixels => Some(Effect::SetPixels(if up { ctx.pixels.next() } else { ctx.pixels.prev() })),
         S::Fps => {
             let next = fps_step(ctx.fps, up);
             (next != ctx.fps).then_some(Effect::SetFps(next))
@@ -626,7 +825,23 @@ pub fn step(id: SettingId, ctx: &MenuCtx, dir: i32) -> Option<Effect> {
         }
         S::Link => Some(Effect::SetLink(!ctx.link_enabled)),
         S::Group => Some(Effect::SetLinkGroup(next_group(&ctx.link_group, dir))),
-        S::Wall => Some(Effect::SetWall(!ctx.wall_enabled)),
+        S::SyncLook => with_wall(ctx, |w| w.sync_look = !w.sync_look),
+        S::Layout => with_wall(ctx, |w| w.mode = step_in(crate::prefs::WallMode::ALL, w.mode, dir)),
+        S::Grid => with_wall(ctx, |w| {
+            let (c, r, _) = w.grid;
+            let (nc, nr) = step_in(crate::prefs::GRIDS, (c, r), dir);
+            w.grid = (nc, nr, w.grid.2.min(nc * nr - 1));
+        }),
+        S::GridPos => with_wall(ctx, |w| {
+            let (c, r, i) = w.grid;
+            w.grid.2 = (i as i32 + dir.signum()).rem_euclid(c as i32 * r as i32) as u8;
+        }),
+        S::Placement => with_wall(ctx, |w| {
+            w.placement = match w.placement {
+                crate::wall::Placement::TopLeft => crate::wall::Placement::Center,
+                crate::wall::Placement::Center => crate::wall::Placement::TopLeft,
+            }
+        }),
         _ => None,
     }
 }
@@ -635,6 +850,9 @@ pub fn step(id: SettingId, ctx: &MenuCtx, dir: i32) -> Option<Effect> {
 pub fn action(id: SettingId, ctx: &MenuCtx) -> Option<Effect> {
     match id {
         S::ResetLook => (!ctx.look.is_neutral()).then(|| Effect::SetLook(Look::default())),
+        S::PauseWall => Some(Effect::PauseWall),
+        S::WallUp => Some(Effect::WallUp),
+        S::WallDown => Some(Effect::WallDown),
         _ => None,
     }
 }

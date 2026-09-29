@@ -559,6 +559,21 @@ pub fn dim(canvas: &mut Canvas, f: f32) {
     }
 }
 
+/// [`dim`], shaped by a transition mask: each pixel is scaled by `f` times
+/// how much of it the mask shows. The canvas is the whole wall.
+pub fn dim_masked(canvas: &mut Canvas, f: f32, mask: Option<&crate::transition::Mask>) {
+    let Some(m) = mask else {
+        return dim(canvas, f);
+    };
+    let (w, h) = (canvas.width(), canvas.height());
+    for y in 0..h {
+        for x in 0..w {
+            let c = canvas.get(x as i32, y as i32).color;
+            canvas.set(x as i32, y as i32, scale(c, f * m.factor(x as i32, y as i32)));
+        }
+    }
+}
+
 /// Area-based density multiplier: 1.0 at 160x100, clamped 0.5..4.0.
 /// Stacks with the Detail multiplier so scenes fill any terminal size.
 pub fn density_for(w: usize, h: usize) -> f32 {

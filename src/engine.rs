@@ -228,6 +228,8 @@ pub struct Request {
     pub look: Baked,
     pub quick: Option<String>,
     pub dim: f32,
+    /// a styled transition's shape over the dim (None: uniform)
+    pub mask: Option<crate::transition::Mask>,
     pub smooth: f32,
     /// GPU milliseconds a Studio scene pass may take per frame.
     pub budget_ms: f32,
@@ -284,11 +286,17 @@ pub struct Worker {
 
 impl Worker {
     pub fn new(renderer: Renderer) -> Self {
+        Self::with_power(renderer, false)
+    }
+
+    /// `new`, on the integrated GPU when `low_power` (laptops on battery, or
+    /// by choice) and the fastest one otherwise.
+    pub fn with_power(renderer: Renderer, low_power: bool) -> Self {
         let shared = Arc::new((Mutex::new(Mailbox::default()), Condvar::new()));
         let thread_shared = shared.clone();
         std::thread::Builder::new()
             .name("termpaper-render".into())
-            .spawn(move || run(thread_shared, renderer))
+            .spawn(move || run(thread_shared, renderer, low_power))
             .expect("render worker");
         Self {
             shared,
@@ -370,6 +378,10 @@ fn frame_hash(u: &crate::gpu::FrameUniforms, r: &Request) -> u64 {
     for v in [r.dim, r.smooth] {
         eat(&v.to_le_bytes());
     }
+    if let Some(m) = &r.mask {
+        eat(&[m.code() as u8, m.arriving as u8]);
+        eat(&m.edge.to_le_bytes());
+    }
     let v = &r.view;
     for n in [v.grid.0, v.grid.1, v.crop.0, v.crop.1, v.canvas.0, v.canvas.1] {
         eat(&(n as u64).to_le_bytes());
@@ -378,10 +390,12 @@ fn frame_hash(u: &crate::gpu::FrameUniforms, r: &Request) -> u64 {
     h
 }
 
-fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
+#[cfg_attr(not(feature = "gpu"), allow(unused_variables))]
+fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bool) {
     #[cfg(feature = "gpu")]
     let mut gpu = if renderer != Renderer::Cpu {
-        crate::gpu::Gpu::new(1, 1, 1)
+        let pref = if low_power { crate::gpu::GpuPreference::LowPower } else { crate::gpu::GpuPreference::HighPerformance };
+        crate::gpu::Gpu::with_preference(1, 1, 1, pref)
     } else {
         None
     };
@@ -579,6 +593,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
                     quick_filter: request.quick.as_deref(),
                     t: request.elapsed_ms as f32 / 1000.0,
                     dim: request.dim,
+                    mask: request.mask,
                     smooth,
                     pixels: v.pixels,
                     cols: v.grid.0,
@@ -692,6 +707,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
                 quick_filter: request.quick.as_deref(),
                 t,
                 dim: request.dim,
+                    mask: request.mask,
                 smooth,
                 pixels: v.pixels,
                 cols: v.grid.0,
@@ -721,7 +737,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
             if let Some(q) = &request.quick {
                 filter::apply(q, &mut canvas, t);
             }
-            crate::canvas::dim(&mut canvas, request.dim);
+            crate::canvas::dim_masked(&mut canvas, request.dim, request.mask.as_ref());
             if request.smooth > 0.001 {
                 canvas.smooth_blend(&previous, 1.0 - smooth);
                 canvas.snapshot_into(&mut previous);
@@ -801,6 +817,7 @@ mod tests {
             look: Baked::default(),
             quick: None,
             dim: 1.0,
+            mask: None,
             smooth: 0.0,
             budget_ms: DEFAULT_GPU_BUDGET_MS,
             prefetch: None,

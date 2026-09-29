@@ -36,6 +36,8 @@ pub enum PromptKind {
     Delete(String),
     /// a tp1: code or a file path
     Import,
+    /// a new link group's name (the Wall page)
+    NewGroup,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +58,7 @@ impl Prompt {
             PromptKind::Rename(_) => "New name".into(),
             PromptKind::Delete(_) => "Delete it? type y".into(),
             PromptKind::Import => "Paste a tp1: code or a file path".into(),
+            PromptKind::NewGroup => "Name for the group".into(),
         }
     }
 
@@ -63,6 +66,7 @@ impl Prompt {
     pub fn max_len(&self) -> usize {
         match self.kind {
             PromptKind::Import => 4096,
+            PromptKind::NewGroup => 32,
             _ => crate::theme::MAX_NAME,
         }
     }

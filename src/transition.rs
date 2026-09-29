@@ -9,8 +9,119 @@
 //! joins the curve where the others already are.
 
 use crate::canvas::ease_smooth;
+use crate::prefs::TransitionStyle;
 
 pub const FADE_SECS: f32 = 0.25;
+
+/// A styled transition's shape: which pixels have gone dark at a fade
+/// `level` (1 shows everything, 0 nothing). Each pixel of the wall gets a
+/// threshold in 0..1 (random for dissolve, left to right for wipe, centre
+/// out for iris, down each slat for blinds) and shows while the level is
+/// above it, with a soft edge. Wall coordinates, so the panes of a wall
+/// move as one picture. The GPU `dim` pass mirrors this exactly: every
+/// constant is computed here and passed down as the same f32.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mask {
+    pub style: TransitionStyle,
+    /// the new scene arriving (the wipe carries on across the swap)
+    pub arriving: bool,
+    /// level·(1 + soft): a threshold of 1 is fully shown at level 1
+    pub edge: f32,
+    pub inv_soft: f32,
+    /// wipe: 1/wall width; blinds: 1/slat height
+    pub inv_span: f32,
+    /// iris: 1/half-diagonal
+    pub inv_r: f32,
+    /// the wall's centre
+    pub half: (f32, f32),
+    /// blinds: slat height in pixels
+    pub slat: u32,
+}
+
+impl Mask {
+    /// The mask of `style` at `level` on a `vw`×`vh` wall; None when it
+    /// hides nothing (a plain fade is a uniform dim, and at level 1 every
+    /// style shows the whole picture).
+    pub fn new(style: TransitionStyle, level: f32, arriving: bool, vw: u32, vh: u32) -> Option<Mask> {
+        if level >= 1.0 {
+            return None;
+        }
+        let soft = match style {
+            TransitionStyle::Fade => return None,
+            TransitionStyle::Dissolve => 0.12,
+            TransitionStyle::Wipe => 0.06,
+            TransitionStyle::Iris => 0.05,
+            TransitionStyle::Blinds => 0.2,
+        };
+        let (vw, vh) = (vw.max(1), vh.max(1));
+        let half = (vw as f32 * 0.5, vh as f32 * 0.5);
+        let slat = (vh / 8).max(2);
+        Some(Mask {
+            style,
+            arriving,
+            edge: level.clamp(0.0, 1.0) * (1.0 + soft),
+            inv_soft: 1.0 / soft,
+            inv_span: match style {
+                TransitionStyle::Blinds => 1.0 / slat as f32,
+                _ => 1.0 / vw as f32,
+            },
+            inv_r: 1.0 / (half.0 * half.0 + half.1 * half.1).sqrt(),
+            half,
+            slat,
+        })
+    }
+
+    /// The level at which the wall pixel (x, y) goes dark, 0..=1 (pixels
+    /// past the wall's edges, a GPU apron, clamp to it).
+    pub fn threshold(&self, x: i32, y: i32) -> f32 {
+        let t = match self.style {
+            TransitionStyle::Fade => 0.0,
+            TransitionStyle::Dissolve => (hash2(x as u32, y as u32) >> 8) as f32 * (1.0 / 16_777_216.0),
+            TransitionStyle::Wipe => {
+                let u = (x as f32 + 0.5) * self.inv_span;
+                if self.arriving {
+                    u
+                } else {
+                    1.0 - u
+                }
+            }
+            TransitionStyle::Iris => {
+                let dx = x as f32 + 0.5 - self.half.0;
+                let dy = y as f32 + 0.5 - self.half.1;
+                (dx * dx + dy * dy).sqrt() * self.inv_r
+            }
+            TransitionStyle::Blinds => (y.rem_euclid(self.slat as i32) as f32 + 0.5) * self.inv_span,
+        };
+        t.clamp(0.0, 1.0)
+    }
+
+    /// How much of the wall pixel (x, y) shows, 0..=1.
+    pub fn factor(&self, x: i32, y: i32) -> f32 {
+        ((self.edge - self.threshold(x, y)) * self.inv_soft).clamp(0.0, 1.0)
+    }
+
+    /// The style's number in the GPU `dim` pass (0: no mask).
+    pub fn code(&self) -> u32 {
+        match self.style {
+            TransitionStyle::Fade => 0,
+            TransitionStyle::Dissolve => 1,
+            TransitionStyle::Wipe => 2,
+            TransitionStyle::Iris => 3,
+            TransitionStyle::Blinds => 4,
+        }
+    }
+}
+
+/// A well-mixed 32-bit hash of a pixel position (the same in `post.wgsl`).
+pub fn hash2(x: u32, y: u32) -> u32 {
+    let mut h = x.wrapping_mul(0x8da6_b343) ^ y.wrapping_mul(0xd816_3841);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2c1b_3c6d);
+    h ^= h >> 12;
+    h = h.wrapping_mul(0x297a_2d39);
+    h ^= h >> 15;
+    h
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Phase {
@@ -205,6 +316,48 @@ impl Transition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn masks_open_fully_and_close_fully() {
+        for style in [TransitionStyle::Dissolve, TransitionStyle::Wipe, TransitionStyle::Iris, TransitionStyle::Blinds] {
+            for arriving in [false, true] {
+                assert!(Mask::new(style, 1.0, arriving, 160, 90).is_none(), "nothing hidden at 1");
+                let nearly = Mask::new(style, 0.999, arriving, 160, 90).unwrap();
+                let off = Mask::new(style, 0.0, arriving, 160, 90).unwrap();
+                for (x, y) in [(0, 0), (159, 89), (80, 45), (13, 77), (-8, -8), (170, 95)] {
+                    assert!(nearly.factor(x, y) > 0.95, "{style:?} at 0.999: ({x},{y})");
+                    assert_eq!(off.factor(x, y), 0.0, "{style:?} at 0: ({x},{y})");
+                }
+            }
+        }
+        assert!(Mask::new(TransitionStyle::Fade, 0.5, false, 10, 10).is_none());
+    }
+
+    #[test]
+    fn masks_have_their_shapes() {
+        // half way through a wipe that brings the new scene in from the left
+        let m = Mask::new(TransitionStyle::Wipe, 0.5, true, 100, 10).unwrap();
+        assert_eq!(m.factor(10, 5), 1.0);
+        assert_eq!(m.factor(90, 5), 0.0);
+        // leaving, the dark comes in from the left too: the sweep carries on
+        let m = Mask::new(TransitionStyle::Wipe, 0.5, false, 100, 10).unwrap();
+        assert_eq!((m.factor(10, 5), m.factor(90, 5)), (0.0, 1.0));
+        // the iris keeps the middle longest
+        let m = Mask::new(TransitionStyle::Iris, 0.4, false, 100, 60).unwrap();
+        assert_eq!((m.factor(50, 30), m.factor(0, 0)), (1.0, 0.0));
+        // every slat closes alike
+        let m = Mask::new(TransitionStyle::Blinds, 0.5, false, 64, 64).unwrap();
+        assert_eq!(m.slat, 8);
+        for y in 0..64 {
+            assert_eq!(m.factor(3, y), m.factor(3, y % 8), "{y}");
+        }
+        // a dissolve is about half dark half way, and wall-stable
+        let m = Mask::new(TransitionStyle::Dissolve, 0.5, false, 64, 64).unwrap();
+        let lit = (0..64).flat_map(|y| (0..64).map(move |x| (x, y))).filter(|&(x, y)| m.factor(x, y) > 0.5).count();
+        assert!((1500..2600).contains(&lit), "{lit}");
+        assert_eq!(hash2(3, 4), hash2(3, 4));
+        assert_ne!(hash2(3, 4), hash2(4, 3));
+    }
 
     #[test]
     fn full_transition_cycle() {

@@ -101,12 +101,60 @@ pub struct Config {
     /// action → key remaps
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub keys: HashMap<String, String>,
+    /// the first-run welcome has been seen
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onboarded: Option<bool>,
+    /// a manual wall layout for this machine's panes, `COLSxROWS:INDEX`
+    /// (what `--wall` takes), set from the Wall page
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wall_grid: Option<String>,
+    /// take the group's look when linked (default true); false keeps this
+    /// pane's own
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_look: Option<bool>,
     /// The Look beyond what `filters`, `hue_shift`, `saturation` and
     /// `contrast` can say (effect strengths, the rest of the grade, the
     /// palette). Written in full when present; those four keys stay as
     /// mirrors so older binaries keep the basics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub look: Option<crate::look::Look>,
+    #[serde(default, skip_serializing_if = "is_default_playback")]
+    pub playback: crate::prefs::PlaybackPrefs,
+    #[serde(default, skip_serializing_if = "is_default_display")]
+    pub display: crate::prefs::DisplayPrefs,
+}
+
+fn is_default_playback(p: &crate::prefs::PlaybackPrefs) -> bool {
+    *p == crate::prefs::PlaybackPrefs::default()
+}
+
+fn is_default_display(d: &crate::prefs::DisplayPrefs) -> bool {
+    *d == crate::prefs::DisplayPrefs::default()
+}
+
+/// The display preferences a config describes, taking the older flat keys
+/// (`idle_fps`, `gpu_budget_ms`, `shader_fps`) where the `[display]` table
+/// leaves them unset.
+pub fn display_of(cfg: &Config) -> crate::prefs::DisplayPrefs {
+    use crate::prefs::{Unfocused, STUDIO_BUDGET_MS, STUDIO_FPS};
+    let mut d = cfg.display.clone();
+    if d.unfocused == Unfocused::Keep {
+        if let Some(f) = cfg.idle_fps {
+            d.unfocused = if f <= 20 { Unfocused::Fps15 } else { Unfocused::Fps30 };
+        }
+    }
+    if (d.studio_budget_ms - STUDIO_BUDGET_MS).abs() < 1e-6 {
+        if let Some(b) = cfg.gpu_budget_ms {
+            d.studio_budget_ms = b;
+        }
+    }
+    if d.studio_fps == STUDIO_FPS {
+        if let Some(f) = cfg.shader_fps {
+            d.studio_fps = f;
+        }
+    }
+    d.sanitize();
+    d
 }
 
 /// The Look a config describes: its `[look]` table when there is one, else
@@ -210,16 +258,31 @@ pub enum CycleScope {
     /// the current scene's browser category
     Category,
     Favorites,
+    /// GPU scenes only
+    Studio,
+    Classic,
+    /// the scene stays; its variants take turns
+    Variants,
 }
 
 impl CycleScope {
-    pub const ALL: [CycleScope; 3] = [CycleScope::All, CycleScope::Category, CycleScope::Favorites];
+    pub const ALL: [CycleScope; 6] = [
+        CycleScope::All,
+        CycleScope::Category,
+        CycleScope::Favorites,
+        CycleScope::Studio,
+        CycleScope::Classic,
+        CycleScope::Variants,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             CycleScope::All => "all",
             CycleScope::Category => "category",
             CycleScope::Favorites => "favorites",
+            CycleScope::Studio => "studio",
+            CycleScope::Classic => "classic",
+            CycleScope::Variants => "variants",
         }
     }
 
@@ -229,6 +292,9 @@ impl CycleScope {
         match s {
             "category" => CycleScope::Category,
             "favorites" | "favourites" => CycleScope::Favorites,
+            "studio" => CycleScope::Studio,
+            "classic" => CycleScope::Classic,
+            "variants" => CycleScope::Variants,
             _ => CycleScope::All,
         }
     }
@@ -281,6 +347,8 @@ pub struct Live<'a> {
     pub link: bool,
     pub group: &'a str,
     pub wall: bool,
+    pub playback: &'a crate::prefs::PlaybackPrefs,
+    pub display: &'a crate::prefs::DisplayPrefs,
 }
 
 /// Store a look (and the theme it came from): the four keys every binary
@@ -321,6 +389,12 @@ pub fn store(cfg: &mut Config, live: &Live) {
     cfg.link = keep(live.link, DEFAULT_LINK);
     cfg.group = keep(live.group, DEFAULT_GROUP).map(str::to_string);
     cfg.wall = keep(live.wall, true);
+    cfg.playback = live.playback.clone();
+    cfg.display = live.display.clone();
+    // now said by the [display] table
+    cfg.idle_fps = None;
+    cfg.gpu_budget_ms = None;
+    cfg.shader_fps = None;
     if let Some(t) = live.theme {
         // a scene's first theme is its default — but with a global `theme`
         // set, an explicit per-scene entry still matters
@@ -627,7 +701,34 @@ mod tests {
             link: DEFAULT_LINK,
             group: DEFAULT_GROUP,
             wall: true,
+            playback: Box::leak(Box::default()),
+            display: Box::leak(Box::default()),
         }
+    }
+
+    #[test]
+    fn prefs_tables_and_their_older_keys() {
+        use crate::prefs::{DisplayPrefs, TransitionStyle, Unfocused};
+        // the flat keys older builds wrote still count
+        let cfg: Config = toml::from_str("idle_fps = 15\ngpu_budget_ms = 5.0\nshader_fps = 30").unwrap();
+        let d = display_of(&cfg);
+        assert_eq!((d.unfocused, d.studio_budget_ms, d.studio_fps), (Unfocused::Fps15, 5.0, 30));
+        // written back as the [display] table, the flat keys gone
+        let mut cfg = cfg;
+        let mut playback = crate::prefs::PlaybackPrefs::default();
+        playback.transition = TransitionStyle::Blinds;
+        store(&mut cfg, &Live { display: &d, playback: &playback, ..live_defaults() });
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(!text.contains("idle_fps") && !text.contains("gpu_budget_ms") && !text.contains("shader_fps"), "{text}");
+        assert!(text.contains("[display]") && text.contains("unfocused = \"15\"") && text.contains("studio_fps = 30"), "{text}");
+        assert!(text.contains("[playback]\ntransition = \"blinds\""), "{text}");
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(display_of(&back), d);
+        assert_eq!(back.playback, playback);
+        // the table wins over a stale flat key
+        let both: Config = toml::from_str("idle_fps = 30\n[display]\nunfocused = \"pause\"").unwrap();
+        assert_eq!(display_of(&both).unfocused, Unfocused::Pause);
+        assert_eq!(display_of(&Config::default()), DisplayPrefs::default());
     }
 
     #[test]

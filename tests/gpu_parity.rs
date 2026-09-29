@@ -14,7 +14,9 @@ use termpaper::canvas::Canvas;
 use termpaper::gpu::{FrameCells, Gpu, Plan};
 use termpaper::look::{Baked, Look, PaletteMode, Rgb, Tone};
 use termpaper::render::{self, Pixels};
+use termpaper::prefs::TransitionStyle;
 use termpaper::scene::{self, Detail, SceneOptions};
+use termpaper::transition::Mask;
 
 /// Every effect the GPU implements. `grain` is absent by design: the CPU
 /// draws it from a seeded RNG in raster order, the shader from a positional
@@ -45,6 +47,12 @@ fn rgb(c: Color) -> (u8, u8, u8) {
 /// Worst per-channel difference between the CPU and GPU pixels, and the
 /// share of pixels that differ at all.
 fn compare(gpu: &mut Gpu, canvas: &Canvas, look: &Look) -> (i32, f32) {
+    compare_dim(gpu, canvas, look, 1.0, None)
+}
+
+/// `compare`, with the dim pass: a uniform `dim`, shaped by a transition
+/// mask when there is one.
+fn compare_dim(gpu: &mut Gpu, canvas: &Canvas, look: &Look, dim: f32, mask: Option<Mask>) -> (i32, f32) {
     let (cols, rows) = (canvas.width(), canvas.height() / 2);
     let area = Rect::new(0, 0, cols as u16, rows as u16);
     let baked = Baked::new(look.clone());
@@ -52,6 +60,7 @@ fn compare(gpu: &mut Gpu, canvas: &Canvas, look: &Look) -> (i32, f32) {
     // CPU, exactly as the engine does it
     let mut c = canvas.clone_for_smooth();
     termpaper::engine::finish_look(&mut c, &baked, t);
+    termpaper::canvas::dim_masked(&mut c, dim, mask.as_ref());
     let mut buf = Buffer::empty(area);
     render::draw(&c, area, &mut buf, true, Pixels::Half);
     // GPU
@@ -60,7 +69,8 @@ fn compare(gpu: &mut Gpu, canvas: &Canvas, look: &Look) -> (i32, f32) {
         lut: baked.lut.as_deref(),
         quick_filter: None,
         t,
-        dim: 1.0,
+        dim,
+        mask,
         smooth: 0.0,
         pixels: Pixels::Half,
         cols,
@@ -179,6 +189,85 @@ fn every_look_matches_the_cpu_within_one_step() {
         eprintln!("{name:<28} worst Δ {worst:>3}   differing {:>6.2}%", share * 100.0);
         if worst > allowed {
             failures.push(format!("{name}: worst Δ {worst} > {allowed}"));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+#[test]
+#[ignore = "requires a GPU; run with -- --ignored"]
+fn transition_masks_match_the_cpu() {
+    let (cols, rows) = (160usize, 45usize);
+    let c = canvas(cols, rows * 2);
+    let mut gpu = Gpu::new(cols, rows * 2, cols * rows).expect("a GPU adapter");
+    let mut failures = Vec::new();
+    // a plain dim first: unchanged by the mask plumbing
+    let (worst, _) = compare_dim(&mut gpu, &c, &Look::default(), 0.6, None);
+    if worst > 0 {
+        failures.push(format!("plain dim: worst Δ {worst}"));
+    }
+    for style in [TransitionStyle::Dissolve, TransitionStyle::Wipe, TransitionStyle::Iris, TransitionStyle::Blinds] {
+        for (level, arriving) in [(0.3f32, false), (0.7, true), (0.02, true)] {
+            let mask = Mask::new(style, level, arriving, cols as u32, (rows * 2) as u32);
+            let (worst, share) = compare_dim(&mut gpu, &c, &Look::default(), 0.9, mask);
+            eprintln!("{style:?} @{level} {:<8} worst Δ {worst:>3}   differing {:>6.2}%", if arriving { "in" } else { "out" }, share * 100.0);
+            // the iris edge rides on sqrt, which WGSL need not round exactly
+            let allowed = if style == TransitionStyle::Iris { 1 } else { 0 };
+            if worst > allowed {
+                failures.push(format!("{style:?} @{level}: worst Δ {worst} > {allowed}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+#[test]
+#[ignore = "requires a GPU; run with -- --ignored"]
+fn every_pixel_mode_packs_like_the_cpu() {
+    let (cols, rows) = (96usize, 30usize);
+    let mut failures = Vec::new();
+    for mode in Pixels::ALL {
+        let (pw, ph) = mode.cell_size();
+        let c = canvas(cols * pw, rows * ph);
+        let area = Rect::new(0, 0, cols as u16, rows as u16);
+        let mut buf = Buffer::empty(area);
+        render::draw(&c, area, &mut buf, true, mode);
+        let mut gpu = Gpu::new(cols * pw, rows * ph, cols * rows).expect("a GPU adapter");
+        let look = Look::default();
+        let plan = Plan {
+            look: &look,
+            lut: None,
+            quick_filter: None,
+            t: 1.5,
+            dim: 1.0,
+            mask: None,
+            smooth: 0.0,
+            pixels: mode,
+            cols,
+            rows,
+            crop: (0, 0),
+            virt: None,
+            hysteresis: 0,
+        };
+        let words = gpu.run_blocking(&c, &plan).expect("GPU frame");
+        let cells = FrameCells { words: &words, cols, rows };
+        let (mut glyphs, mut worst) = (0usize, 0i32);
+        for row in 0..rows {
+            for col in 0..cols {
+                let cell = &buf[(col as u16, row as u16)];
+                let (cp, gf, gb) = cells.get(row * cols + col);
+                if char::from_u32(cp).map(String::from).as_deref() != Some(cell.symbol()) {
+                    glyphs += 1;
+                }
+                for (a, b) in [(rgb(cell.fg), gf), (rgb(cell.bg), gb)] {
+                    let d = (a.0 as i32 - b.0 as i32).abs().max((a.1 as i32 - b.1 as i32).abs()).max((a.2 as i32 - b.2 as i32).abs());
+                    worst = worst.max(d);
+                }
+            }
+        }
+        eprintln!("{:<8} glyphs differing {glyphs:>4}   worst colour Δ {worst}", mode.name());
+        if glyphs > 0 || worst > 1 {
+            failures.push(format!("{}: {glyphs} glyphs differ, worst colour Δ {worst}", mode.name()));
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));

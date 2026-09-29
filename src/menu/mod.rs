@@ -33,7 +33,7 @@ pub const FLASH_FOR: Duration = Duration::from_secs(3);
 pub const FPS_PRESETS: &[u32] = &[10, 24, 30, 60, 90, 120, 144, 165, 240];
 
 /// Speed presets for the Playback page and `,`/`.` keys.
-pub const SPEED_PRESETS: &[f32] = &[0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
+pub const SPEED_PRESETS: &[f32] = &[0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
 
 fn step_preset_u32(cur: u32, presets: &[u32], up: bool) -> u32 {
     if let Some(i) = presets.iter().position(|&v| v == cur) {
@@ -289,11 +289,27 @@ pub enum Effect {
     /// auto-rotate interval in seconds; None = off (local-only, not linked)
     SetCycle(Option<f64>),
     SetCycleScope(CycleScope),
+    /// order, transition style, time of day, what opens on launch
+    SetPlayback(crate::prefs::PlaybackPrefs),
+    /// colours, power, overlays, night dimming and the rest of Display
+    SetDisplay(crate::prefs::DisplayPrefs),
+    /// the terminal check: what this terminal can show
+    OpenTerminalCheck,
+    /// open the menu on a page (the welcome's last step)
+    OpenMenuAt(Page),
+    /// the first-run welcome is done (or skipped): never again
+    Onboarded,
     SetRenderer(Renderer),
     SetLink(bool),
     SetLinkGroup(String),
-    /// automatic video wall across linked panes
-    SetWall(bool),
+    /// wall layout, padding, placement, bezels, sync look
+    SetWallPrefs(crate::prefs::WallPrefs),
+    /// pause (or resume) every pane in the group
+    PauseWall,
+    /// open a termpaper on every monitor (Hyprland)
+    WallUp,
+    /// close the wall terminals
+    WallDown,
     /// replace the Look: grade, palette, effect stack and strengths
     SetLook(crate::look::Look),
     /// open the colour studio over the menu
@@ -344,6 +360,9 @@ impl Effect {
                 | Effect::SetRenderer(_)
                 | Effect::SetLook(_)
                 | Effect::ApplyTheme(_)
+                | Effect::SetPlayback(_)
+                | Effect::SetDisplay(_)
+                | Effect::SetWallPrefs(_)
         )
     }
 }
@@ -391,6 +410,15 @@ pub struct MenuCtx {
     /// the theme the look came from (slug), and whether it has changed since
     pub active_theme: Option<String>,
     pub theme_modified: bool,
+    pub playback: crate::prefs::PlaybackPrefs,
+    pub display: crate::prefs::DisplayPrefs,
+    pub wall: crate::prefs::WallPrefs,
+    /// running under Hyprland (the physical wall, bezels, start/stop wall)
+    pub hypr: bool,
+    /// the group's picture is paused
+    pub paused: bool,
+    /// the terminal says it shows 24-bit colour (what Colours: auto means)
+    pub term_truecolor: bool,
 }
 
 /// Whether Studio (GPU) scenes can render, from what the host knows: the
@@ -648,6 +676,9 @@ impl Menu {
                         vec![Effect::DeleteTheme(slug)]
                     }
                     themes::PromptKind::Import if !text.is_empty() => vec![Effect::ImportTheme(text)],
+                    themes::PromptKind::NewGroup if !crate::link::sanitize_group(&text).is_empty() => {
+                        vec![Effect::SetLinkGroup(crate::link::sanitize_group(&text))]
+                    }
                     _ => Vec::new(),
                 };
             }
@@ -1191,6 +1222,11 @@ impl Menu {
                 Vec::new()
             }
             SettingId::Align => vec![Effect::OpenCalibration],
+            SettingId::TerminalCheck => vec![Effect::OpenTerminalCheck],
+            SettingId::NewGroup => {
+                self.prompt = Some(themes::Prompt::new(themes::PromptKind::NewGroup, ""));
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }

@@ -23,7 +23,7 @@ fn main() {
     for name in ["hue", "spectrum", "sharpen", "bloom", "pixelate", "edges"] {
         let filters = vec![name.to_string()];
         let plan = Plan {
-            look: &termpaper::look::Look::with_effects(&filters), lut: None, quick_filter: None, t: 1.5, dim: 1.0, smooth: 0.0,
+            look: &termpaper::look::Look::with_effects(&filters), lut: None, quick_filter: None, t: 1.5, dim: 1.0, mask: None, smooth: 0.0,
             pixels: Pixels::Half, cols, rows, crop: (0, 0), virt: None, hysteresis: 0,
         };
         let mut c = canvas.clone_for_smooth();
