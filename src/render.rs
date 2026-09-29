@@ -245,6 +245,125 @@ pub fn draw_crop(
     }
 }
 
+/// Resample part of a larger canvas into `out` (a pane-sized canvas of
+/// `cols x rows` cells in `mode`). Pane cell (c, r) shows the source cells
+/// from `origin + (c, r) * step` over one `step`; both canvases have the same
+/// pixels per cell. Steps above ~1 average the covered pixels (box filter),
+/// so a coarser pane does not alias or skip columns; below that it samples
+/// the nearest pixel, keeping glyph characters.
+pub fn resample_view(src: &Canvas, origin: [f64; 2], step: [f64; 2], cols: usize, rows: usize, mode: Pixels, out: &mut Canvas) {
+    let (pw, ph) = mode.cell_size();
+    let (w, h) = (cols * pw, rows * ph);
+    if (out.width(), out.height()) != (w, h) {
+        out.resize(w, h);
+    }
+    let ox = origin[0] * pw as f64;
+    let oy = origin[1] * ph as f64;
+    let (sx, sy) = (step[0].max(1e-6), step[1].max(1e-6));
+    for y in 0..h {
+        let y0 = oy + y as f64 * sy;
+        for x in 0..w {
+            let x0 = ox + x as f64 * sx;
+            if sx <= 1.25 && sy <= 1.25 {
+                let c = src.get((x0 + sx * 0.5).floor() as i32, (y0 + sy * 0.5).floor() as i32);
+                match c.ch {
+                    Some(ch) => out.set_char(x as i32, y as i32, ch, c.color),
+                    None => out.set(x as i32, y as i32, c.color),
+                }
+                continue;
+            }
+            // pixels whose centres fall inside the footprint (at least one)
+            let (ax, bx) = ((x0 - 0.5).ceil() as i32, ((x0 + sx - 0.5).ceil() as i32).max((x0 - 0.5).ceil() as i32 + 1));
+            let (ay, by) = ((y0 - 0.5).ceil() as i32, ((y0 + sy - 0.5).ceil() as i32).max((y0 - 0.5).ceil() as i32 + 1));
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for yy in ay..by {
+                for xx in ax..bx {
+                    let c = src.get(xx, yy).color;
+                    r += c.0 as u32;
+                    g += c.1 as u32;
+                    b += c.2 as u32;
+                    n += 1;
+                }
+            }
+            let n = n.max(1);
+            out.set(x as i32, y as i32, ((r / n) as u8, (g / n) as u8, (b / n) as u8));
+        }
+    }
+}
+
+/// Whether a view is a whole-pixel crop, so the plain crop path applies.
+pub fn view_is_crop(origin: [f64; 2], step: [f64; 2], mode: Pixels) -> Option<(i32, i32)> {
+    let (pw, ph) = mode.cell_size();
+    let (x, y) = (origin[0] * pw as f64, origin[1] * ph as f64);
+    let whole = |v: f64| (v - v.round()).abs() < 0.05;
+    ((step[0] - 1.0).abs() < 0.01 && (step[1] - 1.0).abs() < 0.01 && whole(x) && whole(y))
+        .then(|| (x.round() as i32, y.round() as i32))
+}
+
+/// Paint a pane's view of a larger canvas (see [`resample_view`]), taking
+/// the plain crop path when the view is a whole-pixel crop.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_view(
+    canvas: &Canvas,
+    origin: [f64; 2],
+    step: [f64; 2],
+    area: Rect,
+    buf: &mut Buffer,
+    truecolor: bool,
+    mode: Pixels,
+    scratch: &mut Canvas,
+) {
+    if let Some((x, y)) = view_is_crop(origin, step, mode) {
+        draw_crop(canvas, x, y, area, buf, truecolor, mode);
+        return;
+    }
+    resample_view(canvas, origin, step, area.width as usize, area.height as usize, mode, scratch);
+    draw_crop(scratch, 0, 0, area, buf, truecolor, mode);
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+
+    #[test]
+    fn unit_views_are_crops_and_match_draw_crop() {
+        let mut c = Canvas::new(40, 40);
+        for y in 0..40 {
+            for x in 0..40 {
+                c.set(x, y, ((x * 6) as u8, (y * 6) as u8, 90));
+            }
+        }
+        assert_eq!(view_is_crop([3.0, 2.0], [1.0, 1.0], Pixels::Half), Some((3, 4)));
+        assert_eq!(view_is_crop([3.3, 2.0], [1.0, 1.0], Pixels::Half), None);
+        let area = Rect::new(0, 0, 10, 8);
+        let mut a = Buffer::empty(area);
+        let mut b = Buffer::empty(area);
+        let mut scratch = Canvas::new(1, 1);
+        draw_crop(&c, 3, 4, area, &mut a, true, Pixels::Half);
+        // force the resampling path with a hair-off origin: still identical
+        resample_view(&c, [3.0 + 1e-9, 2.0], [1.0, 1.0], 10, 8, Pixels::Half, &mut scratch);
+        draw_crop(&scratch, 0, 0, area, &mut b, true, Pixels::Half);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn coarse_views_average_instead_of_skipping() {
+        // alternating black/white columns, viewed at 2 source px per pane px
+        let mut c = Canvas::new(20, 4);
+        for y in 0..4 {
+            for x in 0..20 {
+                let v = if x % 2 == 0 { 0 } else { 200 };
+                c.set(x, y, (v, v, v));
+            }
+        }
+        let mut out = Canvas::new(1, 1);
+        resample_view(&c, [0.0, 0.0], [2.0, 1.0], 10, 2, Pixels::Half, &mut out);
+        for x in 0..10 {
+            assert_eq!(out.get(x, 0).color, (100, 100, 100), "column {x} should be the average");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
