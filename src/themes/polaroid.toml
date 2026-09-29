@@ -1,0 +1,21 @@
+format = 1
+name = "Polaroid"
+author = "termpaper"
+description = "Instant film: milky blacks, a cyan-green cast in the shadows, warm whites."
+tags = ["cinematic", "vintage"]
+
+[grade]
+saturation = 0.85
+temperature = 0.2
+tint = 0.1
+fade = 0.1
+shadows = { hue = 180.0, amount = 0.25 }
+highlights = { hue = 60.0, amount = 0.2 }
+
+[effects]
+stack = ["vignette"]
+vignette = 0.5
+
+[scene]
+name = "tuscany"
+variant = "summer"

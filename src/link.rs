@@ -86,6 +86,11 @@ pub struct SettingsMsg {
     /// older binaries, which only speak the four fields above; new binaries
     /// fill those too, from this.
     pub look: Option<crate::look::Look>,
+    /// the theme that look came from (slug), so peers name it too
+    pub look_theme: Option<String>,
+    /// only the look (and its theme) are meant: sent from outside the group
+    /// (`termpaper theme apply`), which cannot know the rest
+    pub look_only: bool,
 }
 
 /// Just the `look` of a settings message, read with serde (the rest of the
@@ -110,6 +115,8 @@ impl Default for SettingsMsg {
             saturation: 1.0,
             contrast: 1.0,
             look: None,
+            look_theme: None,
+            look_only: false,
         }
     }
 }
@@ -345,6 +352,14 @@ impl SettingsMsg {
             .and_then(|l| serde_json::to_string(l).ok())
             .map(|j| format!(",\"look\":{j}"))
             .unwrap_or_default();
+        let mut theme = self
+            .look_theme
+            .as_ref()
+            .map(|t| format!(",\"look_theme\":\"{}\"", esc(t)))
+            .unwrap_or_default();
+        if self.look_only {
+            theme.push_str(",\"look_only\":true");
+        }
         format!(
             "\"filters\":[{}],\"fps\":{},\"smooth\":{},\"dim\":{},\"fade\":{},\"clock\":{},\"quick\":{},\"hue_shift\":{},\"saturation\":{},\"contrast\":{}{}",
             filters,
@@ -357,7 +372,7 @@ impl SettingsMsg {
             self.hue_shift,
             self.saturation,
             self.contrast,
-            look,
+            format!("{look}{theme}"),
         )
     }
 
@@ -376,6 +391,8 @@ impl SettingsMsg {
             saturation: num("saturation", d.saturation),
             contrast: num("contrast", d.contrast),
             look: serde_json::from_str::<LookOnly>(text).ok().and_then(|w| w.look),
+            look_theme: json_get(text, "look_theme").map(str::to_string),
+            look_only: json_get(text, "look_only") == Some("true"),
         }
     }
 }
@@ -833,32 +850,70 @@ impl Guard {
         self.seq += 1;
         let stamp = Stamp { epoch: epoch_now_ms(), seq: self.seq, from_pid: self.pid };
         self.settings_last = Some(stamp);
-        let fields = m.fields_json();
-        let _ = atomic_write(
-            &self.dir.join("settings.json"),
-            &format!(
-                "{{\"kind\":\"settings\",\"proto\":{},\"epoch\":{},\"seq\":{},\"from_pid\":{},{}}}",
-                PROTO, stamp.epoch, stamp.seq, stamp.from_pid, fields
-            ),
-        );
-        let legacy = match &self.anchor {
-            Some(a) => format!(
-                "\"pixels\":\"{}\",\"detail\":\"{}\",\"theme\":{},\"text_scale\":{},\"speed\":{},",
-                esc(&a.pixels),
-                esc(&a.detail),
-                opt_str_json(&a.theme),
-                opt_num_json(a.text_scale),
-                a.speed
-            ),
-            None => String::new(),
-        };
-        let _ = atomic_write(
-            &self.dir.join("control.json"),
-            &format!(
-                "{{\"kind\":\"settings\",\"proto\":{},{}{},\"epoch\":{},\"seq\":{},\"from_pid\":{},\"seed\":0,\"t0_ms\":0}}",
-                PROTO, legacy, fields, stamp.epoch, stamp.seq, stamp.from_pid
-            ),
-        );
+        let _ = write_settings(&self.dir, stamp, m, self.anchor.as_ref());
+    }
+}
+
+/// settings.json, plus the legacy control.json mirror (its sim fields from
+/// the group's anchor, so older binaries don't reset them).
+fn write_settings(dir: &Path, stamp: Stamp, m: &SettingsMsg, anchor: Option<&Anchor>) -> std::io::Result<()> {
+    let fields = m.fields_json();
+    atomic_write(
+        &dir.join("settings.json"),
+        &format!(
+            "{{\"kind\":\"settings\",\"proto\":{},\"epoch\":{},\"seq\":{},\"from_pid\":{},{}}}",
+            PROTO, stamp.epoch, stamp.seq, stamp.from_pid, fields
+        ),
+    )?;
+    let legacy = match anchor {
+        Some(a) => format!(
+            "\"pixels\":\"{}\",\"detail\":\"{}\",\"theme\":{},\"text_scale\":{},\"speed\":{},",
+            esc(&a.pixels),
+            esc(&a.detail),
+            opt_str_json(&a.theme),
+            opt_num_json(a.text_scale),
+            a.speed
+        ),
+        None => String::new(),
+    };
+    atomic_write(
+        &dir.join("control.json"),
+        &format!(
+            "{{\"kind\":\"settings\",\"proto\":{},{}{},\"epoch\":{},\"seq\":{},\"from_pid\":{},\"seed\":0,\"t0_ms\":0}}",
+            PROTO, legacy, fields, stamp.epoch, stamp.seq, stamp.from_pid
+        ),
+    )
+}
+
+/// The appearance a group last published, if any.
+pub fn read_group_settings_in(dir: &Path) -> Option<SettingsMsg> {
+    let text = std::fs::read_to_string(dir.join("settings.json")).ok()?;
+    Some(SettingsMsg::parse_fields(&text))
+}
+
+/// Publish a look to a group from outside it (`termpaper theme apply`):
+/// the group's last settings with the look replaced, marked look-only so
+/// members keep their own fps, brightness and the rest.
+pub fn publish_remote_look_in(dir: &Path, look: &crate::look::Look, theme: Option<&str>) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let mut m = read_group_settings_in(dir).unwrap_or_default();
+    // the four fields older binaries read
+    m.filters = look.effects.stack.clone();
+    m.hue_shift = look.grade.hue;
+    m.saturation = look.grade.saturation;
+    m.contrast = look.grade.contrast;
+    m.look = Some(look.clone());
+    m.look_theme = theme.map(str::to_string);
+    m.look_only = true;
+    let anchor = std::fs::read_to_string(dir.join("anchor.json")).ok().and_then(|t| Anchor::parse(&t));
+    let stamp = Stamp { epoch: epoch_now_ms(), seq: 0, from_pid: std::process::id() };
+    write_settings(dir, stamp, &m, anchor.as_ref())
+}
+
+pub fn publish_remote_look(group: &str, look: &crate::look::Look, theme: Option<&str>) -> std::io::Result<()> {
+    match group_dir(group) {
+        Some(dir) => publish_remote_look_in(&dir, look, theme),
+        None => Ok(()),
     }
 }
 
@@ -1537,6 +1592,38 @@ mod settings_sync_tests {
     use super::*;
 
     #[test]
+    fn a_remote_look_keeps_the_group_settings_and_says_look_only() {
+        let dir = std::env::temp_dir().join(format!("termpaper-remote-look-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // what a member last published
+        let member = SettingsMsg { fps: 144, dim: 0.7, clock: false, ..SettingsMsg::default() };
+        let stamp = Stamp { epoch: 1, seq: 1, from_pid: 1 };
+        write_settings(&dir, stamp, &member, None).unwrap();
+        let mut look = crate::look::Look::default();
+        look.grade.saturation = 1.3;
+        look.effects.stack = vec!["bloom".into()];
+        publish_remote_look_in(&dir, &look, Some("dream")).unwrap();
+        let m = read_group_settings_in(&dir).unwrap();
+        assert!(m.look_only);
+        assert_eq!(m.look.as_ref(), Some(&look));
+        assert_eq!(m.look_theme.as_deref(), Some("dream"));
+        assert_eq!((m.fps, m.dim, m.clock), (144, 0.7, false), "the rest is the group's");
+        // older binaries read the look's basics from the flat fields
+        assert_eq!(m.filters, vec!["bloom"]);
+        assert!((m.saturation - 1.3).abs() < 1e-6);
+        // the legacy mirror carries it too, from this process
+        let c = parse_control(&std::fs::read_to_string(dir.join("control.json")).unwrap()).unwrap();
+        assert_eq!(c.kind, ControlKind::Settings);
+        assert_eq!(c.from_pid, std::process::id());
+        // a group nobody has published to yet still gets it
+        let empty = dir.join("fresh");
+        publish_remote_look_in(&empty, &look, None).unwrap();
+        assert!(read_group_settings_in(&empty).unwrap().look_only);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn settings_message_round_trip() {
         let _g = settings_sync_tests_lock();
         let m = SettingsMsg {
@@ -1551,6 +1638,8 @@ mod settings_sync_tests {
             saturation: 1.4,
             contrast: 1.2,
             look: None,
+            look_theme: None,
+            look_only: false,
         };
         let text = format!("{{\"kind\":\"settings\",{},\"epoch\":7,\"seq\":2,\"from_pid\":5}}", m.fields_json());
         let c = parse_control(&text).unwrap();
@@ -1565,12 +1654,13 @@ mod settings_sync_tests {
         look.grade.vibrance = 0.4;
         look.palette.mode = crate::look::PaletteMode::Map;
         look.palette.colors = vec![crate::look::Rgb(1, 2, 3), crate::look::Rgb(200, 100, 50)];
-        let rich = SettingsMsg { look: Some(look.clone()), ..m.clone() };
+        let rich = SettingsMsg { look: Some(look.clone()), look_theme: Some("tokyo-night".into()), ..m.clone() };
         let text = format!("{{\"kind\":\"settings\",{},\"epoch\":7,\"seq\":2,\"from_pid\":5}}", rich.fields_json());
         let back = parse_control(&text).unwrap().settings.unwrap();
         assert_eq!(back.contrast, 1.2, "top-level contrast, not grade.contrast");
         assert_eq!(back.fade, 0.5, "top-level fade, not grade.fade");
         assert_eq!(back.look, Some(look));
+        assert_eq!(back.look_theme.as_deref(), Some("tokyo-night"));
         // an older binary's settings message: only its appearance fields count
         let old = parse_control(
             "{\"kind\":\"settings\",\"pixels\":\"braille\",\"detail\":\"high\",\"filters\":[\"crt\"],\"theme\":\"amber\",\"text_scale\":3,\"speed\":1.5,\"fps\":48,\"smooth\":0.45,\"dim\":0.8,\"fade\":0.5,\"clock\":false,\"quick\":null,\"hue_shift\":45,\"saturation\":1.4,\"contrast\":1.2,\"epoch\":7,\"seq\":2,\"from_pid\":5}",

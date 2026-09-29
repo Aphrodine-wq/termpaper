@@ -1,0 +1,20 @@
+format = 1
+name = "Moonlight"
+author = "termpaper"
+description = "Blue night: cool, quiet, a little darker, with a soft glow on the lights."
+tags = ["cinematic", "cool", "night"]
+
+[grade]
+exposure = -0.3
+saturation = 0.7
+contrast = 1.08
+temperature = -0.55
+shadows = { hue = 225.0, amount = 0.5 }
+
+[effects]
+stack = ["bloom"]
+bloom = 0.5
+
+[scene]
+name = "moonrise"
+variant = "full"

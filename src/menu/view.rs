@@ -237,10 +237,50 @@ pub fn render(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx) {
     };
     match m.page {
         Page::Scenes => draw_browser(f, body, m, ctx, &p),
+        Page::Themes => draw_themes(f, body, m, ctx, &p),
         _ if m.filters_open => draw_filters(f, body, m, ctx, &p),
         _ => draw_settings(f, body, m, ctx, &p),
     }
-    draw_keys(f, keys, hints, &p);
+    match &m.prompt {
+        // a question takes the footer: what is being asked, what is typed
+        Some(pr) => {
+            let q = format!("{}: ", pr.question());
+            let room = (keys.width as usize).saturating_sub(width(&q) + 2);
+            let shown: String = {
+                let t: Vec<char> = pr.text.chars().collect();
+                t[t.len().saturating_sub(room)..].iter().collect()
+            };
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(vec![
+                        Span::styled(q, bold(p.accent)),
+                        Span::styled(shown, fg(p.text)),
+                        Span::styled("▏", fg(p.accent)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Enter", bold(p.text)),
+                        Span::styled(" ok  ", fg(p.faint)),
+                        Span::styled("Esc", bold(p.text)),
+                        Span::styled(" cancel", fg(p.faint)),
+                    ]),
+                ]),
+                Rect { y: keys.y.saturating_sub(1), height: keys.height + 1, ..keys },
+            );
+        }
+        None => {
+            // pages without a help line give a notice the footer for a moment
+            let flash = matches!(m.page, Page::Scenes | Page::Themes)
+                .then(|| m.flash_text(Instant::now()))
+                .flatten();
+            match flash {
+                Some(msg) => f.render_widget(
+                    Paragraph::new(Line::from(Span::styled(msg.to_string(), bold(p.accent)))).wrap(Wrap { trim: true }),
+                    keys,
+                ),
+                None => draw_keys(f, keys, hints, &p),
+            }
+        }
+    }
     if m.help {
         draw_help(f, area, m, ctx, &p);
     }
@@ -499,6 +539,161 @@ fn draw_detail(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal) {
         )));
     }
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
+}
+
+// ── Themes ──────────────────────────────────────────────────────────────
+
+fn draw_themes(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal) {
+    let list = super::themes::visible(&ctx.themes, &m.theme_query);
+    let detail_h = match area.height {
+        h if h >= 18 => 6,
+        h if h >= 11 => 4,
+        _ => 0,
+    };
+    let search_h = u16::from(m.theme_searching || !m.theme_query.is_empty());
+    let [search, rows, detail] = Layout::vertical([
+        Constraint::Length(search_h),
+        Constraint::Min(1),
+        Constraint::Length(detail_h),
+    ])
+    .areas(area);
+    if search_h > 0 {
+        let mut spans = vec![Span::styled("/ ", bold(p.accent))];
+        if m.theme_query.is_empty() {
+            spans.push(Span::styled("type to filter…", fg(p.faint)));
+        } else {
+            spans.push(Span::styled(m.theme_query.clone(), fg(p.text)));
+        }
+        if m.theme_searching {
+            spans.push(Span::styled("▏", fg(p.accent)));
+        }
+        spans.push(Span::styled(format!("  {} themes", list.len()), fg(p.faint)));
+        f.render_widget(Paragraph::new(Line::from(spans)), search);
+    }
+    if list.is_empty() {
+        f.render_widget(Paragraph::new("no themes match — Esc clears").style(fg(p.faint)), rows);
+        return;
+    }
+    // lines: a heading wherever the shelf changes, then the themes
+    enum L {
+        Head(&'static str),
+        Row(usize),
+    }
+    let mut lines = Vec::new();
+    let mut shelf = "";
+    for (i, t) in list.iter().enumerate() {
+        if t.shelf != shelf {
+            shelf = t.shelf;
+            lines.push(L::Head(t.shelf));
+        }
+        lines.push(L::Row(i));
+    }
+    let sel = m.theme_row.min(list.len() - 1);
+    let sel_line = lines.iter().position(|l| matches!(l, L::Row(r) if *r == sel)).unwrap_or(0);
+    m.page_len.set(rows.height as usize);
+    let off = scroll_offset(sel_line, lines.len(), rows.height as usize);
+    let w = rows.width as usize;
+    let last = off + rows.height as usize - 1;
+    for (k, line) in lines.iter().enumerate().skip(off).take(rows.height as usize) {
+        let y = rows.y + (k - off) as u16;
+        let rect = Rect::new(rows.x, y, rows.width, 1);
+        match line {
+            // a heading with nothing under it on screen waits for the scroll
+            L::Head(_) if k == last && k + 1 < lines.len() => {}
+            L::Head(name) => {
+                let head = name.to_uppercase();
+                let rule_w = w.saturating_sub(width(&head) + 2);
+                line_at(
+                    f,
+                    rect.x,
+                    y,
+                    rect.width,
+                    Line::from(vec![
+                        Span::styled(format!(" {head} "), bold(p.faint)),
+                        Span::styled("─".repeat(rule_w), fg(p.track)),
+                    ]),
+                );
+            }
+            L::Row(i) => {
+                let t = list[*i];
+                let focused = *i == sel;
+                let active = ctx.active_theme.as_deref() == Some(t.slug.as_str());
+                let bg = focused.then_some(p.hi_bg);
+                if let Some(b) = bg {
+                    f.buffer_mut().set_style(rect, Style::new().bg(b));
+                }
+                let st = |s: Style| match bg {
+                    Some(b) => s.bg(b),
+                    None => s,
+                };
+                // swatches on the right: two cells a colour
+                let sw_n = t.swatches.len().min(6);
+                let sw_w = sw_n * 2;
+                let name_w = w.saturating_sub(4 + sw_w + 2);
+                let mut name = t.name.clone();
+                if active && ctx.theme_modified {
+                    name.push_str(" · edited");
+                }
+                let mut spans = vec![
+                    Span::styled(if focused { "▌" } else { " " }, st(fg(p.accent))),
+                    Span::styled(if active { "●" } else { " " }, st(fg(p.live))),
+                    Span::styled(" ", st(Style::new())),
+                    Span::styled(
+                        pad(&name, name_w),
+                        st(if focused { bold(p.text) } else if t.yours { fg(p.fav) } else { fg(p.text) }),
+                    ),
+                    Span::styled(" ", st(Style::new())),
+                ];
+                for c in t.swatches.iter().take(sw_n) {
+                    let col = if ctx.truecolor {
+                        Color::Rgb(c.0, c.1, c.2)
+                    } else {
+                        Color::Indexed(crate::canvas::rgb_to_256(c.0, c.1, c.2))
+                    };
+                    spans.push(Span::styled("██", st(fg(col))));
+                }
+                line_at(f, rect.x, y, rect.width, Line::from(spans));
+                hit(m, rect, Hit::Theme(*i));
+            }
+        }
+    }
+    // the highlighted theme in full
+    if detail_h > 0 {
+        let rule = Block::new().borders(Borders::TOP).border_style(fg(p.faint));
+        let inner = rule.inner(detail);
+        f.render_widget(rule, detail);
+        let t = list[sel];
+        let mut head = vec![Span::styled(t.name.clone(), bold(p.text))];
+        if !t.author.is_empty() {
+            head.push(Span::styled(format!(" · by {}", t.author), fg(p.faint)));
+        }
+        if ctx.active_theme.as_deref() == Some(t.slug.as_str()) {
+            head.push(Span::raw("  "));
+            let tag = if ctx.theme_modified { " in use · edited " } else { " in use " };
+            head.push(Span::styled(tag, Style::new().fg(p.on_accent).bg(p.live)));
+        } else if m.look_previewing() {
+            head.push(Span::raw("  "));
+            head.push(Span::styled(" preview ", Style::new().fg(p.on_accent).bg(p.accent)));
+        }
+        if t.yours {
+            head.push(Span::raw("  "));
+            head.push(Span::styled(" yours ", Style::new().fg(p.on_accent).bg(p.fav)));
+        }
+        let mut lines = vec![Line::from(head), Line::from(Span::styled(t.description.clone(), fg(p.muted)))];
+        if let Some((scene_name, variant)) = &t.scene {
+            let title = scene::lookup(scene_name).map_or(scene_name.as_str(), |e| e.title());
+            let v = variant.as_deref().map(|v| format!(" · {v}")).unwrap_or_default();
+            lines.push(Line::from(vec![
+                Span::styled("made for ", fg(p.faint)),
+                Span::styled(format!("{title}{v}"), fg(p.text)),
+                Span::styled("  s switches to it", fg(p.faint)),
+            ]));
+        }
+        if !t.tags.is_empty() {
+            lines.push(Line::from(Span::styled(format!("tags {}", t.tags.join(", ")), fg(p.faint))));
+        }
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+    }
 }
 
 // ── Settings pages ──────────────────────────────────────────────────────
@@ -913,7 +1108,31 @@ pub fn key_hints(m: &Menu, ctx: &MenuCtx) -> Vec<(&'static str, &'static str)> {
     } else {
         "close"
     };
+    if m.prompt.is_some() {
+        return vec![("Enter", "ok"), ("Esc", "cancel")];
+    }
     match m.page {
+        Page::Themes => {
+            if m.theme_searching {
+                return vec![("type", "filter"), ("↑↓", "move"), ("Enter", "apply"), ("Esc", "clear")];
+            }
+            let t = m.highlighted_theme(ctx);
+            let active = t.is_some_and(|t| ctx.active_theme.as_deref() == Some(t.slug.as_str()));
+            let edited = active && ctx.theme_modified;
+            let mut v = vec![("↑↓", "move"), ("Enter", if edited { "revert" } else { "apply" })];
+            if t.is_some_and(|t| t.scene.is_some()) {
+                v.push(("s", "its scene"));
+            }
+            if edited && t.is_some_and(|t| t.yours) {
+                v.push(("U", "save changes"));
+            }
+            v.extend([("e", "edit"), ("n", "save as new"), ("c", "share"), ("i", "import")]);
+            if t.is_some_and(|t| t.yours) {
+                v.extend([("r", "rename"), ("x", "delete")]);
+            }
+            v.extend([("/", "search"), ("u", "undo"), ("Tab", "page"), ("?", "help"), ("Esc", "close")]);
+            v
+        }
         Page::Scenes => {
             let hit = m.browser.highlighted(ctx);
             let mut v = vec![("↑↓", "move")];

@@ -1,0 +1,19 @@
+format = 1
+name = "Forest"
+author = "termpaper"
+description = "Deep woods: moss greens, quiet shadows, dappled light."
+tags = ["mood", "green"]
+
+[grade]
+vibrance = 0.2
+tint = -0.2
+fade = 0.04
+
+[palette]
+mode = "tint"
+strength = 0.5
+colors = ["#0b1a0f", "#1e3a24", "#3f6b3a", "#8ba65a", "#e4e7b9"]
+
+[scene]
+name = "redwoods"
+variant = "morning"

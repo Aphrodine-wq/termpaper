@@ -27,6 +27,8 @@ toml = "1.1.3"
 # local time for the clock overlay and time-of-day variants (TZ and DST
 # handled per platform, no `date` subprocess)
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# theme share codes: deflate, pure Rust
+miniz_oxide = "0.8"
 # GPU backend: Studio shader scenes plus post-processing. On by default;
 # `--no-default-features` builds the CPU-only binary (Classic scenes only).
 # Vulkan on Linux and Windows, Metal on macOS, DX12 as the Windows fallback;

@@ -9,6 +9,7 @@ pub mod browser;
 pub mod settings;
 #[cfg(test)]
 mod tests;
+pub mod themes;
 pub mod view;
 
 use crate::config::CycleScope;
@@ -99,6 +100,7 @@ pub fn speed_step(cur: f32, up: bool) -> f32 {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
     Scenes,
+    Themes,
     Look,
     Playback,
     Display,
@@ -106,8 +108,9 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 5] = [
+    pub const ALL: [Page; 6] = [
         Page::Scenes,
+        Page::Themes,
         Page::Look,
         Page::Playback,
         Page::Display,
@@ -117,6 +120,7 @@ impl Page {
     pub fn title(self) -> &'static str {
         match self {
             Page::Scenes => "Scenes",
+            Page::Themes => "Themes",
             Page::Look => "Look",
             Page::Playback => "Playback",
             Page::Display => "Display",
@@ -128,6 +132,7 @@ impl Page {
     pub fn short_title(self) -> &'static str {
         match self {
             Page::Scenes => "Scenes",
+            Page::Themes => "Themes",
             Page::Look => "Look",
             Page::Playback => "Play",
             Page::Display => "Show",
@@ -173,6 +178,8 @@ pub enum Hit {
     Slider { row: usize, x0: u16, width: u16 },
     Shelf(usize),
     Scene(usize),
+    /// a theme in the Themes list (its index in the visible list)
+    Theme(usize),
     /// an Effects sub-page row, and its on/off box
     FilterRow(usize),
     FilterBox(usize),
@@ -297,6 +304,24 @@ pub enum Effect {
     Undo,
     /// monitor alignment tool — not wired yet; the host flashes a notice
     OpenCalibration,
+    /// apply a theme's look (by slug) and remember it as the active theme
+    ApplyTheme(String),
+    /// show a look on this pane only while the Themes page browses
+    PreviewLook(crate::look::Look),
+    /// drop the look preview: back to the look before it
+    EndLookPreview,
+    /// save the current look as a new theme with this name
+    SaveTheme(String),
+    /// save the current look into one of your themes
+    UpdateTheme(String),
+    RenameTheme { slug: String, name: String },
+    DeleteTheme(String),
+    /// copy a theme's share code (OSC 52) and show it
+    ShareTheme(String),
+    /// a tp1: code or a theme file's path
+    ImportTheme(String),
+    /// switch to the scene (and variant) a theme was made for
+    SceneFromTheme(String),
 }
 
 impl Effect {
@@ -318,12 +343,13 @@ impl Effect {
                 | Effect::SetCycleScope(_)
                 | Effect::SetRenderer(_)
                 | Effect::SetLook(_)
+                | Effect::ApplyTheme(_)
         )
     }
 }
 
 /// Snapshot of the host's current settings, for display and adjustment.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct MenuCtx {
     pub renderer_status: String,
     /// "wall: WxH cells @ (x,y)" when this pane is a crop of a video wall,
@@ -360,6 +386,11 @@ pub struct MenuCtx {
     /// (action, key) for every rebindable action
     pub key_display: Vec<(String, String)>,
     pub instances: Vec<String>,
+    /// every theme, in the order the Themes page lists them
+    pub themes: std::sync::Arc<Vec<themes::ThemeRow>>,
+    /// the theme the look came from (slug), and whether it has changed since
+    pub active_theme: Option<String>,
+    pub theme_modified: bool,
 }
 
 /// Whether Studio (GPU) scenes can render, from what the host knows: the
@@ -386,11 +417,21 @@ pub struct Menu {
     /// the `?` help overlay
     pub help: bool,
     help_scroll: u16,
+    /// Themes page: highlighted row (in the visible list), search
+    pub theme_row: usize,
+    pub theme_query: String,
+    pub theme_searching: bool,
+    /// highlighted theme and when the highlight landed on it (preview timer)
+    theme_hover: Option<(usize, Instant)>,
+    /// a look preview is showing behind the menu
+    look_previewing: bool,
+    /// a question in the footer waiting for typed text
+    pub prompt: Option<themes::Prompt>,
     /// Look → Filters… sub-page is showing
     pub filters_open: bool,
     filter_row: usize,
     /// focused row on each settings page, by `Page::index`
-    rows: [usize; 5],
+    rows: [usize; 6],
     pub browser: Browser,
     /// scene on screen when the menu opened: what Esc returns to
     origin: &'static str,
@@ -422,9 +463,15 @@ impl Menu {
             page: Page::Scenes,
             help: false,
             help_scroll: 0,
+            theme_row: 0,
+            theme_query: String::new(),
+            theme_searching: false,
+            theme_hover: None,
+            look_previewing: false,
+            prompt: None,
             filters_open: false,
             filter_row: 0,
-            rows: [0; 5],
+            rows: [0; 6],
             browser: Browser::new(),
             origin: "",
             previewing: None,
@@ -442,6 +489,17 @@ impl Menu {
     pub fn open(&mut self, ctx: &MenuCtx) {
         self.open = true;
         self.help = false;
+        self.prompt = None;
+        self.theme_searching = false;
+        self.theme_query.clear();
+        self.look_previewing = false;
+        self.theme_hover = None;
+        // the Themes list opens on the active theme
+        if let Some(active) = &ctx.active_theme {
+            if let Some(i) = ctx.themes.iter().position(|t| &t.slug == active) {
+                self.theme_row = i;
+            }
+        }
         self.filters_open = false;
         self.origin = ctx.scene_name;
         self.previewing = None;
@@ -455,9 +513,26 @@ impl Menu {
     pub fn close(&mut self) -> Vec<Effect> {
         self.open = false;
         self.help = false;
+        self.prompt = None;
         self.filters_open = false;
         self.browser.clear_search();
-        self.end_preview()
+        let mut fx = self.end_preview();
+        fx.extend(self.end_look_preview());
+        fx
+    }
+
+    fn end_look_preview(&mut self) -> Vec<Effect> {
+        self.theme_hover = None;
+        if std::mem::take(&mut self.look_previewing) {
+            vec![Effect::EndLookPreview]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Whether a look preview is showing (the host keeps the real look).
+    pub fn look_previewing(&self) -> bool {
+        self.look_previewing
     }
 
     fn end_preview(&mut self) -> Vec<Effect> {
@@ -473,10 +548,29 @@ impl Menu {
         self.previewing
     }
 
-    /// True while keystrokes are text (the scene search box), so the host
+    /// True while keystrokes are text (a search box, a prompt), so the host
     /// must not treat them as shortcuts.
     pub fn typing(&self) -> bool {
-        self.open && !self.help && self.page == Page::Scenes && self.browser.searching
+        self.open
+            && !self.help
+            && (self.prompt.is_some()
+                || (self.page == Page::Scenes && self.browser.searching)
+                || (self.page == Page::Themes && self.theme_searching))
+    }
+
+    /// Paste text into whatever is being typed (a share code, a name).
+    pub fn paste(&mut self, text: &str) {
+        let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+        if let Some(p) = &mut self.prompt {
+            let room = p.max_len().saturating_sub(p.text.chars().count());
+            p.text.extend(clean.chars().take(room));
+        } else if self.page == Page::Themes && self.theme_searching {
+            self.theme_query.push_str(&clean);
+            self.theme_row = 0;
+        } else if self.page == Page::Scenes && self.browser.searching {
+            self.browser.query.push_str(&clean);
+            self.browser.row = 0;
+        }
     }
 
     /// Show a short notice in the footer.
@@ -509,6 +603,9 @@ impl Menu {
         if let Input::Mouse { kind, x, y } = input {
             return self.handle_mouse(kind, x, y, ctx);
         }
+        if self.prompt.is_some() {
+            return self.handle_prompt(input);
+        }
         if self.help {
             self.handle_help(input);
             return Vec::new();
@@ -520,9 +617,205 @@ impl Menu {
         }
         match self.page {
             Page::Scenes => self.handle_browser(input, ctx),
+            Page::Themes => self.handle_themes(input, ctx),
             _ if self.filters_open => self.handle_filters(input, ctx),
             _ => self.handle_settings(input, ctx),
         }
+    }
+
+    /// Text into the prompt; Enter answers it, Esc drops it.
+    fn handle_prompt(&mut self, input: Input) -> Vec<Effect> {
+        let Some(p) = &mut self.prompt else {
+            return Vec::new();
+        };
+        match input {
+            Input::Char(c) => {
+                if p.text.chars().count() < p.max_len() {
+                    p.text.push(c);
+                }
+            }
+            Input::Backspace => {
+                p.text.pop();
+            }
+            Input::Esc => self.prompt = None,
+            Input::Enter => {
+                let p = self.prompt.take().unwrap();
+                let text = p.text.trim().to_string();
+                return match p.kind {
+                    themes::PromptKind::NewTheme if !text.is_empty() => vec![Effect::SaveTheme(text)],
+                    themes::PromptKind::Rename(slug) if !text.is_empty() => vec![Effect::RenameTheme { slug, name: text }],
+                    themes::PromptKind::Delete(slug) if text.eq_ignore_ascii_case("y") || text.eq_ignore_ascii_case("yes") => {
+                        vec![Effect::DeleteTheme(slug)]
+                    }
+                    themes::PromptKind::Import if !text.is_empty() => vec![Effect::ImportTheme(text)],
+                    _ => Vec::new(),
+                };
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// Put the highlight on a theme after the list changed under it (one
+    /// saved, renamed or imported), dropping a search that would hide it.
+    pub fn focus_theme(&mut self, slug: &str, rows: &[themes::ThemeRow]) {
+        if let Some(i) = themes::visible(rows, &self.theme_query).iter().position(|t| t.slug == slug) {
+            self.theme_row = i;
+        } else if let Some(i) = rows.iter().position(|t| t.slug == slug) {
+            self.theme_query.clear();
+            self.theme_searching = false;
+            self.theme_row = i;
+        }
+        self.theme_hover = None;
+    }
+
+    /// The highlighted theme, if any.
+    pub fn highlighted_theme<'a>(&self, ctx: &'a MenuCtx) -> Option<&'a themes::ThemeRow> {
+        let list = themes::visible(&ctx.themes, &self.theme_query);
+        list.get(self.theme_row.min(list.len().saturating_sub(1))).copied()
+    }
+
+    /// Restart the preview timer on the highlighted theme.
+    fn touch_theme(&mut self) {
+        self.theme_hover = Some((self.theme_row, Instant::now()));
+    }
+
+    fn handle_themes(&mut self, input: Input, ctx: &MenuCtx) -> Vec<Effect> {
+        let n = themes::visible(&ctx.themes, &self.theme_query).len();
+        let page = self.page_len.get().max(1);
+        let mv = |row: &mut usize, d: isize| {
+            *row = (*row as isize + d).clamp(0, n.saturating_sub(1) as isize) as usize;
+        };
+        if self.theme_searching {
+            match input {
+                Input::Char(c) => {
+                    self.theme_query.push(c);
+                    self.theme_row = 0;
+                }
+                Input::Backspace => {
+                    if self.theme_query.pop().is_none() {
+                        self.theme_searching = false;
+                    }
+                    self.theme_row = 0;
+                }
+                Input::Esc => {
+                    self.theme_searching = false;
+                    self.theme_query.clear();
+                }
+                Input::Enter => {
+                    // back to the whole list, on the theme picked
+                    self.theme_searching = false;
+                    let hit = self.highlighted_theme(ctx).map(|t| t.slug.clone());
+                    self.theme_query.clear();
+                    if let Some(slug) = hit {
+                        self.theme_row = ctx.themes.iter().position(|t| t.slug == slug).unwrap_or(0);
+                        self.look_previewing = false;
+                        self.theme_hover = None;
+                        return vec![Effect::ApplyTheme(slug)];
+                    }
+                }
+                Input::Up => mv(&mut self.theme_row, -1),
+                Input::Down => mv(&mut self.theme_row, 1),
+                _ => {}
+            }
+            self.touch_theme();
+            return Vec::new();
+        }
+        let hit = self.highlighted_theme(ctx).cloned();
+        match input {
+            Input::Up | Input::Char('k') => mv(&mut self.theme_row, -1),
+            Input::Down | Input::Char('j') => mv(&mut self.theme_row, 1),
+            Input::PageUp => mv(&mut self.theme_row, -(page as isize)),
+            Input::PageDown => mv(&mut self.theme_row, page as isize),
+            Input::Home => self.theme_row = 0,
+            Input::End => self.theme_row = n.saturating_sub(1),
+            Input::Enter => {
+                if let Some(t) = hit {
+                    // the preview becomes the real thing
+                    self.look_previewing = false;
+                    self.theme_hover = None;
+                    return vec![Effect::ApplyTheme(t.slug)];
+                }
+                return Vec::new();
+            }
+            Input::Char('/') => {
+                self.theme_searching = true;
+                self.theme_query.clear();
+                return Vec::new();
+            }
+            Input::Char('s') => {
+                if let Some(t) = hit.filter(|t| t.scene.is_some()) {
+                    return vec![Effect::SceneFromTheme(t.slug)];
+                }
+                return Vec::new();
+            }
+            Input::Char('e') => {
+                if let Some(t) = hit {
+                    self.look_previewing = false;
+                    self.theme_hover = None;
+                    let mut fx = Vec::new();
+                    if ctx.active_theme.as_deref() != Some(t.slug.as_str()) {
+                        fx.push(Effect::ApplyTheme(t.slug));
+                    }
+                    fx.push(Effect::OpenColorGrade);
+                    return fx;
+                }
+                return Vec::new();
+            }
+            Input::Char('n') => {
+                // saves the look you have: back on screen while you name it
+                let fx = self.end_look_preview();
+                self.prompt = Some(themes::Prompt::new(themes::PromptKind::NewTheme, ""));
+                return fx;
+            }
+            Input::Char('U') => {
+                let active = |t: &themes::ThemeRow| ctx.active_theme.as_deref() == Some(t.slug.as_str());
+                match hit {
+                    Some(t) if t.yours && active(&t) && ctx.theme_modified => {
+                        let mut fx = self.end_look_preview();
+                        fx.push(Effect::UpdateTheme(t.slug));
+                        return fx;
+                    }
+                    Some(t) if t.yours && active(&t) => self.flash("No changes to save"),
+                    Some(t) if t.yours => self.flash("U saves your edits into the theme in use: apply this one first"),
+                    _ => self.flash("Built-in themes stay as they are: n saves your look as a new theme"),
+                }
+                return Vec::new();
+            }
+            Input::Char('r') => {
+                match hit.filter(|t| t.yours) {
+                    Some(t) => self.prompt = Some(themes::Prompt::new(themes::PromptKind::Rename(t.slug), t.name)),
+                    None => self.flash("Built-in themes keep their names: n saves your look as a new theme"),
+                }
+                return Vec::new();
+            }
+            Input::Char('x') => {
+                match hit.filter(|t| t.yours) {
+                    Some(t) => self.prompt = Some(themes::Prompt::new(themes::PromptKind::Delete(t.slug), "")),
+                    None => self.flash("Built-in themes cannot be deleted"),
+                }
+                return Vec::new();
+            }
+            Input::Char('c') => {
+                if let Some(t) = hit {
+                    return vec![Effect::ShareTheme(t.slug)];
+                }
+                return Vec::new();
+            }
+            Input::Char('i') => {
+                self.prompt = Some(themes::Prompt::new(themes::PromptKind::Import, ""));
+                return Vec::new();
+            }
+            Input::Char('u') => return vec![Effect::Undo],
+            Input::Char('?') => {
+                self.help = true;
+                return Vec::new();
+            }
+            Input::Esc => return self.close(),
+            _ => return Vec::new(),
+        }
+        self.touch_theme();
+        Vec::new()
     }
 
     /// Switch pages. Leaving the browser drops the search and any preview:
@@ -533,6 +826,10 @@ impl Menu {
         if self.page == Page::Scenes && page != Page::Scenes {
             self.browser.clear_search();
             fx = self.end_preview();
+        }
+        if self.page == Page::Themes && page != Page::Themes {
+            self.theme_searching = false;
+            fx.extend(self.end_look_preview());
         }
         self.page = page;
         fx
@@ -560,6 +857,31 @@ impl Menu {
         }
         self.previewing = Some(name);
         vec![Effect::Preview(name)]
+    }
+
+    /// `tick`, with what the Themes page's preview needs: once the highlight
+    /// rests on a theme, its look shows on this pane (not published).
+    pub fn tick_with(&mut self, now: Instant, ctx: &MenuCtx) -> Vec<Effect> {
+        if !(self.open && !self.help && self.prompt.is_none() && self.page == Page::Themes) {
+            return self.tick(now);
+        }
+        let Some((row, at)) = self.theme_hover else {
+            return Vec::new();
+        };
+        if now.saturating_duration_since(at) < PREVIEW_DELAY {
+            return Vec::new();
+        }
+        self.theme_hover = None;
+        let list = themes::visible(&ctx.themes, &self.theme_query);
+        let Some(t) = list.get(row.min(list.len().saturating_sub(1))) else {
+            return Vec::new();
+        };
+        // resting on the theme in use shows your look as it is, edits and all
+        if ctx.active_theme.as_deref() == Some(t.slug.as_str()) {
+            return self.end_look_preview();
+        }
+        self.look_previewing = true;
+        vec![Effect::PreviewLook(t.look.clone())]
     }
 
     /// Restart the preview timer on whatever the browser now highlights.
@@ -652,6 +974,14 @@ impl Menu {
                     return self.switch(ctx);
                 }
                 self.touch(ctx);
+                Vec::new()
+            }
+            (Mouse::Down, Hit::Theme(i)) => {
+                self.theme_row = i;
+                if double {
+                    return self.handle_themes(Input::Enter, ctx);
+                }
+                self.touch_theme();
                 Vec::new()
             }
             (Mouse::Down, Hit::FilterRow(r)) => {

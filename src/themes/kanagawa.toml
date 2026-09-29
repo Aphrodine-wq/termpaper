@@ -1,0 +1,22 @@
+format = 1
+name = "Kanagawa"
+author = "termpaper"
+description = "The Great Wave's colours: ink blue, violet and old-paper white."
+tags = ["terminal", "dark", "ink"]
+
+[grade]
+temperature = -0.05
+fade = 0.05
+
+[palette]
+mode = "tint"
+strength = 0.6
+colors = ["#1f1f28", "#2a2a37", "#54546d", "#7e9cd8", "#957fb8", "#dcd7ba"]
+
+[effects]
+stack = ["grain"]
+grain = 0.3
+
+[scene]
+name = "bamboo"
+variant = "rain"

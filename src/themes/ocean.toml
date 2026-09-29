@@ -1,0 +1,18 @@
+format = 1
+name = "Ocean"
+author = "termpaper"
+description = "Underwater light: teal and aqua, cool and clear."
+tags = ["mood", "cool", "teal"]
+
+[grade]
+temperature = -0.35
+vibrance = 0.25
+
+[palette]
+mode = "tint"
+strength = 0.55
+colors = ["#03101c", "#0b3954", "#087e8b", "#7fc8d8", "#dff3f8"]
+
+[scene]
+name = "kelp"
+variant = "sunlit"

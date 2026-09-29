@@ -1,0 +1,18 @@
+format = 1
+name = "Amber CRT"
+author = "termpaper"
+description = "An amber monochrome monitor: every scene in glowing orange phosphor."
+tags = ["retro", "mono", "warm"]
+
+[palette]
+mode = "map"
+colors = ["#1a0f00", "#5c3300", "#c77700", "#ffb000", "#ffd480"]
+
+[effects]
+stack = ["crt", "bloom"]
+crt = 0.8
+bloom = 0.8
+
+[scene]
+name = "sonar"
+variant = "amber"

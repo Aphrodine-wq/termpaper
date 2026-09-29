@@ -1,0 +1,22 @@
+format = 1
+name = "Gruvbox"
+author = "termpaper"
+description = "Retro groove: warm earthy reds, yellows and greens on dark brown."
+tags = ["terminal", "dark", "warm"]
+
+[grade]
+contrast = 1.05
+temperature = 0.25
+
+[palette]
+mode = "tint"
+strength = 0.6
+colors = ["#282828", "#504945", "#cc241d", "#d65d0e", "#d79921", "#b8bb26", "#ebdbb2"]
+
+[effects]
+stack = ["grain"]
+grain = 0.3
+
+[scene]
+name = "fireplace"
+variant = "autumn"

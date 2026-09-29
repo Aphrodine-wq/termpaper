@@ -1,0 +1,18 @@
+format = 1
+name = "Noir"
+author = "termpaper"
+description = "Black and white with deep blacks, grain and a dark frame."
+tags = ["cinematic", "mono"]
+
+[grade]
+saturation = 0.0
+contrast = 1.4
+
+[effects]
+stack = ["grain", "vignette"]
+grain = 0.6
+vignette = 0.8
+
+[scene]
+name = "windowrain"
+variant = "city"

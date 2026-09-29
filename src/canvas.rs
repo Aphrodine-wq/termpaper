@@ -18,6 +18,7 @@ impl Cell {
     };
 }
 
+#[derive(Clone)]
 pub struct Canvas {
     width: usize,
     height: usize,

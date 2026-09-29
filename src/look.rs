@@ -268,13 +268,19 @@ pub fn palette_name(colors: &[Rgb]) -> Option<&'static str> {
 }
 
 /// The effect stack: names applied in order, each with a strength (1 is
-/// the classic look, 0 is off).
+/// the classic look, 0 is off). Strengths sit beside the stack in files:
+///
+/// ```toml
+/// [effects]
+/// stack = ["bloom", "vignette"]
+/// bloom = 0.6
+/// ```
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Effects {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stack: Vec<String>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(flatten)]
     pub amounts: BTreeMap<String, f32>,
 }
 

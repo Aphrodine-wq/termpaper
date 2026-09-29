@@ -1,0 +1,17 @@
+format = 1
+name = "Game Boy"
+author = "termpaper"
+description = "Four shades of pea green, dithered and chunky, like the 1989 handheld."
+tags = ["retro", "green"]
+
+[palette]
+mode = "snap"
+dither = true
+colors = ["#0f380f", "#306230", "#8bac0f", "#9bbc0f"]
+
+[effects]
+stack = ["pixelate"]
+pixelate = 0.5
+
+[scene]
+name = "life"

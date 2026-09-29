@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 #[command(
     name = "termpaper",
     version,
-    about = "Wallpaper Engine for the terminal — 120fps, 22 filters, sync clusters, seamless walls",
+    about = "Wallpaper Engine for the terminal — 120fps, 27 effects, 34 themes, sync clusters, seamless walls",
     after_help = "Press ? in a running scene for the menu; `termpaper list` shows the catalog."
 )]
 struct Args {
@@ -28,9 +28,15 @@ struct Args {
     #[arg(help_heading = "Scene", display_order = 0)]
     scene: Option<String>,
 
-    /// Scene color theme (e.g. nexus: cyan/amber/violet/mono)
+    /// A theme (see `termpaper theme list`), or one of this scene's
+    /// variants, as before (e.g. nexus: cyan/amber/violet/mono)
     #[arg(long, help_heading = "Scene")]
     theme: Option<String>,
+
+    /// The scene's variant: its time of day, weather or colours (e.g.
+    /// hongkong: night)
+    #[arg(long, help_heading = "Scene")]
+    variant: Option<String>,
 
     /// Move on to another scene every N seconds
     #[arg(long, value_name = "SECS", help_heading = "Scene")]
@@ -160,6 +166,56 @@ enum Command {
         #[command(subcommand)]
         action: WallCmd,
     },
+    /// Themes: list, show, apply, make, share and check them
+    Theme {
+        #[command(subcommand)]
+        action: ThemeCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ThemeCmd {
+    /// Every theme, built in and yours
+    List {
+        /// One JSON object per theme, with its share code
+        #[arg(long)]
+        json: bool,
+    },
+    /// What a theme does, where its file is, and its share code
+    Show { name: String },
+    /// Use a theme: saved as your look, and running panes in the group
+    /// switch to it
+    Apply {
+        name: String,
+        /// Link group of the running panes (default: yours, else "default")
+        #[arg(long)]
+        group: Option<String>,
+    },
+    /// Save the look you have (or --from another theme) as a theme of
+    /// yours, to use, share or edit by hand
+    New {
+        name: String,
+        /// Start from this theme instead of your look
+        #[arg(long)]
+        from: Option<String>,
+    },
+    /// Print a theme's file, or with --code its share code
+    Export {
+        name: String,
+        #[arg(long)]
+        code: bool,
+    },
+    /// Add a theme from a share code, a .toml file, or - (stdin)
+    Import {
+        source: String,
+        /// Save it under this name instead
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Check a theme file (or share code) before sharing it
+    Check { file: String },
+    /// Delete one of your themes
+    Delete { name: String },
 }
 
 #[derive(Subcommand)]
@@ -296,6 +352,165 @@ fn switch_remote(scene: &str, group: Option<&str>, all: bool, args: &Args) -> st
     Ok(())
 }
 
+/// `--theme` and `--variant`, as (the variant to run, the theme to wear).
+/// `--theme` is this scene's variant of that name when there is one (what
+/// it has always meant), else a theme, else a variant other scenes have
+/// (for `--cycle`); `--variant` only ever names a variant. Exits on names
+/// that are none of these.
+fn resolve_theme_args<'a>(
+    args: &Args,
+    scene_name: &str,
+    themes: &'a termpaper::theme::Store,
+) -> (Option<String>, Option<&'a termpaper::theme::Entry>) {
+    let variants = scene::themes(scene_name);
+    let anywhere = |v: &str| scene::entries().any(|e| e.themes().contains(&v));
+    let describe = || {
+        if variants.is_empty() {
+            format!("{scene_name} has no variants")
+        } else {
+            format!("{scene_name}'s variants: {}", variants.join(", "))
+        }
+    };
+    let exit = |msg: String| -> ! {
+        eprintln!("termpaper: {msg}");
+        std::process::exit(2);
+    };
+    if let Some(v) = &args.variant {
+        if !variants.contains(&v.as_str()) && !anywhere(v) {
+            exit(format!("no variant '{v}' ({})", describe()));
+        }
+    }
+    let Some(t) = &args.theme else {
+        return (args.variant.clone(), None);
+    };
+    if args.variant.is_none() && variants.contains(&t.as_str()) {
+        return (Some(t.clone()), None);
+    }
+    if let Some(e) = themes.find(t) {
+        return (args.variant.clone(), Some(e));
+    }
+    if args.variant.is_none() && anywhere(t) {
+        return (Some(t.clone()), None);
+    }
+    exit(format!("'{t}' is not a theme (see `termpaper theme list`) or a variant ({})", describe()))
+}
+
+/// `termpaper theme …`
+fn theme_command(action: ThemeCmd, args: &Args) -> std::io::Result<()> {
+    use std::io::{IsTerminal, Read, Write};
+    use termpaper::theme::{Source, Store};
+    use termpaper::theme_cli;
+    let fail = |msg: String| -> ! {
+        eprintln!("termpaper: {msg}");
+        std::process::exit(2);
+    };
+    let color = std::io::stdout().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none()
+        && termpaper::term_caps::detect().truecolor;
+    let user_dir = termpaper::theme::user_dir();
+    let mut store = Store::load();
+    let stdin = || {
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s).map(|_| s)
+    };
+    let out = match action {
+        ThemeCmd::List { json: true } => format!("{}\n", theme_cli::list_json(&store)),
+        ThemeCmd::List { json: false } => {
+            let width = std::io::stdout()
+                .is_terminal()
+                .then(|| crossterm::terminal::size().ok().map(|(w, _)| w as usize))
+                .flatten();
+            theme_cli::list(&store, color, user_dir.as_deref(), width)
+        }
+        ThemeCmd::Show { name } => theme_cli::show(&store, &name, color).unwrap_or_else(|e| fail(e)),
+        ThemeCmd::Export { name, code } => theme_cli::export(&store, &name, code).unwrap_or_else(|e| fail(e)),
+        ThemeCmd::Check { file } => {
+            let text = if file == "-" {
+                stdin()?
+            } else {
+                std::fs::read_to_string(&file).unwrap_or_else(|e| fail(format!("{file}: {e}")))
+            };
+            match theme_cli::check(&text) {
+                Ok(report) => report,
+                Err(e) => {
+                    eprintln!("{file}: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        ThemeCmd::Import { source, name } => {
+            let dir = user_dir.clone().unwrap_or_else(|| fail("no config directory for your themes".into()));
+            let (theme, warnings) = theme_cli::parse_source(&source, stdin).unwrap_or_else(|e| fail(e));
+            theme_cli::import(&mut store, &dir, theme, &warnings, name.as_deref()).unwrap_or_else(|e| fail(e))
+        }
+        ThemeCmd::New { name, from } => {
+            let dir = user_dir.clone().unwrap_or_else(|| fail("no config directory for your themes".into()));
+            let cfg = config::load();
+            let (look, scene, description) = match &from {
+                Some(f) => {
+                    let e = store.find(f).unwrap_or_else(|| fail(format!("no theme called '{f}' (see `termpaper theme list`)")));
+                    (e.theme.look.clone(), e.theme.scene.clone(), format!("Started from {}.", e.theme.name))
+                }
+                None => {
+                    // the look you have, made for the scene you run
+                    let scene = cfg.scene.clone().unwrap_or_else(|| config::DEFAULT_SCENE.to_string());
+                    let variant = cfg.themes.get(&scene).cloned();
+                    let title = scene::lookup(&scene).map_or(scene.clone(), |e| e.title().to_string());
+                    (config::look_of(&cfg), Some(termpaper::theme::SceneHint { name: scene, variant }), format!("Made in termpaper on {title}."))
+                }
+            };
+            let slug = theme_cli::new_theme(&mut store, &dir, &name, &theme_author(), &description, look, scene)
+                .unwrap_or_else(|e| fail(e));
+            let path = dir.join(format!("{slug}.toml"));
+            format!(
+                "Saved “{name}” as {slug}: {}\nUse it:    termpaper --theme {slug}\nShare it:  termpaper theme export {slug} --code\nAfter editing the file by hand: termpaper theme check {}\n",
+                theme_cli::tidy_path(&path),
+                path.display()
+            )
+        }
+        ThemeCmd::Delete { name } => {
+            let e = store.find(&name).unwrap_or_else(|| fail(format!("no theme called '{name}'")));
+            if e.source != Source::User {
+                fail(format!("{} is built in; only your own themes can be deleted", e.theme.name));
+            }
+            let (slug, title) = (e.slug.clone(), e.theme.name.clone());
+            store.delete(&slug).unwrap_or_else(|e| fail(e.to_string()));
+            let mut cfg = config::load();
+            if cfg.look_theme.as_deref() == Some(slug.as_str()) {
+                // the look stays; it just no longer has a theme's name
+                cfg.look_theme = None;
+                config::save(&cfg)?;
+            }
+            format!("Deleted “{title}”\n")
+        }
+        ThemeCmd::Apply { name, group } => {
+            let e = store.find(&name).unwrap_or_else(|| fail(format!("no theme called '{name}' (see `termpaper theme list`)")));
+            let mut cfg = config::load();
+            config::set_look(&mut cfg, &e.theme.look, Some(&e.slug));
+            if let Some(dim) = e.theme.display.as_ref().and_then(|d| d.dim) {
+                cfg.dim = (config::round2(dim) != config::DEFAULT_DIM).then(|| config::round2(dim));
+            }
+            config::save(&cfg)?;
+            let group = group
+                .or_else(|| args.group.clone())
+                .or(cfg.group.clone())
+                .map(|g| link::sanitize_group(&g))
+                .unwrap_or_else(|| "default".into());
+            let live = link::list_instances_in_group(&group).len();
+            if live > 0 {
+                link::publish_remote_look(&group, &e.theme.look, Some(&e.slug))?;
+                let panes = if live == 1 { "1 running pane".to_string() } else { format!("{live} running panes") };
+                format!("{}: on {panes} in group {group}, and saved as your look\n", e.theme.name)
+            } else {
+                format!("{}: saved as your look (no panes running in group {group}; it shows next start)\n", e.theme.name)
+            }
+        }
+    };
+    // one write: piping into `head` shouldn't panic on SIGPIPE
+    let _ = std::io::stdout().write_all(out.as_bytes());
+    Ok(())
+}
+
 fn print_list(category: Option<&str>) {
     let only = category.map(|s| {
         scene::Category::parse(&s.to_lowercase()).unwrap_or_else(|| {
@@ -376,6 +591,9 @@ fn main() -> std::io::Result<()> {
             print_list(category.as_deref());
             return Ok(());
         }
+        Some(Command::Theme { action }) => {
+            return theme_command(action, &args);
+        }
         Some(Command::Desk) => {
             let cfg = config::load();
             let group = args.group.clone().or(cfg.group.clone()).map(|g| link::sanitize_group(&g))
@@ -446,14 +664,17 @@ fn main() -> std::io::Result<()> {
         .and_then(Pixels::parse)
         .unwrap_or_else(platform_default_pixels);
     let keymap = config::KeyMap::new(&cfg);
-    let theme = args
-        .theme
-        .clone()
+    let themes = termpaper::theme::Store::load();
+    let (variant_arg, cli_theme) = resolve_theme_args(&args, &scene_name, &themes);
+    let theme = variant_arg
         .or_else(|| cfg.themes.get(&scene_name).cloned())
         .or_else(|| cfg.theme.clone());
     let text_scale = args.text_scale.or(cfg.text_scale);
     // grade, palette and effects; `--filter` replaces the effect stack
-    let mut look = config::look_of(&cfg);
+    let (mut look, look_theme) = match cli_theme {
+        Some(e) => (e.theme.look.clone(), Some(e.slug.clone())),
+        None => (config::look_of(&cfg), cfg.look_theme.clone()),
+    };
     if !args.filter.is_empty() {
         look.effects.stack = args.filter.clone();
     }
@@ -517,6 +738,10 @@ fn main() -> std::io::Result<()> {
         detail,
         pixels,
         look: termpaper::look::Baked::new(look),
+        look_theme,
+        look_preview: None,
+        theme_rows: theme_rows(&themes),
+        themes,
         fps,
         idle_fps,
         speed,
@@ -536,7 +761,12 @@ fn main() -> std::io::Result<()> {
     // focus reporting lets unfocused instances skip the pacing spin (and
     // honor --idle-fps); terminals without support just never send events.
     // The mouse drives the menu: click, drag sliders, scroll.
-    let _ = crossterm::execute!(terminal.backend_mut(), event::EnableFocusChange, event::EnableMouseCapture);
+    let _ = crossterm::execute!(
+        terminal.backend_mut(),
+        event::EnableFocusChange,
+        event::EnableMouseCapture,
+        event::EnableBracketedPaste
+    );
     let result = run(&mut terminal, &scene_name, settings);
     let _ = crossterm::execute!(terminal.backend_mut(), event::DisableFocusChange);
     restore_terminal();
@@ -572,6 +802,7 @@ fn restore_terminal() {
     let _ = crossterm::execute!(
         std::io::stdout(),
         crossterm::event::DisableMouseCapture,
+        crossterm::event::DisableBracketedPaste,
         crossterm::terminal::LeaveAlternateScreen,
         crossterm::cursor::Show
     );
@@ -606,6 +837,13 @@ struct Settings {
     pixels: Pixels,
     /// grade, palette and effect stack, with its lookup table
     look: termpaper::look::Baked,
+    /// the theme the look came from (a slug), if any
+    look_theme: Option<String>,
+    /// while the Themes page previews a look: the real one, to go back to
+    look_preview: Option<(termpaper::look::Baked, Option<String>)>,
+    /// every theme (built in and yours), and the rows the menu shows
+    themes: termpaper::theme::Store,
+    theme_rows: std::sync::Arc<Vec<menu::themes::ThemeRow>>,
     fps: u32,
     /// fps cap applied while unfocused (None = no throttle)
     idle_fps: Option<u32>,
@@ -681,6 +919,8 @@ fn settings_msg(settings: &Settings, _opts: &SceneOptions, quick: &Option<String
         saturation: look.grade.saturation,
         contrast: look.grade.contrast,
         look: Some(look.clone()),
+        look_theme: settings.look_theme.clone(),
+        look_only: false,
     }
 }
 
@@ -691,6 +931,16 @@ fn apply_appearance(
     transition: &mut transition::Transition,
     quick_filter: &mut Option<String>,
 ) {
+    // `termpaper theme apply`: the look and nothing else
+    if m.look_only {
+        if let Some(l) = m.look {
+            settings.look.set(l);
+            settings.look_preview = None;
+            settings.look_theme = m.look_theme;
+        }
+        return;
+    }
+    let from_new_peer = m.look.is_some();
     let look = match m.look {
         Some(l) => l,
         // an older binary only speaks the basics: keep the rest of ours
@@ -704,6 +954,12 @@ fn apply_appearance(
         }
     };
     settings.look.set(look);
+    // a peer's own preview never travels, so this is a real change: any
+    // preview here is superseded
+    settings.look_preview = None;
+    if from_new_peer {
+        settings.look_theme = m.look_theme;
+    }
     settings.fps = m.fps.clamp(1, 240);
     settings.smooth = m.smooth;
     settings.dim = m.dim;
@@ -973,7 +1229,9 @@ fn persist(settings: &mut Settings, scene_name: &str, theme: Option<&str>, detai
         default_pixels: platform_default_pixels().name(),
         detail: detail.name(),
         default_detail: platform_default_detail().name(),
-        look: settings.look.get(),
+        // a preview is only on loan: the look it replaced is what counts
+        look: settings.look_preview.as_ref().map_or(settings.look.get(), |(o, _)| o.get()),
+        look_theme: settings.look_preview.as_ref().map_or(settings.look_theme.as_deref(), |(_, t)| t.as_deref()),
         text_scale: settings.text_scale,
         fps: settings.fps,
         default_fps: settings.default_fps,
@@ -1004,6 +1262,7 @@ const UNDO_BURST: Duration = Duration::from_millis(900);
 /// The settings a menu change can touch, for undo.
 struct Snapshot {
     look: termpaper::look::Look,
+    look_theme: Option<String>,
     dim: f32,
     smooth: f32,
     fade: f32,
@@ -1021,8 +1280,14 @@ struct Snapshot {
 
 impl Snapshot {
     fn take(s: &Settings, opts: &SceneOptions) -> Self {
+        // the real look, never a Themes-page preview
+        let (look, look_theme) = match &s.look_preview {
+            Some((orig, theme)) => (orig.get().clone(), theme.clone()),
+            None => (s.look.get().clone(), s.look_theme.clone()),
+        };
         Snapshot {
-            look: s.look.get().clone(),
+            look,
+            look_theme,
             dim: s.dim,
             smooth: s.smooth,
             fade: s.fade,
@@ -1042,7 +1307,9 @@ impl Snapshot {
     /// Put everything back. Sim settings (variant, detail, pixels, speed,
     /// text size) then reach the group through `sync_sim` like any edit.
     fn restore(self, s: &mut Settings, opts: &mut SceneOptions, transition: &mut transition::Transition) {
+        s.look_preview = None;
         s.look.set(self.look);
+        s.look_theme = self.look_theme;
         s.dim = self.dim;
         s.smooth = self.smooth;
         s.fade = self.fade;
@@ -1088,6 +1355,64 @@ fn remembered_scene<'a>(
     }
 }
 
+/// The Themes page's rows: the neutral theme, then yours, then the built-in
+/// categories. Swatches are worked out here once: a theme's palette, or
+/// reference colours run through its grade.
+fn theme_rows(store: &termpaper::theme::Store) -> std::sync::Arc<Vec<menu::themes::ThemeRow>> {
+    std::sync::Arc::new(menu::themes::rows(store))
+}
+
+/// Wear a theme: its look (and brightness hint) replaces this pane's,
+/// ending any preview. The caller publishes and saves. None when the theme
+/// is gone.
+fn apply_theme(slug: &str, settings: &mut Settings) -> Option<termpaper::theme::Theme> {
+    let t = settings.themes.get(slug)?.theme.clone();
+    settings.look_preview = None;
+    settings.look.set(t.look.clone());
+    settings.look_theme = Some(slug.to_string());
+    if let Some(dim) = t.display.as_ref().and_then(|d| d.dim) {
+        settings.dim = dim;
+    }
+    Some(t)
+}
+
+/// Who a theme made here is by: your login name, else "you".
+fn theme_author() -> String {
+    ["USER", "USERNAME", "LOGNAME"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+        .unwrap_or_else(|| "you".into())
+        .chars()
+        .take(termpaper::theme::MAX_AUTHOR)
+        .collect()
+}
+
+/// Copy text to the clipboard through the terminal (OSC 52): works in
+/// kitty, WezTerm, Ghostty, iTerm2, Windows Terminal, foot and over ssh.
+fn osc52_copy(text: &str) {
+    use std::io::Write;
+    let b64 = {
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let bytes = text.as_bytes();
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+            let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(T[((n >> (18 - 6 * i)) & 63) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    };
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]52;c;{b64}\x07");
+    let _ = out.flush();
+}
+
 /// Snapshot what the menu shows and adjusts. The status lines and instance
 /// list only matter for drawing; key handling passes empties.
 fn menu_ctx(
@@ -1124,6 +1449,12 @@ fn menu_ctx(
         favorites: settings.cfg.favorites.clone(),
         recents: settings.cfg.recents.clone(),
         scene_themes: settings.cfg.themes.clone(),
+        themes: settings.theme_rows.clone(),
+        active_theme: settings.look_theme.clone(),
+        theme_modified: settings.look_theme.as_deref().and_then(|t| settings.themes.get(t)).is_some_and(|e| {
+            let real = settings.look_preview.as_ref().map_or(settings.look.get(), |(o, _)| o.get());
+            e.theme.look != *real
+        }),
         key_display: config::ACTIONS
             .iter()
             .map(|&a| {
@@ -1182,6 +1513,8 @@ fn apply_defaults(
     settings.detail = platform_default_detail();
     settings.theme = None;
     settings.look.set(termpaper::look::Look::default());
+    settings.look_theme = None;
+    settings.look_preview = None;
     settings.text_scale = None;
     settings.fps = settings.default_fps;
     settings.speed = config::DEFAULT_SPEED;
@@ -1372,7 +1705,13 @@ fn run(
         // Sim settings (theme, detail, pixels, speed, text size) only need
         // setting: `sync_sim` publishes the difference as a synced switch.
         if menu.open {
-            pending_fx.extend(menu.tick(now));
+            let fx = if menu.page == menu::Page::Themes {
+                let ctx = menu_ctx(&settings, &opts, names[idx], String::new(), String::new(), Vec::new());
+                menu.tick_with(now, &ctx)
+            } else {
+                menu.tick(now)
+            };
+            pending_fx.extend(fx);
         }
         let mut effects: VecDeque<Effect> = std::mem::take(&mut pending_fx).into();
         while let Some(fx) = effects.pop_front() {
@@ -1577,6 +1916,14 @@ fn run(
                     save.mark(now);
                 }
                 Effect::SetLook(l) => {
+                    // an edit made over a preview keeps what it was made on
+                    settings.look_preview = None;
+                    // back to neutral (Reset look) leaves no theme in use,
+                    // unless the theme is the neutral one
+                    let theme_neutral = settings.look_theme.as_deref().and_then(|s| settings.themes.get(s)).map(|e| e.theme.look.is_neutral());
+                    if l.is_neutral() && theme_neutral == Some(false) {
+                        settings.look_theme = None;
+                    }
                     settings.look.set(l);
                     if let Some(g) = &mut guard {
                         g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
@@ -1604,6 +1951,170 @@ fn run(
                         None => menu.flash("Nothing to undo"),
                     }
                     undo_last = None;
+                }
+                Effect::ApplyTheme(slug) => match apply_theme(&slug, &mut settings) {
+                    Some(t) => {
+                        if let Some(g) = &mut guard {
+                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                        }
+                        save.mark(now);
+                        let hint = if t.scene.is_some() && menu.page == menu::Page::Themes { " · s: its scene" } else { "" };
+                        menu.flash(format!("Theme: {}{hint}", t.name));
+                    }
+                    None => menu.flash("That theme is gone"),
+                },
+                Effect::PreviewLook(l) => {
+                    if settings.look_preview.is_none() {
+                        settings.look_preview = Some((settings.look.clone(), settings.look_theme.clone()));
+                    }
+                    // this pane only: nothing is published or saved
+                    settings.look.set(l);
+                }
+                Effect::EndLookPreview => {
+                    if let Some((orig, theme)) = settings.look_preview.take() {
+                        settings.look = orig;
+                        settings.look_theme = theme;
+                    }
+                }
+                Effect::SaveTheme(name) => {
+                    let look = settings.look_preview.as_ref().map_or(settings.look.get(), |(o, _)| o.get()).clone();
+                    let scene_name = names[idx];
+                    let variant = opts.theme.clone();
+                    let t = termpaper::theme::Theme {
+                        name: name.clone(),
+                        author: theme_author(),
+                        description: format!("Made in termpaper on {}.", scene::lookup(scene_name).map_or(scene_name, |e| e.title())),
+                        tags: vec!["custom".into()],
+                        look,
+                        scene: Some(termpaper::theme::SceneHint { name: scene_name.to_string(), variant }),
+                        ..Default::default()
+                    };
+                    match settings.themes.save_new(&t) {
+                        Ok(slug) => {
+                            settings.theme_rows = theme_rows(&settings.themes);
+                            menu.focus_theme(&slug, &settings.theme_rows);
+                            settings.look_theme = Some(slug);
+                            save.mark(now);
+                            menu.flash(format!("Saved “{name}” · c copies its share code"));
+                        }
+                        Err(e) => menu.flash(format!("Could not save: {e}")),
+                    }
+                }
+                Effect::UpdateTheme(slug) => {
+                    let Some(mut t) = settings.themes.get(&slug).map(|e| e.theme.clone()) else {
+                        continue;
+                    };
+                    t.look = settings.look_preview.as_ref().map_or(settings.look.get(), |(o, _)| o.get()).clone();
+                    match settings.themes.update(&slug, &t) {
+                        Ok(()) => {
+                            settings.look_theme = Some(slug);
+                            settings.theme_rows = theme_rows(&settings.themes);
+                            save.mark(now);
+                            menu.flash(format!("Updated “{}”", t.name));
+                        }
+                        Err(e) => menu.flash(format!("Could not update: {e}")),
+                    }
+                }
+                Effect::RenameTheme { slug, name } => match settings.themes.rename(&slug, &name) {
+                    Ok(new) => {
+                        settings.theme_rows = theme_rows(&settings.themes);
+                        menu.focus_theme(&new, &settings.theme_rows);
+                        if settings.look_theme.as_deref() == Some(slug.as_str()) {
+                            settings.look_theme = Some(new);
+                            save.mark(now);
+                        }
+                        menu.flash(format!("Renamed to “{name}”"));
+                    }
+                    Err(e) => menu.flash(format!("Could not rename: {e}")),
+                },
+                Effect::DeleteTheme(slug) => match settings.themes.delete(&slug) {
+                    Ok(()) => {
+                        if settings.look_theme.as_deref() == Some(slug.as_str()) {
+                            settings.look_theme = None;
+                            save.mark(now);
+                        }
+                        settings.theme_rows = theme_rows(&settings.themes);
+                        menu.flash("Deleted");
+                    }
+                    Err(e) => menu.flash(format!("Could not delete: {e}")),
+                },
+                Effect::ShareTheme(slug) => {
+                    let Some(e) = settings.themes.get(&slug) else {
+                        continue;
+                    };
+                    let mut t = e.theme.clone();
+                    // the theme in use, edited: share what is on screen
+                    let real = settings.look_preview.as_ref().map_or(settings.look.get(), |(o, _)| o.get());
+                    if settings.look_theme.as_deref() == Some(slug.as_str()) && t.look != *real {
+                        t.look = real.clone();
+                        t.name = format!("{} (edited)", t.name).chars().take(termpaper::theme::MAX_NAME).collect();
+                    }
+                    let code = t.to_code();
+                    osc52_copy(&code);
+                    let saved = termpaper::platform::state_dir().and_then(|d| {
+                        std::fs::create_dir_all(&d).ok()?;
+                        let p = d.join("share-code.txt");
+                        std::fs::write(&p, format!("{code}\n")).ok()?;
+                        Some(p)
+                    });
+                    match saved {
+                        Some(p) => menu.flash(format!(
+                            "Share code copied ({} chars) · also in {}",
+                            code.len(),
+                            termpaper::theme_cli::tidy_path(&p)
+                        )),
+                        None => menu.flash(format!("Share code copied ({} chars)", code.len())),
+                    }
+                }
+                Effect::ImportTheme(text) => {
+                    let parsed = if text.trim_start().starts_with("tp1:") {
+                        termpaper::theme::Theme::from_code(&text)
+                    } else {
+                        let path = std::path::PathBuf::from(text.trim().trim_matches('"'));
+                        std::fs::read_to_string(&path)
+                            .map_err(|e| format!("{}: {e}", path.display()))
+                            .and_then(|t| termpaper::theme::Theme::from_toml(&t))
+                    };
+                    match parsed {
+                        Ok((theme, warnings)) => match settings.themes.save_new(&theme) {
+                            Ok(slug) => {
+                                settings.theme_rows = theme_rows(&settings.themes);
+                                menu.focus_theme(&slug, &settings.theme_rows);
+                                // wearing it is one undo step, like applying
+                                undo.push(Snapshot::take(&settings, &opts));
+                                if undo.len() > UNDO_DEPTH {
+                                    undo.remove(0);
+                                }
+                                undo_last = None;
+                                apply_theme(&slug, &mut settings);
+                                if let Some(g) = &mut guard {
+                                    g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                                }
+                                save.mark(now);
+                                let extra = if warnings.is_empty() { String::new() } else { format!(" ({} fixed up)", warnings.len()) };
+                                let hint = if theme.scene.is_some() { " · s: its scene" } else { "" };
+                                menu.flash(format!("Imported “{}”{extra}{hint}", theme.name));
+                            }
+                            Err(e) => menu.flash(format!("Could not save it: {e}")),
+                        },
+                        Err(e) => menu.flash(e),
+                    }
+                }
+                Effect::SceneFromTheme(slug) => {
+                    let hint = settings.themes.get(&slug).and_then(|e| e.theme.scene.clone());
+                    let Some(hint) = hint else {
+                        continue;
+                    };
+                    let Some(i) = names.iter().position(|n| *n == hint.name) else {
+                        continue;
+                    };
+                    if let Some(v) = &hint.variant {
+                        settings.cfg.themes.insert(hint.name.clone(), v.clone());
+                    }
+                    menu::browser::push_recent(&mut settings.cfg.recents, names[i]);
+                    switch_scene(i, &mut st, &mut guard, &mut transition, &names, &settings, &mut opts);
+                    last_switch = now;
+                    save.mark(now);
                 }
                 // placeholder until the alignment tool lands
                 Effect::OpenCalibration => {
@@ -2156,6 +2667,13 @@ fn run(
                         focused = false;
                         continue;
                     }
+                    Event::Paste(text) => {
+                        if menu.open && menu.typing() {
+                            menu.paste(&text);
+                            break;
+                        }
+                        continue;
+                    }
                     Event::Mouse(mouse) => {
                         let Some(input) = menu::Input::from_mouse(mouse) else {
                             continue;
@@ -2423,6 +2941,40 @@ mod cli_tests {
             Some(Command::Switch { all: true, .. })
         ));
         assert!(Args::try_parse_from(["termpaper", "switch", "fire", "--all", "--group", "x"]).is_err());
+        match parse(&["theme", "apply", "nord", "--group", "art"]).command {
+            Some(Command::Theme { action: ThemeCmd::Apply { name, group } }) => {
+                assert_eq!((name.as_str(), group.as_deref()), ("nord", Some("art")));
+            }
+            _ => panic!("expected theme apply"),
+        }
+        assert!(matches!(
+            parse(&["theme", "list", "--json"]).command,
+            Some(Command::Theme { action: ThemeCmd::List { json: true } })
+        ));
+        assert!(matches!(
+            parse(&["theme", "import", "-", "--name", "x"]).command,
+            Some(Command::Theme { action: ThemeCmd::Import { .. } })
+        ));
+    }
+
+    #[test]
+    fn theme_means_this_scenes_variant_first_then_a_theme() {
+        let store = termpaper::theme::Store::load_from(None);
+        // hongkong has a "night" variant: --theme night keeps meaning it
+        let (v, t) = resolve_theme_args(&parse(&["hongkong", "--theme", "night"]), "hongkong", &store);
+        assert_eq!((v.as_deref(), t.is_none()), (Some("night"), true));
+        // a theme by slug or by name
+        let (v, t) = resolve_theme_args(&parse(&["--theme", "nord"]), "hongkong", &store);
+        assert_eq!((v, t.map(|e| e.slug.as_str())), (None, Some("nord")));
+        let (_, t) = resolve_theme_args(&parse(&["--theme", "Teal & Orange"]), "hongkong", &store);
+        assert_eq!(t.map(|e| e.slug.as_str()), Some("teal-and-orange"));
+        // both: the variant and the theme
+        let (v, t) = resolve_theme_args(&parse(&["--variant", "night", "--theme", "nord"]), "hongkong", &store);
+        assert_eq!((v.as_deref(), t.map(|e| e.slug.as_str())), (Some("night"), Some("nord")));
+        // a variant only other scenes have still passes (for --cycle)
+        let other = scene::entries().find_map(|e| e.themes().iter().find(|v| !scene::themes("rain").contains(v) && store.find(v).is_none()).copied()).unwrap();
+        let (v, t) = resolve_theme_args(&parse(&["--theme", other]), "rain", &store);
+        assert_eq!((v.as_deref(), t.is_none()), (Some(other), true));
     }
 
     #[test]

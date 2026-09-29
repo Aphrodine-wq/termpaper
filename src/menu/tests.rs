@@ -29,8 +29,26 @@ fn ctx() -> MenuCtx {
         truecolor: true,
         key_display: vec![("quit".into(), "q".into()), ("next".into(), "right".into())],
         instances: vec!["pid 1234     rain         up 5s (you)".into()],
+        themes: std::sync::Arc::new(themes::rows(&crate::theme::Store::load_from(None))),
         ..Default::default()
     }
+}
+
+/// `ctx()` with one theme of your own ("Mine", made on bigsur) in the list.
+fn with_yours(c: &MenuCtx) -> MenuCtx {
+    let mut rows = (*c.themes).clone();
+    let mut mine = rows[1].clone();
+    mine.slug = "mine".into();
+    mine.name = "Mine".into();
+    mine.shelf = "Yours";
+    mine.yours = true;
+    mine.scene = Some(("bigsur".into(), None));
+    rows.insert(1, mine);
+    MenuCtx { themes: std::sync::Arc::new(rows), ..c.clone() }
+}
+
+fn theme_at(c: &MenuCtx, row: usize) -> &themes::ThemeRow {
+    &c.themes[row]
 }
 
 fn opened(c: &MenuCtx) -> Menu {
@@ -365,9 +383,9 @@ fn returning_to_the_origin_or_leaving_the_page_ends_the_preview() {
     assert!(m.previewing().is_some());
     let fx = keys(&mut m, &c, &[Input::Tab]);
     assert_eq!(fx, vec![Effect::EndPreview]);
-    assert_eq!(m.page, Page::Look);
+    assert_eq!(m.page, Page::Themes);
     assert!(m.open);
-    // nothing previews from a settings page
+    // no scene previews from another page
     assert!(m.tick(later()).is_empty());
 }
 
@@ -385,6 +403,230 @@ fn enter_on_the_running_scene_just_closes() {
     let mut m = opened(&c);
     assert!(keys(&mut m, &c, &[Input::Enter]).is_empty());
     assert!(!m.open);
+}
+
+// ── themes page ─────────────────────────────────────────────────────────
+
+fn on_themes(c: &MenuCtx) -> Menu {
+    let mut m = opened(c);
+    m.goto(Page::Themes);
+    m
+}
+
+#[test]
+fn resting_on_a_theme_previews_it_and_enter_applies() {
+    let c = ctx();
+    let mut m = on_themes(&c);
+    // nothing until the highlight has rested
+    keys(&mut m, &c, &[Input::Down]);
+    assert!(m.tick_with(Instant::now(), &c).is_empty());
+    assert_eq!(m.tick_with(later(), &c), vec![Effect::PreviewLook(theme_at(&c, 1).look.clone())]);
+    assert!(m.look_previewing());
+    // once is enough
+    assert!(m.tick_with(later(), &c).is_empty());
+    assert_eq!(keys(&mut m, &c, &[Input::Enter]), vec![Effect::ApplyTheme(theme_at(&c, 1).slug.clone())]);
+    assert!(!m.look_previewing(), "the preview became the real thing");
+    assert!(m.open, "the list stays open for another go");
+}
+
+#[test]
+fn leaving_the_page_or_closing_ends_the_preview() {
+    let c = ctx();
+    let mut m = on_themes(&c);
+    keys(&mut m, &c, &[Input::Down]);
+    m.tick_with(later(), &c);
+    assert_eq!(keys(&mut m, &c, &[Input::Tab]), vec![Effect::EndLookPreview]);
+    assert_eq!(m.page, Page::Look);
+
+    let mut m = on_themes(&c);
+    keys(&mut m, &c, &[Input::Down]);
+    m.tick_with(later(), &c);
+    assert_eq!(keys(&mut m, &c, &[Input::Esc]), vec![Effect::EndLookPreview]);
+    assert!(!m.open);
+    // no preview, nothing to end
+    let mut m = on_themes(&c);
+    assert!(keys(&mut m, &c, &[Input::Esc]).is_empty());
+}
+
+#[test]
+fn the_list_opens_on_the_theme_in_use_which_shows_your_look() {
+    let active = ctx().themes[3].slug.clone();
+    let c = MenuCtx { active_theme: Some(active.clone()), theme_modified: true, ..ctx() };
+    let mut m = on_themes(&c);
+    assert_eq!(m.highlighted_theme(&c).unwrap().slug, active);
+    keys(&mut m, &c, &[Input::Down]);
+    assert!(matches!(m.tick_with(later(), &c)[..], [Effect::PreviewLook(_)]));
+    // back on the theme in use: your look (edits and all), not its file
+    keys(&mut m, &c, &[Input::Up]);
+    assert_eq!(m.tick_with(later(), &c), vec![Effect::EndLookPreview]);
+}
+
+#[test]
+fn theme_search_filters_and_enter_applies() {
+    let c = ctx();
+    let mut m = on_themes(&c);
+    keys(&mut m, &c, &[Input::Char('/')]);
+    assert!(m.typing());
+    type_text(&mut m, &c, "gruv");
+    assert_eq!(m.highlighted_theme(&c).unwrap().slug, "gruvbox");
+    // keys that mean something elsewhere are text while searching
+    assert!(type_text(&mut m, &c, "x").is_empty());
+    keys(&mut m, &c, &[Input::Backspace]);
+    assert_eq!(keys(&mut m, &c, &[Input::Enter]), vec![Effect::ApplyTheme("gruvbox".into())]);
+    assert!(!m.typing());
+    // the whole list again, still on it
+    assert!(m.theme_query.is_empty());
+    assert_eq!(m.highlighted_theme(&c).unwrap().slug, "gruvbox");
+    // a paste lands in the search
+    keys(&mut m, &c, &[Input::Char('/')]);
+    m.paste("tokyo\n");
+    assert_eq!(m.highlighted_theme(&c).unwrap().slug, "tokyo-night");
+}
+
+#[test]
+fn new_theme_names_the_look_you_have() {
+    let c = ctx();
+    let mut m = on_themes(&c);
+    keys(&mut m, &c, &[Input::Down]);
+    m.tick_with(later(), &c);
+    // n puts your look back on screen while you name it
+    assert_eq!(keys(&mut m, &c, &[Input::Char('n')]), vec![Effect::EndLookPreview]);
+    assert!(m.typing());
+    type_text(&mut m, &c, "Late night");
+    keys(&mut m, &c, &[Input::Backspace]);
+    assert_eq!(keys(&mut m, &c, &[Input::Enter]), vec![Effect::SaveTheme("Late nigh".into())]);
+    // an empty name or Esc saves nothing
+    keys(&mut m, &c, &[Input::Char('n')]);
+    type_text(&mut m, &c, "   ");
+    assert!(keys(&mut m, &c, &[Input::Enter]).is_empty());
+    keys(&mut m, &c, &[Input::Char('n')]);
+    type_text(&mut m, &c, "abc");
+    assert!(keys(&mut m, &c, &[Input::Esc]).is_empty());
+    assert!(m.open && m.prompt.is_none());
+}
+
+#[test]
+fn import_takes_a_pasted_code() {
+    let c = ctx();
+    let mut m = on_themes(&c);
+    keys(&mut m, &c, &[Input::Char('i')]);
+    m.paste("tp1:abc\r\n");
+    assert_eq!(keys(&mut m, &c, &[Input::Enter]), vec![Effect::ImportTheme("tp1:abc".into())]);
+    // share codes are long: the prompt takes all of one
+    keys(&mut m, &c, &[Input::Char('i')]);
+    let code = format!("tp1:{}", "A".repeat(900));
+    m.paste(&code);
+    assert_eq!(keys(&mut m, &c, &[Input::Enter]), vec![Effect::ImportTheme(code)]);
+}
+
+#[test]
+fn your_themes_rename_and_delete_but_built_ins_do_not() {
+    let c = with_yours(&ctx());
+    let mut m = on_themes(&c);
+    keys(&mut m, &c, &[Input::Down]);
+    assert_eq!(m.highlighted_theme(&c).unwrap().slug, "mine");
+    // rename starts from the old name
+    keys(&mut m, &c, &[Input::Char('r')]);
+    assert_eq!(m.prompt.as_ref().unwrap().text, "Mine");
+    type_text(&mut m, &c, " too");
+    assert_eq!(
+        keys(&mut m, &c, &[Input::Enter]),
+        vec![Effect::RenameTheme { slug: "mine".into(), name: "Mine too".into() }]
+    );
+    // delete asks first
+    keys(&mut m, &c, &[Input::Char('x')]);
+    type_text(&mut m, &c, "n");
+    assert!(keys(&mut m, &c, &[Input::Enter]).is_empty());
+    keys(&mut m, &c, &[Input::Char('x')]);
+    type_text(&mut m, &c, "y");
+    assert_eq!(keys(&mut m, &c, &[Input::Enter]), vec![Effect::DeleteTheme("mine".into())]);
+    // built-ins: a notice, no prompt
+    keys(&mut m, &c, &[Input::Home]);
+    for k in ['r', 'x', 'U'] {
+        assert!(keys(&mut m, &c, &[Input::Char(k)]).is_empty());
+        assert!(m.prompt.is_none(), "{k}");
+        assert!(m.flash_text(Instant::now()).is_some(), "{k} explains itself");
+    }
+}
+
+#[test]
+fn update_saves_edits_into_your_theme_in_use_only() {
+    let base = with_yours(&ctx());
+    let mut m = on_themes(&base);
+    keys(&mut m, &base, &[Input::Down]);
+    // not in use
+    assert!(keys(&mut m, &base, &[Input::Char('U')]).is_empty());
+    // in use, unchanged
+    let c = MenuCtx { active_theme: Some("mine".into()), ..base.clone() };
+    assert!(keys(&mut m, &c, &[Input::Char('U')]).is_empty());
+    assert_eq!(m.flash_text(Instant::now()), Some("No changes to save"));
+    // in use and edited
+    let c = MenuCtx { theme_modified: true, ..c };
+    assert_eq!(keys(&mut m, &c, &[Input::Char('U')]), vec![Effect::UpdateTheme("mine".into())]);
+}
+
+#[test]
+fn scene_edit_and_share_keys() {
+    let c = with_yours(&ctx());
+    let mut m = on_themes(&c);
+    // Clean has no scene: s does nothing
+    assert!(keys(&mut m, &c, &[Input::Char('s')]).is_empty());
+    keys(&mut m, &c, &[Input::Down]);
+    assert_eq!(keys(&mut m, &c, &[Input::Char('s')]), vec![Effect::SceneFromTheme("mine".into())]);
+    assert_eq!(keys(&mut m, &c, &[Input::Char('c')]), vec![Effect::ShareTheme("mine".into())]);
+    // e applies it (when it is not already in use) and opens the studio
+    assert_eq!(
+        keys(&mut m, &c, &[Input::Char('e')]),
+        vec![Effect::ApplyTheme("mine".into()), Effect::OpenColorGrade]
+    );
+    let c = MenuCtx { active_theme: Some("mine".into()), ..c };
+    assert_eq!(keys(&mut m, &c, &[Input::Char('e')]), vec![Effect::OpenColorGrade]);
+    assert_eq!(keys(&mut m, &c, &[Input::Char('u')]), vec![Effect::Undo]);
+}
+
+#[test]
+fn the_highlight_follows_a_theme_the_list_gained() {
+    let c = ctx();
+    let mut m = on_themes(&c);
+    keys(&mut m, &c, &[Input::Down, Input::Down]);
+    let was = m.highlighted_theme(&c).unwrap().slug.clone();
+    // one of yours is saved: it lands near the top, above the highlight
+    let grown = with_yours(&c);
+    m.focus_theme("mine", &grown.themes);
+    assert_eq!(m.highlighted_theme(&grown).unwrap().slug, "mine");
+    m.focus_theme(&was, &grown.themes);
+    assert_eq!(m.highlighted_theme(&grown).unwrap().slug, was);
+    // a search that would hide it is dropped
+    keys(&mut m, &grown, &[Input::Char('/')]);
+    type_text(&mut m, &grown, "nord");
+    m.focus_theme("mine", &grown.themes);
+    assert!(m.theme_query.is_empty() && !m.typing());
+    assert_eq!(m.highlighted_theme(&grown).unwrap().slug, "mine");
+}
+
+#[test]
+fn notices_show_in_the_footer_on_the_themes_page() {
+    let c = ctx();
+    let mut m = on_themes(&c);
+    keys(&mut m, &c, &[Input::Char('x')]);
+    let s = screen(100, 30, &m, &c);
+    assert!(s.contains("Built-in themes cannot be deleted"), "{s}");
+}
+
+#[test]
+fn theme_keys_in_the_footer_match_the_row() {
+    let c = with_yours(&ctx());
+    let mut m = on_themes(&c);
+    let hints = |m: &Menu, c: &MenuCtx| view::key_hints(m, c).into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+    let built_in = hints(&m, &c);
+    assert!(!built_in.contains(&"r") && !built_in.contains(&"U") && !built_in.contains(&"s"));
+    keys(&mut m, &c, &[Input::Down]);
+    let yours = hints(&m, &c);
+    assert!(yours.contains(&"r") && yours.contains(&"x") && yours.contains(&"s"));
+    assert!(!yours.contains(&"U"), "nothing to save");
+    let edited = MenuCtx { active_theme: Some("mine".into()), theme_modified: true, ..c.clone() };
+    assert!(hints(&m, &edited).contains(&"U"));
+    assert!(view::key_hints(&m, &edited).contains(&("Enter", "revert")));
 }
 
 // ── settings pages ──────────────────────────────────────────────────────
@@ -406,6 +648,7 @@ fn mid() -> MenuCtx {
         cycle_scope: CycleScope::Category,
         renderer: Renderer::Gpu,
         link_group: "wallpaper".into(),
+        active_theme: Some("nord".into()),
         // every look slider mid-range, so it can move both ways
         look: {
             let mut l = crate::look::Look::default();
@@ -581,12 +824,26 @@ fn ordered_values_clamp_and_choices_wrap() {
 fn settings_navigation_and_actions() {
     let c = mid();
     let mut m = opened(&c);
-    keys(&mut m, &c, &[Input::Tab]);
+    keys(&mut m, &c, &[Input::Tab, Input::Tab]);
     assert_eq!(m.page, Page::Look);
     // ↑ from the first row wraps within the page instead of leaving it
     keys(&mut m, &c, &[Input::Up]);
     assert_eq!(m.row(), settings::LOOK.len() - 1);
     keys(&mut m, &c, &[Input::Home]);
+    assert_eq!(settings::LOOK[m.row()].id, SettingId::Theme);
+    // the Theme row steps through the Themes page's list
+    let nord = c.themes.iter().position(|t| t.slug == "nord").unwrap();
+    assert_eq!(
+        keys(&mut m, &c, &[Input::Right]),
+        vec![Effect::ApplyTheme(c.themes[nord + 1].slug.clone())]
+    );
+    assert_eq!(settings::value(SettingId::Theme, &c), "Nord");
+    assert_eq!(
+        settings::value(SettingId::Theme, &MenuCtx { theme_modified: true, ..mid() }),
+        "Nord · edited"
+    );
+    assert_eq!(settings::value(SettingId::Theme, &MenuCtx { active_theme: None, ..mid() }), "none");
+    keys(&mut m, &c, &[Input::Down]);
     assert_eq!(settings::LOOK[m.row()].id, SettingId::Variant);
     assert_eq!(
         keys(&mut m, &c, &[Input::Right]),
@@ -618,7 +875,7 @@ fn settings_navigation_and_actions() {
     keys(&mut m, &c, &[Input::Esc]);
     assert!(!m.filters_open && m.open);
     // Shift-Tab wraps round to the last page; Wall's Align emits its placeholder
-    keys(&mut m, &c, &[Input::BackTab, Input::BackTab]);
+    keys(&mut m, &c, &[Input::BackTab, Input::BackTab, Input::BackTab]);
     assert_eq!(m.page, Page::Wall);
     keys(
         &mut m,
@@ -858,6 +1115,16 @@ fn states(c: &MenuCtx) -> Vec<(&'static str, Menu)> {
     keys(&mut m, c, &[Input::Enter]);
     v.push(("filters", m));
     let mut m = opened(c);
+    m.goto(Page::Themes);
+    keys(&mut m, c, &[Input::Char('/')]);
+    type_text(&mut m, c, "nord");
+    v.push(("theme search", m));
+    let mut m = opened(c);
+    m.goto(Page::Themes);
+    keys(&mut m, c, &[Input::Char('n')]);
+    type_text(&mut m, c, "Late night");
+    v.push(("theme prompt", m));
+    let mut m = opened(c);
     keys(&mut m, c, &[Input::Char('?')]);
     v.push(("help", m));
     let mut m = opened(c);
@@ -882,11 +1149,14 @@ fn layout_degrades_sanely() {
             );
             let key_text = match name {
                 "Scenes" => "rain", // Classic scenes are titled by name
+                "Themes" => "Clean",
                 "Look" => "Variant",
                 "Playback" => "Speed",
                 "Display" => "Quality",
                 "Wall" => "Link",
                 "search" => "/ ocean",
+                "theme search" => "Nord",
+                "theme prompt" => "Late night",
                 "filters" => "Preset",
                 "help" => "help",
                 _ => "Favorites",

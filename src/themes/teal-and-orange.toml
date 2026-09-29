@@ -1,0 +1,19 @@
+format = 1
+name = "Teal & Orange"
+author = "termpaper"
+description = "The blockbuster grade: teal shadows, warm skin and highlights, a little punch."
+tags = ["cinematic", "warm", "cool"]
+
+[grade]
+contrast = 1.12
+vibrance = 0.2
+shadows = { hue = 190.0, amount = 0.55 }
+highlights = { hue = 30.0, amount = 0.45 }
+
+[effects]
+stack = ["vignette"]
+vignette = 0.5
+
+[scene]
+name = "hongkong"
+variant = "night"

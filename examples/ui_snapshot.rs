@@ -9,7 +9,8 @@
 //! paints the cell buffer: text with a real monospace font (`TERMPAPER_FONT`,
 //! else JetBrains Mono / DejaVu / Liberation from the usual places), block
 //! elements, box drawing and braille geometrically, the way terminals draw
-//! them. Writes `OUT_DIR/<state>.png` (default `target/ui_snapshot`).
+//! them. Writes `OUT_DIR/<state>.png` (default `target/ui_snapshot`), plus
+//! `themes_<scene>.png`: every built-in theme over the same frame.
 use rand::{rngs::StdRng, SeedableRng};
 use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, style::Modifier, Terminal};
 use std::collections::HashMap;
@@ -290,8 +291,44 @@ fn ctx() -> MenuCtx {
             .map(|a| (a.to_string(), termpaper::config::default_key(a).to_string()))
             .collect(),
         instances: vec!["pid 4242     koi          up 312s (you)".into()],
+        themes: std::sync::Arc::new(menu::themes::rows(&termpaper::theme::Store::load_from(None))),
+        active_theme: Some("teal-and-orange".into()),
+        theme_modified: true,
         ..Default::default()
     }
+}
+
+/// A Classic scene after a few seconds, on a canvas of `cols`×`rows` cells.
+fn frame(name: &str, cols: u16, rows: u16) -> Canvas {
+    let opts = SceneOptions { theme: None, detail: Detail::Medium, text_scale: None, pixels: Pixels::Half };
+    let mut s = scene::create(name, &opts, StdRng::seed_from_u64(3)).unwrap();
+    let mut canvas = Canvas::new(cols as usize, rows as usize * 2);
+    for _ in 0..240 {
+        s.update(1.0 / 60.0, &mut canvas);
+    }
+    canvas
+}
+
+/// Every built-in theme over one frame of `scene`, six to a row, named.
+fn theme_sheet(scene: &str) -> Buffer {
+    use ratatui::layout::Rect;
+    const TW: u16 = 40;
+    const TH: u16 = 11;
+    const PER_ROW: u16 = 6;
+    let store = termpaper::theme::Store::load_from(None);
+    let base = frame(scene, TW, TH - 1);
+    let n = store.entries.len() as u16;
+    let area = Rect::new(0, 0, TW * PER_ROW, TH * n.div_ceil(PER_ROW));
+    let mut buf = Buffer::empty(area);
+    for (i, e) in store.entries.iter().enumerate() {
+        let (x, y) = ((i as u16 % PER_ROW) * TW, (i as u16 / PER_ROW) * TH);
+        let mut cv = base.clone();
+        termpaper::engine::finish_look(&mut cv, &termpaper::look::Baked::new(e.theme.look.clone()), 4.0);
+        render::draw(&cv, Rect::new(x, y, TW, TH - 1), &mut buf, true, Pixels::Half);
+        let label: String = format!(" {}", e.theme.name).chars().take(TW as usize - 1).collect();
+        buf.set_string(x, y + TH - 1, label, ratatui::style::Style::new().fg(Color::Rgb(220, 220, 220)));
+    }
+    buf
 }
 
 fn main() {
@@ -326,18 +363,47 @@ fn main() {
 
     let c = ctx();
     let mut states: Vec<(String, Menu)> = Vec::new();
+    let mut looks: HashMap<String, termpaper::look::Look> = HashMap::new();
+    let later = std::time::Instant::now() + std::time::Duration::from_secs(5);
     for page in Page::ALL {
         let mut m = Menu::new();
         m.open(&c);
         m.goto(page);
         if page == Page::Look {
             // focus a slider so its bar shows as active
-            for _ in 0..2 {
+            for _ in 0..3 {
                 m.handle(Input::Down, &c);
+            }
+        }
+        if page == Page::Themes {
+            // resting on another theme: its preview behind the drawer
+            for _ in 0..3 {
+                m.handle(Input::Down, &c);
+            }
+            for fx in m.tick_with(later, &c) {
+                if let menu::Effect::PreviewLook(l) = fx {
+                    looks.insert("page_themes".into(), l);
+                }
             }
         }
         states.push((format!("page_{}", page.title().to_lowercase()), m));
     }
+    let mut m = Menu::new();
+    m.open(&c);
+    m.goto(Page::Themes);
+    m.handle(Input::Char('/'), &c);
+    for ch in "night".chars() {
+        m.handle(Input::Char(ch), &c);
+    }
+    states.push(("theme_search".into(), m));
+    let mut m = Menu::new();
+    m.open(&c);
+    m.goto(Page::Themes);
+    m.handle(Input::Char('n'), &c);
+    for ch in "Late koi".chars() {
+        m.handle(Input::Char(ch), &c);
+    }
+    states.push(("theme_prompt".into(), m));
     let mut m = Menu::new();
     m.open(&c);
     m.goto(Page::Look);
@@ -402,9 +468,14 @@ fn main() {
     }
 
     for (name, m) in &states {
+        // the scene as the host shows it: through the look in use, or the
+        // one being previewed
+        let mut shown = canvas.clone();
+        let look = looks.get(name).unwrap_or(&c.look);
+        termpaper::engine::finish_look(&mut shown, &termpaper::look::Baked::new(look.clone()), 4.0);
         let mut term = Terminal::new(TestBackend::new(cols, rows)).unwrap();
         term.draw(|f| {
-            render::draw(&canvas, f.area(), f.buffer_mut(), true, Pixels::Half);
+            render::draw(&shown, f.area(), f.buffer_mut(), true, Pixels::Half);
             menu::view::render(f, f.area(), m, &c);
         })
         .unwrap();
@@ -419,6 +490,24 @@ fn main() {
         };
         p.paint(term.backend().buffer());
         let path = out.join(format!("{name}.png"));
+        p.save(&path);
+        println!("{}", path.display());
+    }
+
+    for scene in ["koi", "city", "clouds"] {
+        let buf = theme_sheet(scene);
+        let (w, h) = (buf.area.width as usize, buf.area.height as usize);
+        let mut p = Painter {
+            w: w * CW,
+            h: h * CH,
+            px: vec![(0, 0, 0); w * CW * h * CH],
+            regular: regular.clone(),
+            bold: bold.clone(),
+            fallback: fallback.clone(),
+            cache: HashMap::new(),
+        };
+        p.paint(&buf);
+        let path = out.join(format!("themes_{scene}.png"));
         p.save(&path);
         println!("{}", path.display());
     }

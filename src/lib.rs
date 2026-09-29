@@ -22,6 +22,8 @@ pub mod scene;
 pub mod studio;
 pub mod sync;
 pub mod term_caps;
+pub mod theme;
+pub mod theme_cli;
 pub mod transition;
 pub mod wallplan;
 pub mod wall;

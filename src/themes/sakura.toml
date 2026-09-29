@@ -1,0 +1,19 @@
+format = 1
+name = "Sakura"
+author = "termpaper"
+description = "Cherry-blossom pink: soft rosy highlights, gentle and light."
+tags = ["mood", "pink", "light"]
+
+[grade]
+saturation = 0.9
+tint = 0.2
+fade = 0.06
+highlights = { hue = 330.0, amount = 0.35 }
+
+[effects]
+stack = ["bloom"]
+bloom = 0.5
+
+[scene]
+name = "bamboo"
+variant = "day"

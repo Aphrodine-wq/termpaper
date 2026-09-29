@@ -1,0 +1,20 @@
+format = 1
+name = "Faded Film"
+author = "termpaper"
+description = "An old print: lifted blacks, softer colour, a warm cast and grain."
+tags = ["cinematic", "vintage"]
+
+[grade]
+saturation = 0.8
+contrast = 0.9
+temperature = 0.1
+fade = 0.14
+shadows = { hue = 200.0, amount = 0.2 }
+
+[effects]
+stack = ["grain"]
+grain = 0.6
+
+[scene]
+name = "paris"
+variant = "autumn"

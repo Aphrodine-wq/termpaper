@@ -18,6 +18,7 @@ use crate::scene::{self, Detail};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingId {
     // Look
+    Theme,
     Variant,
     ColorGrade,
     Exposure,
@@ -97,6 +98,7 @@ use SettingId as S;
 
 #[rustfmt::skip]
 pub const LOOK: &[Setting] = &[
+    row(S::Theme, "Theme", Choice, "A whole look at once: grade, palette and effects. All of them, with previews, on the Themes page."),
     row(S::Variant, "Variant", Choice, "This scene's time of day or weather; remembered per scene (t in Scenes)."),
     row(S::ColorGrade, "Colour studio…", Open, "The colour wheel, tone wheels and palette in one place (also c)."),
     row(S::Exposure, "Exposure", Slider, "Brighter or darker, in photographic stops."),
@@ -117,7 +119,7 @@ pub const LOOK: &[Setting] = &[
     row(S::Letterbox, "Letterbox", Slider, "Cinema bars top and bottom."),
     row(S::Dim, "Brightness", Slider, "Overall brightness; lower is calmer behind your windows."),
     row(S::TextScale, "Text size", Choice, "Caption size for text scenes such as bump; auto fits the pane."),
-    row(S::ResetLook, "Reset look", Action, "Back to neutral: no grade, palette or effects."),
+    row(S::ResetLook, "Reset look", Action, "Back to neutral: no theme, grade, palette or effects."),
 ];
 
 #[rustfmt::skip]
@@ -150,7 +152,7 @@ pub const WALL: &[Setting] = &[
 /// The rows of a settings page (Scenes has none: it is the browser).
 pub fn page(p: Page) -> &'static [Setting] {
     match p {
-        Page::Scenes => &[],
+        Page::Scenes | Page::Themes => &[],
         Page::Look => LOOK,
         Page::Playback => PLAYBACK,
         Page::Display => DISPLAY,
@@ -161,7 +163,7 @@ pub fn page(p: Page) -> &'static [Setting] {
 /// Section headings drawn above rows: (index of the first row, heading).
 pub fn sections(p: Page) -> &'static [(usize, &'static str)] {
     match p {
-        Page::Look => &[(0, "Scene"), (1, "Colour"), (10, "Palette"), (13, "Effects"), (18, "Light & text")],
+        Page::Look => &[(0, "Presets"), (2, "Colour"), (11, "Palette"), (14, "Effects"), (19, "Light & text")],
         _ => &[],
     }
 }
@@ -456,6 +458,11 @@ pub fn value(id: SettingId, ctx: &MenuCtx) -> String {
     let on_off = |b: bool| if b { "on" } else { "off" }.to_string();
     let g = &ctx.look.grade;
     match id {
+        S::Theme => match ctx.active_theme.as_deref().and_then(|s| ctx.themes.iter().find(|t| t.slug == s)) {
+            Some(t) if ctx.theme_modified => format!("{} · edited", t.name),
+            Some(t) => t.name.clone(),
+            None => "none".into(),
+        },
         S::Variant => ctx
             .theme
             .clone()
@@ -537,6 +544,19 @@ pub fn step(id: SettingId, ctx: &MenuCtx, dir: i32) -> Option<Effect> {
         return step_num(id, ctx, dir);
     }
     match id {
+        S::Theme => {
+            let n = ctx.themes.len();
+            if n == 0 {
+                return None;
+            }
+            let cur = ctx.active_theme.as_deref().and_then(|s| ctx.themes.iter().position(|t| t.slug == s));
+            let i = match cur {
+                Some(i) => wrap(i, n, dir),
+                None if up => 0,
+                None => n - 1,
+            };
+            Some(Effect::ApplyTheme(ctx.themes[i].slug.clone()))
+        }
         S::Variant => {
             let themes = scene::themes(ctx.scene_name);
             if themes.is_empty() {

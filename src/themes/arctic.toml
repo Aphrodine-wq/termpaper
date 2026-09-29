@@ -1,0 +1,20 @@
+format = 1
+name = "Arctic"
+author = "termpaper"
+description = "Ice light: cold blue, bright and clean."
+tags = ["mood", "cool"]
+
+[grade]
+exposure = 0.15
+saturation = 0.75
+temperature = -0.7
+highlights = { hue = 200.0, amount = 0.2 }
+
+[palette]
+mode = "tint"
+strength = 0.4
+colors = ["#0b1320", "#1c3d5a", "#4f8fc0", "#a9d6f5", "#f0faff"]
+
+[scene]
+name = "icebergs"
+variant = "day"

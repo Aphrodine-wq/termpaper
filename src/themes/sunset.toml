@@ -1,0 +1,22 @@
+format = 1
+name = "Sunset"
+author = "termpaper"
+description = "Every scene at dusk: violet shadows into orange and gold."
+tags = ["mood", "warm"]
+
+[grade]
+vibrance = 0.2
+temperature = 0.3
+
+[palette]
+mode = "tint"
+strength = 0.55
+colors = ["#1b1036", "#5b2a6e", "#c2446c", "#f47c48", "#ffcf6b"]
+
+[effects]
+stack = ["halation"]
+halation = 0.5
+
+[scene]
+name = "goldengate"
+variant = "sunset"

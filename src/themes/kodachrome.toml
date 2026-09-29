@@ -1,0 +1,17 @@
+format = 1
+name = "Kodachrome"
+author = "termpaper"
+description = "Rich, saturated slide film: deep reds, warm yellows, strong blues."
+tags = ["cinematic", "vivid"]
+
+[grade]
+saturation = 1.25
+contrast = 1.15
+temperature = 0.12
+vibrance = 0.2
+highlights = { hue = 45.0, amount = 0.25 }
+shadows = { hue = 200.0, amount = 0.15 }
+
+[scene]
+name = "havana"
+variant = "day"

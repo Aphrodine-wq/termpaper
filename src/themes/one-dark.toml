@@ -1,0 +1,17 @@
+format = 1
+name = "One Dark"
+author = "termpaper"
+description = "The One Dark scheme: cool greys with blue, violet and a warm yellow."
+tags = ["terminal", "dark"]
+
+[grade]
+contrast = 1.05
+
+[palette]
+mode = "tint"
+strength = 0.55
+colors = ["#282c34", "#3e4452", "#5c6370", "#61afef", "#c678dd", "#e5c07b", "#abb2bf"]
+
+[scene]
+name = "manhattan"
+variant = "night"

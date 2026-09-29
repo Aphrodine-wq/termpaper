@@ -1,0 +1,22 @@
+format = 1
+name = "Dracula"
+author = "termpaper"
+description = "The Dracula scheme: purple and pink light over a dark grey night."
+tags = ["terminal", "dark", "purple"]
+
+[grade]
+vibrance = 0.3
+tint = 0.1
+
+[palette]
+mode = "tint"
+strength = 0.6
+colors = ["#282a36", "#44475a", "#6272a4", "#bd93f9", "#ff79c6", "#f8f8f2"]
+
+[effects]
+stack = ["bloom"]
+bloom = 0.5
+
+[scene]
+name = "shibuya"
+variant = "night"

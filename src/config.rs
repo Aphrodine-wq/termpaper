@@ -95,6 +95,9 @@ pub struct Config {
     /// per-scene remembered theme
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub themes: HashMap<String, String>,
+    /// the theme the look came from (a slug in the theme store)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub look_theme: Option<String>,
     /// action → key remaps
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub keys: HashMap<String, String>,
@@ -261,6 +264,8 @@ pub struct Live<'a> {
     pub detail: &'a str,
     pub default_detail: &'a str,
     pub look: &'a crate::look::Look,
+    /// the theme the look came from
+    pub look_theme: Option<&'a str>,
     pub text_scale: Option<u32>,
     pub fps: u32,
     /// the terminal's frame-rate default; not stored when equal
@@ -278,6 +283,17 @@ pub struct Live<'a> {
     pub wall: bool,
 }
 
+/// Store a look (and the theme it came from): the four keys every binary
+/// reads, then the rest under `[look]` when there is more.
+pub fn set_look(cfg: &mut Config, look: &crate::look::Look, theme: Option<&str>) {
+    cfg.filters = look.effects.stack.clone();
+    cfg.hue_shift = (look.grade.hue >= 0.5).then(|| round2(look.grade.hue));
+    cfg.saturation = (round2(look.grade.saturation) != 1.0).then(|| round2(look.grade.saturation));
+    cfg.contrast = (round2(look.grade.contrast) != 1.0).then(|| round2(look.grade.contrast));
+    cfg.look = look.has_extras().then(|| look.rounded());
+    cfg.look_theme = theme.map(str::to_string);
+}
+
 /// Merge live settings into `cfg`, keeping only values that differ from the
 /// built-in defaults (a default removes the entry) and rounding floats to two
 /// decimals. Keybinds, favourites, recents and other scenes' themes are left
@@ -289,13 +305,7 @@ pub fn store(cfg: &mut Config, live: &Live) {
     cfg.scene = keep(live.scene, DEFAULT_SCENE).map(str::to_string);
     cfg.pixels = keep(live.pixels, live.default_pixels).map(str::to_string);
     cfg.detail = keep(live.detail, live.default_detail).map(str::to_string);
-    // the four keys every binary reads, then the rest of the look
-    let look = live.look;
-    cfg.filters = look.effects.stack.clone();
-    cfg.hue_shift = (look.grade.hue >= 0.5).then(|| round2(look.grade.hue));
-    cfg.saturation = keep(round2(look.grade.saturation), 1.0);
-    cfg.contrast = keep(round2(look.grade.contrast), 1.0);
-    cfg.look = look.has_extras().then(|| look.rounded());
+    set_look(cfg, live.look, live.look_theme);
     cfg.text_scale = live.text_scale;
     cfg.fps = keep(live.fps, live.default_fps);
     cfg.speed = keep(round2(live.speed), DEFAULT_SPEED);
@@ -602,6 +612,7 @@ mod tests {
             detail: "medium",
             default_detail: "medium",
             look: Box::leak(Box::new(crate::look::Look::default())),
+            look_theme: None,
             text_scale: None,
             fps: DEFAULT_FPS,
             default_fps: DEFAULT_FPS,

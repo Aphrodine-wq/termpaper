@@ -388,7 +388,7 @@ impl Default for Studio {
 }
 
 /// A 1x1 canvas through the colour stages, for the reference swatches.
-fn graded(c: (u8, u8, u8), look: &Look) -> (u8, u8, u8) {
+pub fn graded(c: (u8, u8, u8), look: &Look) -> (u8, u8, u8) {
     let mut cv = Canvas::new(1, 1);
     cv.set(0, 0, c);
     let g = &look.grade;
@@ -405,7 +405,7 @@ fn graded(c: (u8, u8, u8), look: &Look) -> (u8, u8, u8) {
 
 /// Reference colours shown before and after the look: skin, sky, foliage,
 /// sunset, neon, white, grey, shadow, red, yellow.
-const REFS: [(u8, u8, u8); 10] = [
+pub const REFS: [(u8, u8, u8); 10] = [
     (232, 186, 160),
     (112, 162, 222),
     (72, 132, 62),
