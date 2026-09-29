@@ -33,6 +33,7 @@ use std::time::Instant;
 use termpaper::canvas::Canvas;
 use termpaper::gpu::{FrameCells, Gpu, Plan};
 use termpaper::render::{self, Pixels};
+use termpaper::look::{Baked, Look};
 use termpaper::scene::{self, Detail, SceneOptions};
 use termpaper::{color_grade, filter};
 
@@ -92,14 +93,12 @@ fn rgb_of(c: ratatui::style::Color) -> (u8, u8, u8) {
     }
 }
 
-fn base_plan<'a>(filters: &'a [String], pixels: Pixels, cols: usize, rows: usize) -> Plan<'a> {
+fn base_plan<'a>(look: &'a Look, pixels: Pixels, cols: usize, rows: usize) -> Plan<'a> {
     Plan {
-        filters,
+        look,
+        lut: None,
         quick_filter: None,
         t: 1.5,
-        hue_shift: 0.0,
-        saturation: 1.0,
-        contrast: 1.0,
         dim: 1.0,
         smooth: 0.0,
         pixels,
@@ -115,8 +114,7 @@ fn base_plan<'a>(filters: &'a [String], pixels: Pixels, cols: usize, rows: usize
 /// terminal cells and the post-processed canvas behind them.
 fn cpu_run(canvas: &Canvas, plan: &Plan, area: Rect) -> (Buffer, Canvas) {
     let mut c = canvas.clone_for_smooth();
-    filter::apply_all(plan.filters, &mut c, plan.t);
-    color_grade::apply(&mut c, plan.hue_shift, plan.saturation, plan.contrast);
+    termpaper::engine::finish_look(&mut c, &Baked::new(plan.look.clone()), plan.t);
     if let Some(q) = plan.quick_filter {
         filter::apply(q, &mut c, plan.t);
     }
@@ -133,7 +131,8 @@ fn cpu_run(canvas: &Canvas, plan: &Plan, area: Rect) -> (Buffer, Canvas) {
 fn pixel_parity(gpu: &mut Gpu, canvas: &Canvas, filters: &[String]) -> i32 {
     let (cols, rows) = (canvas.width(), canvas.height() / 2);
     let area = Rect::new(0, 0, cols as u16, rows as u16);
-    let plan = base_plan(filters, Pixels::Half, cols, rows);
+    let look = Look::with_effects(filters);
+    let plan = base_plan(&look, Pixels::Half, cols, rows);
     let (buf, _) = cpu_run(canvas, &plan, area);
     gpu.drain();
     let Some(words) = gpu.run_blocking(canvas, &plan) else {
@@ -334,8 +333,8 @@ fn main() {
         println!("  --- {:?} · {w}x{h}px ---", pixels);
         gpu.resize(w, h, cols * rows);
         for name in FILTERS {
-            let filters = vec![name.to_string()];
-            let plan = base_plan(&filters, *pixels, cols, rows);
+            let look = Look::with_effects(&[name.to_string()]);
+            let plan = base_plan(&look, *pixels, cols, rows);
             let r = glyph_parity(&mut gpu, canvas, &plan);
             let ok = r.unexplained == 0;
             if !ok {
@@ -365,9 +364,10 @@ fn main() {
         gpu.resize(w, h, cols * rows);
         gpu.drain();
         let area = Rect::new(0, 0, cols as u16, rows as u16);
-        let mut plan = base_plan(&filters, *pixels, cols, rows);
-        plan.saturation = 2.5;
-        plan.contrast = 2.5;
+        let mut look = Look::with_effects(&filters);
+        look.grade.saturation = 2.5;
+        look.grade.contrast = 2.5;
+        let mut plan = base_plan(&look, *pixels, cols, rows);
         plan.smooth = 0.6;
 
         let mut work = canvas.clone_for_smooth();

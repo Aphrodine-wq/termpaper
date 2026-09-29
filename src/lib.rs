@@ -14,6 +14,7 @@ pub mod governor;
 pub mod hypr;
 pub mod launch;
 pub mod link;
+pub mod look;
 pub mod menu;
 pub mod physics;
 pub mod platform;

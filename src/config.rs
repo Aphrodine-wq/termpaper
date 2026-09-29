@@ -98,6 +98,30 @@ pub struct Config {
     /// action → key remaps
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub keys: HashMap<String, String>,
+    /// The Look beyond what `filters`, `hue_shift`, `saturation` and
+    /// `contrast` can say (effect strengths, the rest of the grade, the
+    /// palette). Written in full when present; those four keys stay as
+    /// mirrors so older binaries keep the basics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub look: Option<crate::look::Look>,
+}
+
+/// The Look a config describes: its `[look]` table when there is one, else
+/// the legacy keys.
+pub fn look_of(cfg: &Config) -> crate::look::Look {
+    let mut look = match &cfg.look {
+        Some(l) => l.clone(),
+        None => {
+            let mut l = crate::look::Look::default();
+            l.grade.hue = cfg.hue_shift.unwrap_or(0.0);
+            l.grade.saturation = cfg.saturation.unwrap_or(1.0);
+            l.grade.contrast = cfg.contrast.unwrap_or(1.0);
+            l.effects.stack = cfg.filters.clone();
+            l
+        }
+    };
+    look.sanitize();
+    look
 }
 
 /// One padding length: a number of px, or a string with a unit (`"3.5pt"`,
@@ -236,7 +260,7 @@ pub struct Live<'a> {
     pub default_pixels: &'a str,
     pub detail: &'a str,
     pub default_detail: &'a str,
-    pub filters: &'a [String],
+    pub look: &'a crate::look::Look,
     pub text_scale: Option<u32>,
     pub fps: u32,
     /// the terminal's frame-rate default; not stored when equal
@@ -248,9 +272,6 @@ pub struct Live<'a> {
     pub clock: bool,
     pub cycle: Option<f64>,
     pub cycle_scope: CycleScope,
-    pub hue_shift: f32,
-    pub saturation: f32,
-    pub contrast: f32,
     pub renderer: Renderer,
     pub link: bool,
     pub group: &'a str,
@@ -268,7 +289,13 @@ pub fn store(cfg: &mut Config, live: &Live) {
     cfg.scene = keep(live.scene, DEFAULT_SCENE).map(str::to_string);
     cfg.pixels = keep(live.pixels, live.default_pixels).map(str::to_string);
     cfg.detail = keep(live.detail, live.default_detail).map(str::to_string);
-    cfg.filters = live.filters.to_vec();
+    // the four keys every binary reads, then the rest of the look
+    let look = live.look;
+    cfg.filters = look.effects.stack.clone();
+    cfg.hue_shift = (look.grade.hue >= 0.5).then(|| round2(look.grade.hue));
+    cfg.saturation = keep(round2(look.grade.saturation), 1.0);
+    cfg.contrast = keep(round2(look.grade.contrast), 1.0);
+    cfg.look = look.has_extras().then(|| look.rounded());
     cfg.text_scale = live.text_scale;
     cfg.fps = keep(live.fps, live.default_fps);
     cfg.speed = keep(round2(live.speed), DEFAULT_SPEED);
@@ -278,9 +305,6 @@ pub fn store(cfg: &mut Config, live: &Live) {
     cfg.clock = keep(live.clock, DEFAULT_CLOCK);
     cfg.cycle = live.cycle.map(|c| (c * 100.0).round() / 100.0);
     cfg.cycle_scope = keep(live.cycle_scope, CycleScope::All).map(|s| s.name().to_string());
-    cfg.hue_shift = (live.hue_shift >= 0.5).then(|| round2(live.hue_shift));
-    cfg.saturation = keep(round2(live.saturation), 1.0);
-    cfg.contrast = keep(round2(live.contrast), 1.0);
     // `renderer` supersedes the legacy `gpu` switch it was derived from
     cfg.renderer = keep(live.renderer, Renderer::Auto);
     cfg.gpu = None;
@@ -577,7 +601,7 @@ mod tests {
             default_pixels: "half",
             detail: "medium",
             default_detail: "medium",
-            filters: &[],
+            look: Box::leak(Box::new(crate::look::Look::default())),
             text_scale: None,
             fps: DEFAULT_FPS,
             default_fps: DEFAULT_FPS,
@@ -588,9 +612,6 @@ mod tests {
             clock: DEFAULT_CLOCK,
             cycle: None,
             cycle_scope: CycleScope::All,
-            hue_shift: 0.0,
-            saturation: 1.0,
-            contrast: 1.0,
             renderer: Renderer::Auto,
             link: DEFAULT_LINK,
             group: DEFAULT_GROUP,
@@ -629,12 +650,15 @@ mod tests {
         // float noise from repeated steps: 1.0 + 3 * 0.15 in f32
         let contrast = 1.0f32 + 0.15 + 0.15 + 0.15;
         assert_ne!(contrast, 1.45, "precondition: the sum carries noise");
+        let mut look = crate::look::Look::default();
+        look.grade.contrast = contrast;
+        look.grade.saturation = 0.7000001;
+        look.grade.hue = 43.199997;
+        look.grade.temperature = 0.15000001;
         let live = Live {
-            contrast,
-            saturation: 0.7000001,
+            look: &look,
             dim: 0.70000005,
             fade: 0.35000002,
-            hue_shift: 43.199997,
             speed: 1.2500001,
             ..live_defaults()
         };
@@ -647,12 +671,44 @@ mod tests {
             "fade = 0.35",
             "hue_shift = 43.2",
             "speed = 1.25",
+            // the rest of the look rides in [look], rounded the same way
+            "temperature = 0.15",
         ] {
             assert!(
                 text.lines().any(|l| l == want),
                 "missing `{want}` in:\n{text}"
             );
         }
+    }
+
+    #[test]
+    fn look_round_trips_and_legacy_keys_still_load() {
+        use crate::look::{Look, PaletteMode, Rgb};
+        // a basic look lives entirely in the legacy keys, no [look] table
+        let mut basic = Look::default();
+        basic.grade.saturation = 1.3;
+        basic.effects.stack = vec!["bloom".into()];
+        let mut cfg = Config::default();
+        store(&mut cfg, &Live { look: &basic, ..live_defaults() });
+        assert!(cfg.look.is_none());
+        assert_eq!(cfg.filters, vec!["bloom"]);
+        assert_eq!(look_of(&cfg), basic);
+        // anything more goes to [look], with the legacy keys kept as mirrors
+        let mut rich = basic.clone();
+        rich.grade.vibrance = 0.4;
+        rich.palette.mode = PaletteMode::Map;
+        rich.palette.colors = vec![Rgb(0, 0, 0), Rgb(255, 200, 100)];
+        rich.effects.set_amount("bloom", 0.5);
+        store(&mut cfg, &Live { look: &rich, ..live_defaults() });
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(look_of(&back), rich, "{text}");
+        assert_eq!(back.saturation, Some(1.3), "mirror for older binaries");
+        // an old config with only legacy keys
+        let old: Config = toml::from_str("filters = [\"crt\"]\nhue_shift = 90.0\n").unwrap();
+        let l = look_of(&old);
+        assert_eq!(l.effects.stack, vec!["crt"]);
+        assert_eq!(l.grade.hue, 90.0);
     }
 
     #[test]

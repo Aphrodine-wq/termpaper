@@ -82,6 +82,18 @@ pub struct SettingsMsg {
     pub hue_shift: f32,
     pub saturation: f32,
     pub contrast: f32,
+    /// The whole Look (proto 3): grade, palette, effect strengths. None from
+    /// older binaries, which only speak the four fields above; new binaries
+    /// fill those too, from this.
+    pub look: Option<crate::look::Look>,
+}
+
+/// Just the `look` of a settings message, read with serde (the rest of the
+/// message goes through the hand-rolled flat parser).
+#[derive(serde::Deserialize)]
+struct LookOnly {
+    #[serde(default)]
+    look: Option<crate::look::Look>,
 }
 
 impl Default for SettingsMsg {
@@ -97,6 +109,7 @@ impl Default for SettingsMsg {
             hue_shift: 0.0,
             saturation: 1.0,
             contrast: 1.0,
+            look: None,
         }
     }
 }
@@ -323,8 +336,17 @@ impl SettingsMsg {
             .map(|f| format!("\"{}\"", esc(f)))
             .collect::<Vec<_>>()
             .join(",");
+        // the look goes last: the flat parser returns the first match of a
+        // key, so nested keys (grade.contrast, grade.fade…) can never
+        // shadow the top-level ones for any reader
+        let look = self
+            .look
+            .as_ref()
+            .and_then(|l| serde_json::to_string(l).ok())
+            .map(|j| format!(",\"look\":{j}"))
+            .unwrap_or_default();
         format!(
-            "\"filters\":[{}],\"fps\":{},\"smooth\":{},\"dim\":{},\"fade\":{},\"clock\":{},\"quick\":{},\"hue_shift\":{},\"saturation\":{},\"contrast\":{}",
+            "\"filters\":[{}],\"fps\":{},\"smooth\":{},\"dim\":{},\"fade\":{},\"clock\":{},\"quick\":{},\"hue_shift\":{},\"saturation\":{},\"contrast\":{}{}",
             filters,
             self.fps,
             self.smooth,
@@ -335,6 +357,7 @@ impl SettingsMsg {
             self.hue_shift,
             self.saturation,
             self.contrast,
+            look,
         )
     }
 
@@ -352,6 +375,7 @@ impl SettingsMsg {
             hue_shift: num("hue_shift", d.hue_shift),
             saturation: num("saturation", d.saturation),
             contrast: num("contrast", d.contrast),
+            look: serde_json::from_str::<LookOnly>(text).ok().and_then(|w| w.look),
         }
     }
 }
@@ -490,9 +514,28 @@ fn json_get<'a>(text: &'a str, key: &str) -> Option<&'a str> {
 /// renames a fresh inode into place on every publish.
 type FileSig = (u64, SystemTime);
 
+#[cfg(not(windows))]
 fn file_sig(path: &Path) -> Option<FileSig> {
     let meta = std::fs::metadata(path).ok()?;
     Some((file_ino(&meta), meta.modified().ok()?))
+}
+
+/// Windows: the NTFS file index plays the inode. Every `atomic_write`
+/// renames a new file into place, so the index changes with every publish
+/// even when two land inside one tick of the file-time clock (which is
+/// coarse enough that mtime alone would miss the second).
+#[cfg(windows)]
+fn file_sig(path: &Path) -> Option<FileSig> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+    let f = std::fs::File::open(path).ok()?;
+    // SAFETY: plain data the call fills in, for a handle `f` keeps open
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) } == 0 {
+        return None;
+    }
+    let index = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
+    Some((index, f.metadata().ok()?.modified().ok()?))
 }
 
 /// The live instance's registry presence; Drop cleans up.
@@ -528,15 +571,6 @@ pub struct Guard {
 fn file_ino(m: &std::fs::Metadata) -> u64 {
     use std::os::unix::fs::MetadataExt;
     m.ino()
-}
-
-/// Windows has no stable inode through std; `atomic_write` renames a freshly
-/// created file into place, so the creation time changes on every publish
-/// and serves the same purpose.
-#[cfg(windows)]
-fn file_ino(m: &std::fs::Metadata) -> u64 {
-    use std::os::windows::fs::MetadataExt;
-    m.creation_time()
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1352,10 +1386,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut g = Guard::new_in(dir.clone(), "fire", "t").unwrap();
         let mirror = "{\"kind\":\"scene\",\"proto\":2,\"scene\":\"rain\",\"epoch\":99999999999999,\"seq\":1,\"from_pid\":1,\"seed\":1,\"t0_ms\":1}";
-        std::fs::write(dir.join("control.json"), mirror).unwrap();
+        // published the way every binary publishes: a new file renamed in
+        atomic_write(&dir.join("control.json"), mirror).unwrap();
         assert!(g.poll_control(Stamp::default()).is_none());
         let legacy = mirror.replace("\"proto\":2,", "");
-        std::fs::write(dir.join("control.json"), legacy).unwrap();
+        atomic_write(&dir.join("control.json"), &legacy).unwrap();
         assert!(g.poll_control(Stamp::default()).is_some(), "a proto-less message is legacy");
         drop(g);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1515,11 +1550,27 @@ mod settings_sync_tests {
             hue_shift: 45.0,
             saturation: 1.4,
             contrast: 1.2,
+            look: None,
         };
         let text = format!("{{\"kind\":\"settings\",{},\"epoch\":7,\"seq\":2,\"from_pid\":5}}", m.fields_json());
         let c = parse_control(&text).unwrap();
         assert_eq!(c.kind, ControlKind::Settings);
         assert_eq!(c.settings.unwrap(), m);
+        // with the whole look attached: nested keys (grade.contrast,
+        // grade.fade) must not shadow the top-level ones, and the look
+        // itself round-trips
+        let mut look = crate::look::Look::default();
+        look.grade.contrast = 2.0;
+        look.grade.fade = 0.3;
+        look.grade.vibrance = 0.4;
+        look.palette.mode = crate::look::PaletteMode::Map;
+        look.palette.colors = vec![crate::look::Rgb(1, 2, 3), crate::look::Rgb(200, 100, 50)];
+        let rich = SettingsMsg { look: Some(look.clone()), ..m.clone() };
+        let text = format!("{{\"kind\":\"settings\",{},\"epoch\":7,\"seq\":2,\"from_pid\":5}}", rich.fields_json());
+        let back = parse_control(&text).unwrap().settings.unwrap();
+        assert_eq!(back.contrast, 1.2, "top-level contrast, not grade.contrast");
+        assert_eq!(back.fade, 0.5, "top-level fade, not grade.fade");
+        assert_eq!(back.look, Some(look));
         // an older binary's settings message: only its appearance fields count
         let old = parse_control(
             "{\"kind\":\"settings\",\"pixels\":\"braille\",\"detail\":\"high\",\"filters\":[\"crt\"],\"theme\":\"amber\",\"text_scale\":3,\"speed\":1.5,\"fps\":48,\"smooth\":0.45,\"dim\":0.8,\"fade\":0.5,\"clock\":false,\"quick\":null,\"hue_shift\":45,\"saturation\":1.4,\"contrast\":1.2,\"epoch\":7,\"seq\":2,\"from_pid\":5}",

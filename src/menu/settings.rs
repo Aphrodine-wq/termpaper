@@ -216,21 +216,19 @@ pub fn value(id: SettingId, ctx: &MenuCtx) -> String {
             .or_else(|| scene::themes(ctx.scene_name).first().map(|t| t.to_string()))
             .unwrap_or_else(|| "—".into()),
         S::ColorGrade => {
-            if ctx.hue_shift < 0.5
-                && (ctx.saturation - 1.0).abs() < 0.02
-                && (ctx.contrast - 1.0).abs() < 0.02
-            {
+            let g = &ctx.look.grade;
+            if ctx.look.basic_grade_is_neutral() {
                 "neutral".into()
             } else {
                 format!(
                     "{} · {} · {}",
-                    color_wheel::format_hue(ctx.hue_shift),
-                    color_wheel::format_sat(ctx.saturation),
-                    color_wheel::format_contrast(ctx.contrast)
+                    color_wheel::format_hue(g.hue),
+                    color_wheel::format_sat(g.saturation),
+                    color_wheel::format_contrast(g.contrast)
                 )
             }
         }
-        S::Filters => match ctx.filters.len() {
+        S::Filters => match ctx.look.effects.stack.len() {
             0 => "none".into(),
             n => format!("{n} on"),
         },
@@ -407,7 +405,7 @@ pub fn preset_of(filters: &[String]) -> Option<usize> {
 pub fn filter_step(row: usize, ctx: &MenuCtx, dir: i32) -> Option<Effect> {
     if row == 0 {
         let n = PRESETS.len();
-        let next = match preset_of(&ctx.filters) {
+        let next = match preset_of(&ctx.look.effects.stack) {
             Some(i) => wrap(i, n, dir),
             None if dir > 0 => 0,
             None => n - 1,

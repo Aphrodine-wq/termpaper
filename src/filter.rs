@@ -67,6 +67,19 @@ pub fn apply_all(names: &[String], canvas: &mut Canvas, t: f32) {
     }
 }
 
+/// Apply a Look's effect stack in order.
+pub fn apply_stack(effects: &crate::look::Effects, canvas: &mut Canvas, t: f32) {
+    for n in &effects.stack {
+        apply(n, canvas, t);
+    }
+}
+
+/// Effects that read neighbouring pixels (blurs, offsets, kernels): on a
+/// wall they need the scene rendered a little past the pane's edge.
+pub fn reads_neighbours(name: &str) -> bool {
+    matches!(name, "bloom" | "crt" | "chroma" | "pixelate" | "edges" | "warp" | "sharpen")
+}
+
 fn scale_cell(c: &mut (u8, u8, u8), f: f32) {
     c.0 = (c.0 as f32 * f).clamp(0.0, 255.0) as u8;
     c.1 = (c.1 as f32 * f).clamp(0.0, 255.0) as u8;

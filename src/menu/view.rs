@@ -575,10 +575,11 @@ fn draw_filters(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal) {
     ])
     .areas(area);
     let w = head.width as usize;
-    let stack = if ctx.filters.is_empty() {
+    let filters = &ctx.look.effects.stack;
+    let stack = if filters.is_empty() {
         "none".to_string()
     } else {
-        ctx.filters.join(" → ")
+        filters.join(" → ")
     };
     f.render_widget(
         Paragraph::new(vec![
@@ -596,8 +597,8 @@ fn draw_filters(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal) {
 
     // one list with non-selectable group headings; map rows to lines
     let lw = 12usize.min(w);
-    let on = |name: &str| ctx.filters.iter().position(|f| f == name);
-    let preset = settings::preset_of(&ctx.filters).map_or("custom", |i| settings::PRESETS[i].0);
+    let on = |name: &str| filters.iter().position(|f| f == name);
+    let preset = settings::preset_of(filters).map_or("custom", |i| settings::PRESETS[i].0);
     let sel = m.filter_row().min(settings::filter_rows() - 1);
     let mut items = vec![ListItem::new(Line::from(vec![
         Span::styled(pad("Preset", lw), bold(p.text)),

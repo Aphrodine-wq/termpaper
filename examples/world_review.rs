@@ -30,12 +30,10 @@ fn main() {
         ..SceneOptions::default()
     };
     let plan = Plan {
-        filters: &[],
+        look: &termpaper::look::Look::default(),
+        lut: None,
         quick_filter: None,
         t: 8.0,
-        hue_shift: 0.0,
-        saturation: 1.0,
-        contrast: 1.0,
         dim: 1.0,
         smooth: 0.0,
         pixels: Pixels::Half,

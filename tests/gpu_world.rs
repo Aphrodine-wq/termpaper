@@ -13,12 +13,10 @@ fn gpu_replay_resize_and_backpressure() {
     let canvas = Canvas::new(48, 96);
     let opts = SceneOptions::default();
     let plan = Plan {
-        filters: &[],
+        look: &termpaper::look::Look::default(),
+        lut: None,
         quick_filter: None,
         t: 1.0,
-        hue_shift: 0.0,
-        saturation: 1.0,
-        contrast: 1.0,
         dim: 1.0,
         smooth: 0.0,
         pixels: Pixels::Half,
@@ -82,12 +80,10 @@ fn hybrid_canvas_frame_packs_cpu_scene() {
         scene.update(1.0 / 30.0, &mut canvas);
     }
     let plan = Plan {
-        filters: &[],
+        look: &termpaper::look::Look::default(),
+        lut: None,
         quick_filter: None,
         t: 1.0,
-        hue_shift: 0.0,
-        saturation: 1.0,
-        contrast: 1.0,
         dim: 1.0,
         smooth: 0.0,
         pixels: Pixels::Half,

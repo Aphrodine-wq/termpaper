@@ -452,18 +452,15 @@ fn main() -> std::io::Result<()> {
         .or_else(|| cfg.themes.get(&scene_name).cloned())
         .or_else(|| cfg.theme.clone());
     let text_scale = args.text_scale.or(cfg.text_scale);
-    let filters = if args.filter.is_empty() {
-        cfg.filters.clone()
-    } else {
-        args.filter.clone()
-    };
+    // grade, palette and effects; `--filter` replaces the effect stack
+    let mut look = config::look_of(&cfg);
+    if !args.filter.is_empty() {
+        look.effects.stack = args.filter.clone();
+    }
     let fps = args.fps.or(cfg.fps).unwrap_or(caps.default_fps).clamp(1, 240);
     let idle_fps = args.idle_fps.or(cfg.idle_fps).map(|f| f.clamp(1, 240));
     let speed = args.speed.or(cfg.speed).unwrap_or(1.0);
     let cycle = args.cycle.or(cfg.cycle).filter(|c| *c > 0.0);
-    let hue_shift = cfg.hue_shift.unwrap_or(0.0);
-    let saturation = cfg.saturation.unwrap_or(1.0);
-    let contrast = cfg.contrast.unwrap_or(1.0);
     let link_enabled = if args.no_link {
         false
     } else if args.link {
@@ -519,14 +516,11 @@ fn main() -> std::io::Result<()> {
         theme,
         detail,
         pixels,
-        filters,
+        look: termpaper::look::Baked::new(look),
         fps,
         idle_fps,
         speed,
         cycle,
-        hue_shift,
-        saturation,
-        contrast,
         screensaver: args.screensaver,
         truecolor: caps.truecolor && !args.no_truecolor,
         default_fps: caps.default_fps,
@@ -608,7 +602,8 @@ struct Settings {
     keymap: config::KeyMap,
     detail: Detail,
     pixels: Pixels,
-    filters: Vec<String>,
+    /// grade, palette and effect stack, with its lookup table
+    look: termpaper::look::Baked,
     fps: u32,
     /// fps cap applied while unfocused (None = no throttle)
     idle_fps: Option<u32>,
@@ -616,9 +611,6 @@ struct Settings {
     cycle: Option<f64>,
     /// which scenes `cycle` rotates through
     cycle_scope: CycleScope,
-    hue_shift: f32,
-    saturation: f32,
-    contrast: f32,
     screensaver: bool,
     truecolor: bool,
     /// the terminal's frame-rate default (a config value equal to it is not
@@ -673,17 +665,20 @@ fn frame_period_ms(settings: &Settings, focused: bool, scene_name: &str) -> f64 
 /// pixels, text scale, theme) travel in the anchor instead: any change to
 /// them is picked up by `sync_sim` and published as a new anchor.
 fn settings_msg(settings: &Settings, _opts: &SceneOptions, quick: &Option<String>) -> link::SettingsMsg {
+    let look = settings.look.get();
     link::SettingsMsg {
-        filters: settings.filters.clone(),
+        // the basics older binaries understand, mirrored from the look
+        filters: look.effects.stack.clone(),
         fps: settings.fps,
         smooth: settings.smooth,
         dim: settings.dim,
         fade: settings.fade,
         clock: settings.clock,
         quick: quick.clone(),
-        hue_shift: settings.hue_shift,
-        saturation: settings.saturation,
-        contrast: settings.contrast,
+        hue_shift: look.grade.hue,
+        saturation: look.grade.saturation,
+        contrast: look.grade.contrast,
+        look: Some(look.clone()),
     }
 }
 
@@ -694,7 +689,19 @@ fn apply_appearance(
     transition: &mut transition::Transition,
     quick_filter: &mut Option<String>,
 ) {
-    settings.filters = m.filters;
+    let look = match m.look {
+        Some(l) => l,
+        // an older binary only speaks the basics: keep the rest of ours
+        None => {
+            let mut l = settings.look.get().clone();
+            l.effects.stack = m.filters;
+            l.grade.hue = m.hue_shift;
+            l.grade.saturation = m.saturation;
+            l.grade.contrast = m.contrast;
+            l
+        }
+    };
+    settings.look.set(look);
     settings.fps = m.fps.clamp(1, 240);
     settings.smooth = m.smooth;
     settings.dim = m.dim;
@@ -702,9 +709,6 @@ fn apply_appearance(
     settings.clock = m.clock;
     transition.set_fade_secs(m.fade);
     *quick_filter = m.quick;
-    settings.hue_shift = m.hue_shift;
-    settings.saturation = m.saturation;
-    settings.contrast = m.contrast;
 }
 
 /// Grace before a published switch takes effect, on top of the fade: time
@@ -967,7 +971,7 @@ fn persist(settings: &mut Settings, scene_name: &str, theme: Option<&str>, detai
         default_pixels: platform_default_pixels().name(),
         detail: detail.name(),
         default_detail: platform_default_detail().name(),
-        filters: &settings.filters,
+        look: settings.look.get(),
         text_scale: settings.text_scale,
         fps: settings.fps,
         default_fps: settings.default_fps,
@@ -978,9 +982,6 @@ fn persist(settings: &mut Settings, scene_name: &str, theme: Option<&str>, detai
         clock: settings.clock,
         cycle: settings.cycle,
         cycle_scope: settings.cycle_scope,
-        hue_shift: settings.hue_shift,
-        saturation: settings.saturation,
-        contrast: settings.contrast,
         renderer: settings.renderer,
         link,
         group: &group,
@@ -1046,15 +1047,12 @@ fn menu_ctx(
         clock: settings.clock,
         cycle: settings.cycle,
         cycle_scope: settings.cycle_scope,
-        hue_shift: settings.hue_shift,
-        saturation: settings.saturation,
-        contrast: settings.contrast,
+        look: settings.look.get().clone(),
         renderer: settings.renderer,
         link_enabled: settings.link_enabled,
         link_group: settings.link_group.clone(),
         wall_enabled: settings.wall_enabled,
         truecolor: settings.truecolor,
-        filters: settings.filters.clone(),
         favorites: settings.cfg.favorites.clone(),
         recents: settings.cfg.recents.clone(),
         scene_themes: settings.cfg.themes.clone(),
@@ -1115,7 +1113,7 @@ fn apply_defaults(
     settings.pixels = platform_default_pixels();
     settings.detail = platform_default_detail();
     settings.theme = None;
-    settings.filters.clear();
+    settings.look.set(termpaper::look::Look::default());
     settings.text_scale = None;
     settings.fps = settings.default_fps;
     settings.speed = config::DEFAULT_SPEED;
@@ -1125,9 +1123,6 @@ fn apply_defaults(
     settings.clock = config::DEFAULT_CLOCK;
     settings.cycle = None;
     settings.cycle_scope = CycleScope::All;
-    settings.hue_shift = 0.0;
-    settings.saturation = 1.0;
-    settings.contrast = 1.0;
     let (link_enabled, link_group) = link_defaults(settings.cli_no_link, settings.cli_group.as_deref());
     settings.link_enabled = link_enabled;
     settings.link_group = link_group;
@@ -1498,18 +1493,22 @@ fn run(
                     save.mark(now);
                 }
                 Effect::ToggleFilter(f) => {
-                    if let Some(pos) = settings.filters.iter().position(|x| *x == f) {
-                        settings.filters.remove(pos);
+                    let mut look = settings.look.get().clone();
+                    if let Some(pos) = look.effects.stack.iter().position(|x| *x == f) {
+                        look.effects.stack.remove(pos);
                     } else {
-                        settings.filters.push(f);
+                        look.effects.stack.push(f);
                     }
+                    settings.look.set(look);
                     if let Some(g) = &mut guard {
                         g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                     }
                     save.mark(now);
                 }
                 Effect::SetFilters(v) => {
-                    settings.filters = v;
+                    let mut look = settings.look.get().clone();
+                    look.effects.stack = v;
+                    settings.look.set(look);
                     if let Some(g) = &mut guard {
                         g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                     }
@@ -1840,9 +1839,8 @@ fn run(
                 },
                 // a paused anchor freezes elapsed itself: the worker keeps
                 // replaying up to it (a pane joining a paused wall catches up)
-                elapsed_ms, paused: false, filters: settings.filters.clone(),
-                quick: quick_filter.clone(), hue: settings.hue_shift, saturation: settings.saturation,
-                contrast: settings.contrast, dim: fade * settings.dim, smooth: settings.smooth,
+                elapsed_ms, paused: false, look: settings.look.clone(),
+                quick: quick_filter.clone(), dim: fade * settings.dim, smooth: settings.smooth,
                 budget_ms: settings.gpu_budget_ms,
                 prefetch: transition.pending().map(|i| names[i % names.len()].to_string()),
                 // Studio scenes only: Classic GPU output stays identical to
@@ -1996,14 +1994,8 @@ fn run(
                 menu::view::render(f, area, &menu, &ctx);
             }
             if color_open {
-                color_wheel::render(
-                    f,
-                    area,
-                    settings.hue_shift,
-                    settings.saturation,
-                    settings.contrast,
-                    color_param,
-                );
+                let g = &settings.look.get().grade;
+                color_wheel::render(f, area, g.hue, g.saturation, g.contrast, color_param);
             }
         })?;
         crossterm::execute!(terminal.backend_mut(), crossterm::terminal::EndSynchronizedUpdate)?;
@@ -2107,9 +2099,11 @@ fn run(
                             break;
                         }
                         if key.code == KeyCode::Char('0') {
-                            settings.hue_shift = 0.0;
-                            settings.saturation = 1.0;
-                            settings.contrast = 1.0;
+                            let mut look = settings.look.get().clone();
+                            look.grade.hue = 0.0;
+                            look.grade.saturation = 1.0;
+                            look.grade.contrast = 1.0;
+                            settings.look.set(look);
                             if let Some(g) = &mut guard {
                                 g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                             }
@@ -2123,26 +2117,20 @@ fn run(
                             _ => None,
                         };
                         if let Some(steps) = fine {
+                            let mut look = settings.look.get().clone();
+                            let g = &mut look.grade;
                             match color_param {
                                 color_wheel::Param::Hue => {
-                                    settings.hue_shift = color_wheel::step_hue_steps(
-                                        settings.hue_shift,
-                                        steps,
-                                    );
+                                    g.hue = color_wheel::step_hue_steps(g.hue, steps);
                                 }
                                 color_wheel::Param::Saturation => {
-                                    settings.saturation = color_wheel::step_sat(
-                                        settings.saturation,
-                                        steps as f32 * color_wheel::SAT_STEP,
-                                    );
+                                    g.saturation = color_wheel::step_sat(g.saturation, steps as f32 * color_wheel::SAT_STEP);
                                 }
                                 color_wheel::Param::Contrast => {
-                                    settings.contrast = color_wheel::step_contrast(
-                                        settings.contrast,
-                                        steps as f32 * color_wheel::CONTRAST_STEP,
-                                    );
+                                    g.contrast = color_wheel::step_contrast(g.contrast, steps as f32 * color_wheel::CONTRAST_STEP);
                                 }
                             }
+                            settings.look.set(look);
                             if let Some(g) = &mut guard {
                                 g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                             }
@@ -2217,11 +2205,10 @@ fn run(
                         color_open = !color_open;
                         if color_open {
                             color_param = color_wheel::Param::Hue;
-                            if settings.hue_shift < 0.5
-                                && (settings.saturation - 1.0).abs() < 0.02
-                                && (settings.contrast - 1.0).abs() < 0.02
-                            {
-                                settings.hue_shift = 45.0;
+                            if settings.look.get().basic_grade_is_neutral() {
+                                let mut look = settings.look.get().clone();
+                                look.grade.hue = 45.0;
+                                settings.look.set(look);
                             }
                         } else {
                             save.mark(Instant::now());

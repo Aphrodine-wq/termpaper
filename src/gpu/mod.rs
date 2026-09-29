@@ -46,6 +46,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::canvas::{Canvas, Cell};
+use crate::look::{Look, Lut3D, LUT_N, MAX_COLORS};
 use crate::render::Pixels;
 mod shader_scene;
 mod world;
@@ -68,6 +69,9 @@ pub use shader_scene::{
 /// frame is under 50us on the CPU and the GPU cannot save time that is not
 /// being spent.
 pub const MIN_GPU_PIXELS: usize = crate::engine::MIN_GPU_PIXELS;
+
+/// u32 words the look's lookup table occupies in the scratch buffer.
+const LUT_WORDS: usize = LUT_N * LUT_N * LUT_N;
 
 /// Uniform slots reserved per frame. Every scheduled pass consumes one, and
 /// the worst realistic stack (a full filter list, grade, dim, smooth, pack) is
@@ -147,12 +151,12 @@ fn timing_offset(cell_bytes: u64) -> u64 {
 /// A frame's worth of post-processing, described independently of the GPU so
 /// the caller can build it without holding the device.
 pub struct Plan<'a> {
-    pub filters: &'a [String],
+    /// effect stack, grade and palette
+    pub look: &'a Look,
+    /// the look's lookup table (None when it would change nothing)
+    pub lut: Option<&'a Lut3D>,
     pub quick_filter: Option<&'a str>,
     pub t: f32,
-    pub hue_shift: f32,
-    pub saturation: f32,
-    pub contrast: f32,
     pub dim: f32,
     /// The engine's `settings.smooth`; the shader wants `1.0 - smooth`.
     pub smooth: f32,
@@ -179,9 +183,15 @@ pub struct Gpu {
     buf_a: wgpu::Buffer,
     buf_b: wgpu::Buffer,
     /// Three `w*h` planes in one allocation: smoothing history, then the two
-    /// bloom blur legs. Sharing a binding keeps the layout inside the
-    /// downlevel limit of four storage buffers per stage.
+    /// bloom blur legs, then the previous frame's cells (hysteresis), the
+    /// look's lookup table and its palette. Sharing a binding keeps the
+    /// layout inside the downlevel limit of four storage buffers per stage.
     scratch: wgpu::Buffer,
+    /// where the lookup table and the palette start in `scratch`, in u32s
+    lut_base: usize,
+    pal_base: usize,
+    /// the table in `scratch`: (look's `lut_key`, `buffers_gen` at upload)
+    lut_loaded: Option<(u64, u64)>,
     buf_cells: wgpu::Buffer,
     params_buf: wgpu::Buffer,
     /// [a→b, b→a]. Empty until the first `resize`, which is called from
@@ -449,6 +459,8 @@ impl Gpu {
             "bloom_h",
             "bloom_v_add",
             "grade",
+            "look_lut",
+            "palette_snap",
             "temporal_smooth",
             "pack_cells",
         ];
@@ -471,7 +483,10 @@ impl Gpu {
         let mut gpu = Gpu {
             buf_a: Self::pixel_buffer(&device, 1, "a"),
             buf_b: Self::pixel_buffer(&device, 1, "b"),
-            scratch: Self::pixel_buffer(&device, 3 + CELL_WORDS, "scratch"),
+            scratch: Self::pixel_buffer(&device, 3 + CELL_WORDS + LUT_WORDS + MAX_COLORS, "scratch"),
+            lut_base: 3 + CELL_WORDS,
+            pal_base: 3 + CELL_WORDS + LUT_WORDS,
+            lut_loaded: None,
             buf_cells: Self::cell_buffer(&device, 1),
             params_buf: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("params"),
@@ -574,8 +589,12 @@ impl Gpu {
         let px = width * height;
         self.buf_a = Self::pixel_buffer(&self.device, px, "a");
         self.buf_b = Self::pixel_buffer(&self.device, px, "b");
-        // three pixel planes, then the previous frame's cells (hysteresis)
-        self.scratch = Self::pixel_buffer(&self.device, px * 3 + max_cells.max(1) * CELL_WORDS, "scratch");
+        // three pixel planes, the previous frame's cells (hysteresis), then
+        // the look's lookup table and palette
+        self.lut_base = px * 3 + max_cells.max(1) * CELL_WORDS;
+        self.pal_base = self.lut_base + LUT_WORDS;
+        self.scratch = Self::pixel_buffer(&self.device, self.pal_base + MAX_COLORS, "scratch");
+        self.lut_loaded = None;
         self.buf_cells = Self::cell_buffer(&self.device, max_cells);
 
         let mk = |src: &wgpu::Buffer, dst: &wgpu::Buffer, this: &Gpu| {
@@ -742,23 +761,38 @@ impl Gpu {
             }
         };
 
-        for name in plan.filters {
+        for name in &plan.look.effects.stack {
             filter_pass(name, &mut push);
         }
 
         // colour grade — same early-out as `color_grade::apply`
-        let hue_on = plan.hue_shift >= 0.5;
-        let sat_on = (plan.saturation - 1.0).abs() > 0.02;
-        let con_on = (plan.contrast - 1.0).abs() > 0.02;
+        let g = &plan.look.grade;
+        let hue_on = g.hue >= 0.5;
+        let sat_on = (g.saturation - 1.0).abs() > 0.02;
+        let con_on = (g.contrast - 1.0).abs() > 0.02;
         if hue_on || sat_on || con_on {
             let mut p = base;
-            p.fp[1] = plan.hue_shift / 360.0;
-            p.fp[2] = plan.saturation;
-            p.fp[3] = plan.contrast;
+            p.fp[1] = g.hue / 360.0;
+            p.fp[2] = g.saturation;
+            p.fp[3] = g.contrast;
             p.flags[1] = hue_on as u32;
             p.flags[2] = sat_on as u32;
             p.flags[3] = con_on as u32;
             push("grade", p, Target::Pong);
+        }
+
+        // the look's table, then the palette snap (`engine::finish_look`)
+        if plan.lut.is_some() {
+            let mut p = base;
+            p.flags[1] = self.lut_base as u32;
+            push("look_lut", p, Target::Pong);
+        }
+        if plan.look.snaps() {
+            let mut p = base;
+            p.flags[1] = self.pal_base as u32;
+            p.flags[2] = plan.look.palette.colors.len().min(MAX_COLORS) as u32;
+            p.flags[3] = plan.look.palette.dither as u32;
+            push("palette_snap", p, Target::Pong);
         }
 
         if let Some(q) = plan.quick_filter {
@@ -850,6 +884,26 @@ impl Gpu {
             raw[i * stride..i * stride + bytes.len()].copy_from_slice(bytes);
         }
         self.queue.write_buffer(&self.params_buf, 0, &raw);
+
+        // the look's table and palette, when they changed
+        if let Some(lut) = plan.lut {
+            let key = (plan.look.lut_key(), self.buffers_gen);
+            if self.lut_loaded != Some(key) {
+                self.queue.write_buffer(&self.scratch, (self.lut_base * 4) as u64, bytemuck::cast_slice(&lut.data));
+                self.lut_loaded = Some(key);
+            }
+        }
+        if plan.look.snaps() {
+            let words: Vec<u32> = plan
+                .look
+                .palette
+                .colors
+                .iter()
+                .take(MAX_COLORS)
+                .map(|c| c.0 as u32 | (c.1 as u32) << 8 | (c.2 as u32) << 16)
+                .collect();
+            self.queue.write_buffer(&self.scratch, (self.pal_base * 4) as u64, bytemuck::cast_slice(&words));
+        }
 
         let mut enc = self
             .device

@@ -514,6 +514,112 @@ fn grade(@builtin(global_invocation_id) g: vec3<u32>) {
     dst[idx(g.x, g.y)] = pack(c);
 }
 
+// ------------------------------------------------------------------ look LUT
+
+// `look::Lut3D::apply`: tetrahedral interpolation through the look's 33^3
+// table, 10-bit channels packed `r | g << 10 | b << 20`. The host uploads it
+// into the scratch buffer at `flags.y` whenever it changes.
+const LUT_N: u32 = 33u;
+
+fn lut_node(r: u32, g: u32, b: u32) -> vec3<f32> {
+    let v = scratch[P.flags.y + (b * LUT_N + g) * LUT_N + r];
+    return vec3<f32>(f32(v & 1023u), f32((v >> 10u) & 1023u), f32((v >> 20u) & 1023u));
+}
+
+@compute @workgroup_size(8, 8)
+fn look_lut(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (oob(gid)) { return; }
+    let c = load(gid.x, gid.y);
+    let f = c * (f32(LUT_N - 1u) / 255.0);
+    let i = min(vec3<u32>(floor(f)), vec3<u32>(LUT_N - 2u));
+    let fr = f - vec3<f32>(i);
+    let c000 = lut_node(i.x, i.y, i.z);
+    let c111 = lut_node(i.x + 1u, i.y + 1u, i.z + 1u);
+    var w: vec4<f32>;
+    var ca: vec3<f32>;
+    var cb: vec3<f32>;
+    // the tetrahedron holding the point, by the order of its fractions
+    if (fr.x > fr.y) {
+        if (fr.y > fr.z) {
+            w = vec4<f32>(1.0 - fr.x, fr.x - fr.y, fr.y - fr.z, fr.z);
+            ca = lut_node(i.x + 1u, i.y, i.z);
+            cb = lut_node(i.x + 1u, i.y + 1u, i.z);
+        } else if (fr.x > fr.z) {
+            w = vec4<f32>(1.0 - fr.x, fr.x - fr.z, fr.z - fr.y, fr.y);
+            ca = lut_node(i.x + 1u, i.y, i.z);
+            cb = lut_node(i.x + 1u, i.y, i.z + 1u);
+        } else {
+            w = vec4<f32>(1.0 - fr.z, fr.z - fr.x, fr.x - fr.y, fr.y);
+            ca = lut_node(i.x, i.y, i.z + 1u);
+            cb = lut_node(i.x + 1u, i.y, i.z + 1u);
+        }
+    } else if (fr.z > fr.y) {
+        w = vec4<f32>(1.0 - fr.z, fr.z - fr.y, fr.y - fr.x, fr.x);
+        ca = lut_node(i.x, i.y, i.z + 1u);
+        cb = lut_node(i.x, i.y + 1u, i.z + 1u);
+    } else if (fr.z > fr.x) {
+        w = vec4<f32>(1.0 - fr.y, fr.y - fr.z, fr.z - fr.x, fr.x);
+        ca = lut_node(i.x, i.y + 1u, i.z);
+        cb = lut_node(i.x, i.y + 1u, i.z + 1u);
+    } else {
+        w = vec4<f32>(1.0 - fr.y, fr.y - fr.x, fr.x - fr.z, fr.z);
+        ca = lut_node(i.x, i.y + 1u, i.z);
+        cb = lut_node(i.x + 1u, i.y + 1u, i.z);
+    }
+    let v = w.x * c000 + w.y * ca + w.z * cb + w.w * c111;
+    dst[idx(gid.x, gid.y)] = pack(floor(v * (255.0 / 1023.0) + 0.5));
+}
+
+// ------------------------------------------------------------- palette snap
+
+// `look::snap_pixel`: nearest palette colour by a green-weighted distance,
+// or (flags.w) the two nearest mixed by a Bayer threshold in wall
+// coordinates. Colours sit in the scratch buffer at flags.y, flags.z of them.
+var<private> BAYER4: array<u32, 16> = array<u32, 16>(0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
+
+fn pal_color(k: u32) -> vec3<f32> { return unpack(scratch[P.flags.y + k]); }
+
+fn snap_dist(a: vec3<f32>, b: vec3<f32>) -> f32 {
+    let d = a - b;
+    return 2.0 * d.x * d.x + 4.0 * d.y * d.y + 3.0 * d.z * d.z;
+}
+
+@compute @workgroup_size(8, 8)
+fn palette_snap(@builtin(global_invocation_id) g: vec3<u32>) {
+    if (oob(g)) { return; }
+    let c = load(g.x, g.y);
+    let n = P.flags.z;
+    var best = 3.0e30;
+    var bi = 0u;
+    var second = 3.0e30;
+    var si = 0u;
+    for (var k = 0u; k < 8u; k = k + 1u) {
+        if (k >= n) { break; }
+        let d = snap_dist(c, pal_color(k));
+        if (d < best) {
+            second = best;
+            si = bi;
+            best = d;
+            bi = k;
+        } else if (d < second) {
+            second = d;
+            si = k;
+        }
+    }
+    var pick = bi;
+    if (P.flags.w != 0u && second < 1.0e30) {
+        let d1 = sqrt(best);
+        let d2 = sqrt(second);
+        var t = 0.0;
+        if (d1 + d2 > 0.0) { t = d1 / (d1 + d2); }
+        let bx = u32(((gx(g.x) % 4) + 4) % 4);
+        let by = u32(((gy(g.y) % 4) + 4) % 4);
+        let threshold = (f32(BAYER4[by * 4u + bx]) + 0.5) / 16.0;
+        if (t > threshold) { pick = si; }
+    }
+    dst[idx(g.x, g.y)] = pack(pal_color(pick));
+}
+
 // ------------------------------------------------------------------ smoothing
 
 // `Canvas::smooth_blend` — cur = prev*(1-a) + cur*a, glyph cells excluded.

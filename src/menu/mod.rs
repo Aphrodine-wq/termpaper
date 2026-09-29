@@ -247,9 +247,8 @@ pub struct MenuCtx {
     pub clock: bool,
     pub cycle: Option<f64>,
     pub cycle_scope: CycleScope,
-    pub hue_shift: f32,
-    pub saturation: f32,
-    pub contrast: f32,
+    /// grade, palette and effect stack
+    pub look: crate::look::Look,
     pub renderer: Renderer,
     /// whether Studio scenes can render here; None = not known yet
     pub gpu: Option<bool>,
@@ -257,7 +256,6 @@ pub struct MenuCtx {
     pub link_group: String,
     pub wall_enabled: bool,
     pub truecolor: bool,
-    pub filters: Vec<String>,
     pub favorites: Vec<String>,
     /// newest first
     pub recents: Vec<String>,

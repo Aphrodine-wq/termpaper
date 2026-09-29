@@ -18,13 +18,15 @@ fn ctx() -> MenuCtx {
         dim: 0.8,
         fade: 0.25,
         clock: true,
-        saturation: 1.0,
-        contrast: 1.0,
+        look: {
+            let mut l = crate::look::Look::default();
+            l.effects.stack = vec!["scanlines".into()];
+            l
+        },
         link_enabled: true,
         link_group: "default".into(),
         wall_enabled: true,
         truecolor: true,
-        filters: vec!["scanlines".into()],
         key_display: vec![("quit".into(), "q".into()), ("next".into(), "right".into())],
         instances: vec!["pid 1234     rain         up 5s (you)".into()],
         ..Default::default()
@@ -600,7 +602,11 @@ fn filters_sub_page_toggles_and_presets() {
         vec![Effect::SetFilters(vec![])]
     );
     let film = MenuCtx {
-        filters: vec!["warm".into(), "grain".into(), "vignette".into()],
+        look: {
+            let mut l = crate::look::Look::default();
+            l.effects.stack = vec!["warm".into(), "grain".into(), "vignette".into()];
+            l
+        },
         ..mid()
     };
     assert_eq!(

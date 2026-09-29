@@ -3,6 +3,7 @@
 use crate::{
     canvas::Canvas,
     color_grade, filter,
+    look::Baked,
     render::Pixels,
     scene::{shader::ShaderSpec, SceneOptions},
     sync::Playback,
@@ -223,11 +224,9 @@ pub struct Request {
     pub elapsed_ms: u64,
     /// hold the previous clock (legacy; anchored panes freeze `elapsed_ms`)
     pub paused: bool,
-    pub filters: Vec<String>,
+    /// grade, palette and effect stack, with its lookup table built
+    pub look: Baked,
     pub quick: Option<String>,
-    pub hue: f32,
-    pub saturation: f32,
-    pub contrast: f32,
     pub dim: f32,
     pub smooth: f32,
     /// GPU milliseconds a Studio scene pass may take per frame.
@@ -248,8 +247,7 @@ pub const APRON: usize = 8;
 /// Post filters that read neighbouring pixels.
 #[cfg(feature = "gpu")]
 fn needs_apron(filters: &[String], quick: Option<&str>) -> bool {
-    const NEIGHBOURS: &[&str] = &["bloom", "crt", "chroma", "pixelate", "edges", "warp", "sharpen"];
-    filters.iter().map(String::as_str).chain(quick).any(|f| NEIGHBOURS.contains(&f))
+    filters.iter().map(String::as_str).chain(quick).any(filter::reads_neighbours)
 }
 
 pub struct Frame {
@@ -365,14 +363,11 @@ fn frame_hash(u: &crate::gpu::FrameUniforms, r: &Request) -> u64 {
         }
     };
     eat(bytemuck::bytes_of(u));
-    for f in &r.filters {
-        eat(f.as_bytes());
-        eat(&[0]);
-    }
+    eat(&r.look.get().fingerprint().to_le_bytes());
     if let Some(q) = &r.quick {
         eat(q.as_bytes());
     }
-    for v in [r.hue, r.saturation, r.contrast, r.dim, r.smooth] {
+    for v in [r.dim, r.smooth] {
         eat(&v.to_le_bytes());
     }
     let v = &r.view;
@@ -521,12 +516,13 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
             // crop — rendered even where it overhangs the wall canvas, since
             // a Studio scene is defined everywhere — plus an apron all round
             // when a filter reads neighbours
-            let apron = if needs_apron(&request.filters, request.quick.as_deref()) { APRON } else { 0 };
+            let look = request.look.get();
+            let apron = if needs_apron(&look.effects.stack, request.quick.as_deref()) { APRON } else { 0 };
             let window = ((v.grid.0 * pw).max(1) + 2 * apron, (v.grid.1 * ph).max(1) + 2 * apron);
             let origin = (v.crop.0 as i64 - apron as i64, v.crop.1 as i64 - apron as i64);
             g.resize(window.0, window.1, v.grid.0 * v.grid.1);
             governor.set_budget(request.budget_ms);
-            let mirror = request.filters.iter().any(|f| f == "mirror");
+            let mirror = look.effects.stack.iter().any(|f| f == "mirror");
             let theme = opts
                 .theme
                 .as_deref()
@@ -559,7 +555,15 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
                 exposure: 0.0,
             });
             let hash = frame_hash(&u, &request);
-            let post_filters: Vec<String> = request.filters.iter().filter(|f| *f != "mirror").cloned().collect();
+            // the scene pass mirrors itself (seamless on a wall); the post
+            // chain must not flip it back
+            let post_look = if mirror {
+                let mut l = look.clone();
+                l.effects.stack.retain(|f| f != "mirror");
+                std::borrow::Cow::Owned(l)
+            } else {
+                std::borrow::Cow::Borrowed(look)
+            };
             let smooth = request
                 .smooth
                 .clamp(0.0, 0.999)
@@ -568,12 +572,10 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
             if last_hash != Some(hash) {
                 g.shader_frame(spec, u);
                 let plan = crate::gpu::Plan {
-                    filters: &post_filters,
+                    look: &post_look,
+                    lut: request.look.lut.as_deref(),
                     quick_filter: request.quick.as_deref(),
                     t: request.elapsed_ms as f32 / 1000.0,
-                    hue_shift: request.hue,
-                    saturation: request.saturation,
-                    contrast: request.contrast,
                     dim: request.dim,
                     smooth,
                     pixels: v.pixels,
@@ -683,12 +685,10 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
                 g.canvas_frame();
             }
             let plan = crate::gpu::Plan {
-                filters: &request.filters,
+                look: request.look.get(),
+                lut: request.look.lut.as_deref(),
                 quick_filter: request.quick.as_deref(),
                 t,
-                hue_shift: request.hue,
-                saturation: request.saturation,
-                contrast: request.contrast,
                 dim: request.dim,
                 smooth,
                 pixels: v.pixels,
@@ -715,13 +715,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
         }
         let mut canvas = raw.clone_for_smooth();
         if cells.is_none() {
-            filter::apply_all(&request.filters, &mut canvas, t);
-            color_grade::apply(
-                &mut canvas,
-                request.hue,
-                request.saturation,
-                request.contrast,
-            );
+            finish_look(&mut canvas, &request.look, t);
             if let Some(q) = &request.quick {
                 filter::apply(q, &mut canvas, t);
             }
@@ -744,6 +738,21 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
         if mailbox.generation == generation && !mailbox.stopped {
             mailbox.frame = Some(frame);
         }
+    }
+}
+
+/// The Look on the CPU, in the order the GPU schedules it: the effect stack,
+/// the hue/saturation/contrast grade, the lookup table, the palette snap.
+pub fn finish_look(canvas: &mut Canvas, baked: &Baked, t: f32) {
+    let look = baked.get();
+    filter::apply_stack(&look.effects, canvas, t);
+    let g = &look.grade;
+    color_grade::apply(canvas, g.hue, g.saturation, g.contrast);
+    if let Some(lut) = &baked.lut {
+        crate::look::apply_lut(canvas, lut);
+    }
+    if look.snaps() {
+        crate::look::apply_snap(canvas, &look.palette, (0, 0));
     }
 }
 
@@ -787,11 +796,8 @@ mod tests {
             },
             elapsed_ms: 100,
             paused: false,
-            filters: vec![],
+            look: Baked::default(),
             quick: None,
-            hue: 0.0,
-            saturation: 1.0,
-            contrast: 1.0,
             dim: 1.0,
             smooth: 0.0,
             budget_ms: DEFAULT_GPU_BUDGET_MS,

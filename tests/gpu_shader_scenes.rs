@@ -122,13 +122,12 @@ fn pane_cells(
     let mut d = desc(canvas, (0, 0), window, 0, 30_000);
     d.view = gpu::ShaderView::for_window(canvas, origin, 1.0);
     g.shader_frame(spec, gpu::uniforms(&d));
+    let look = termpaper::look::Look::with_effects(filters);
     let plan = gpu::Plan {
-        filters,
+        look: &look,
+        lut: None,
         quick_filter: None,
         t: 30.0,
-        hue_shift: 0.0,
-        saturation: 1.0,
-        contrast: 1.0,
         dim: 1.0,
         smooth: 0.0,
         pixels: Pixels::Half,
@@ -189,12 +188,10 @@ fn hysteresis_holds_small_changes_and_passes_big_ones() {
     let frame = |g: &mut Gpu, ms: u64, dim: f32, hysteresis: u8| {
         g.shader_frame(spec, gpu::uniforms(&desc(size, (0, 0), size, 0, ms)));
         let plan = gpu::Plan {
-            filters: &[],
+            look: &termpaper::look::Look::default(),
+            lut: None,
             quick_filter: None,
             t: ms as f32 / 1000.0,
-            hue_shift: 0.0,
-            saturation: 1.0,
-            contrast: 1.0,
             dim,
             smooth: 0.0,
             pixels: Pixels::Half,
@@ -262,11 +259,8 @@ fn the_worker_delivers_cells_for_a_studio_scene() {
             },
             elapsed_ms: start.elapsed().as_millis() as u64,
             paused: false,
-            filters: vec!["vignette".into()],
+            look: termpaper::look::Baked::new(termpaper::look::Look::with_effects(&["vignette".to_string()])),
             quick: None,
-            hue: 0.0,
-            saturation: 1.0,
-            contrast: 1.0,
             dim: 1.0,
             smooth: 0.0,
             budget_ms: DEFAULT_GPU_BUDGET_MS,

@@ -2,8 +2,9 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -54,6 +55,6 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
       - name: GPU tests
-        run: cargo test --release --locked --test gpu_shader_scenes --test gpu_world -- --ignored --test-threads=1
+        run: cargo test --release --locked --test gpu_shader_scenes --test gpu_world --test gpu_parity -- --ignored --test-threads=1
         env:
           RUST_BACKTRACE: "1"
