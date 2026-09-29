@@ -107,33 +107,34 @@ fn toe_cells(p: vec2f) -> vec3f {
     return vec3f(sqrt(d1), sqrt(d2), id);
 }
 
-// pahoehoe lobes: (F1, F2 - F1, gradient of F2 - F1) of a jittered grid,
-// and the vector from p to the nearest lobe's seed (for ropes and colour)
+// pahoehoe lobes: every cell of a jittered grid inflates a dome (a
+// paraboloid of random size); the ground is the highest dome, so lobes are
+// rounded on top and meet in sharp cracks. Returns the winning dome's height
+// gradient (cell units), the gap to the runner-up (0 in a crack), the vector
+// to its centre (for ropes) and a random id (for colour)
 struct Lobe { f1: f32, e: f32, g: vec2f, r1: vec2f, id: f32 }
 
 fn lobes(p: vec2f) -> Lobe {
     let i = vec2i(floor(p));
     let f = fract(p);
-    var d1 = 8.0;
-    var d2 = 8.0;
+    var v1 = -8.0;
+    var v2 = -8.0;
     var r1 = vec2f(0.0);
-    var r2 = vec2f(0.0);
     var id = 0.0;
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
             let o = vec2i(x, y);
             let h = hash_cell2(i + o, 0x9a17u);
-            let r = vec2f(o) + 0.15 + 0.7 * h.xy - f;
-            let dd = dot(r, r);
-            if (dd < d1) { d2 = d1; r2 = r1; d1 = dd; r1 = r; id = h.z; } else if (dd < d2) { d2 = dd; r2 = r; }
+            let r = vec2f(o) + 0.1 + 0.8 * h.xy - f;
+            let rr = 0.55 + 0.35 * h.w;
+            let v = rr * rr - dot(r, r);
+            if (v > v1) { v2 = v1; v1 = v; r1 = r; id = h.z; } else if (v > v2) { v2 = v; }
         }
     }
-    let f1 = sqrt(d1);
-    let f2 = sqrt(d2);
     var lb: Lobe;
-    lb.f1 = f1;
-    lb.e = f2 - f1;
-    lb.g = r1 / max(f1, 1e-4) - r2 / max(f2, 1e-4);
+    lb.f1 = length(r1);
+    lb.e = v1 - v2;
+    lb.g = 2.0 * r1;
     lb.r1 = r1;
     lb.id = id;
     return lb;
@@ -272,13 +273,14 @@ fn plume_axis(y: f32, t: f32) -> vec2f {
     return ENTRY.xz + lean + sway;
 }
 
-fn plume_dens(p: vec3f, t: f32) -> f32 {
-    if (p.y < -2.0 || p.y > PLUME_TOP) { return 0.0; }
+// (x: density; y: the billows' reach here, low in the creases between them)
+fn plume_dens(p: vec3f, t: f32) -> vec2f {
+    if (p.y < -2.0 || p.y > PLUME_TOP) { return vec2f(0.0); }
     let y = max(p.y, 0.0);
-    let rad = 15.0 + 0.34 * y;
+    let rad = 18.0 + 0.38 * y;
     let d = p.xz - plume_axis(y, t);
     let r = length(d) / rad;
-    if (r > 1.7) { return 0.0; }
+    if (r > 1.7) { return vec2f(0.0); }
     // self-similar cauliflower: the lobes grow as they climb (log height)
     // and roll slowly upward; |noise| gives round heads with sharp creases
     let q = vec3f(d.x / rad * 1.25, log(rad) * 3.3 - t * 0.04, d.y / rad * 1.25);
@@ -289,7 +291,7 @@ fn plume_dens(p: vec3f, t: f32) -> f32 {
     // it thins and frays as it climbs, evaporating into the dry air
     let fade = sstep(PLUME_TOP, PLUME_TOP * 0.3, y) * smoothstep(-2.0, 4.0, p.y);
     let body = sstep(1.0, 0.82, r - 0.62 * bil + 0.1 + (1.0 - fade) * 0.5);
-    return body * fade;
+    return vec2f(body * fade, b1 * 0.72 + b2 * 0.28);
 }
 
 // march the plume; (radiance, transmittance)
@@ -312,23 +314,28 @@ fn steam(ro: vec3f, rd: vec3f, tmax: f32, t: f32, jit: f32, l: Look, n: i32) -> 
     var tt = t0 + dt * jit;
     var tr = 1.0;
     var acc = vec3f(0.0);
-    let glow = fire_temperature_color(0.72) * l.lava;
+    let glow_lo = fire_temperature_color(0.74) * l.lava;
+    let glow_hi = fire_temperature_color(0.6) * 1.4 * l.lava;
     for (var i = 0; i < 48; i++) {
         if (i >= n || tr < 0.02) { break; }
         let p = ro + rd * tt;
-        let d = plume_dens(p, t);
+        let pd = plume_dens(p, t);
+        let d = pd.x;
         if (d > 0.01) {
             let y = max(p.y, 0.0);
             // lit from below by the entry: a lobe glows on the side facing
             // down toward it and falls dark on its crown
             let ve = ENTRY + vec3f(0.0, -4.0, 0.0) - p;
             let de2 = dot(ve, ve);
-            let dl = plume_dens(p + ve * inverseSqrt(de2) * (5.0 + 0.1 * y), t);
+            let dl = plume_dens(p + ve * inverseSqrt(de2) * (5.0 + 0.1 * y), t).x;
             let facing = saturate((d - dl) * 2.0 + 0.15 + 0.6 * exp(-y / 18.0));
             let reach = 1.2 / (1.0 + de2 / 700.0) + 0.012 * exp(-y / 200.0);
-            let lit = glow * reach * facing;
+            // the light reddens as it climbs through the steam; the creases
+            // between billows stay dark
+            let crease = mix(0.35, 1.0, smoothstep(0.08, 0.45, pd.y));
+            let lit = mix(glow_lo, glow_hi, smoothstep(8.0, 110.0, y)) * reach * facing * crease;
             let top = smoothstep(30.0, 300.0, y);
-            let sky = l.amb * (1.2 + 1.5 * top) + l.moon_c * 0.4 * top * (1.2 - facing);
+            let sky = (l.amb * (1.2 + 1.5 * top) + l.moon_c * 0.4 * top * (1.2 - facing)) * crease;
             let ext = d * 0.07;
             let st = exp(-ext * dt);
             acc += tr * (lit + sky) * (1.0 - st);
@@ -497,23 +504,23 @@ fn shade_land(p: vec3f, rd: vec3f, t: f32, pxa: f32, l: Look, ctx: Ctx) -> vec3f
         // each lobe inflates into a dome, rounded on top, steep at its margin
         // smooth sheets in places, lumpy toes and lobes in others
         let lumpy = smoothstep(0.2, 0.65, noise_value2(p.xz * 0.035 + 2.0));
-        let hgt = 0.5 * (0.3 + lb.id) * (0.25 + 0.75 * lumpy);
-        var g = lb.g * s1 * hgt * 4.0 * exp(-lb.e * 4.0);
+        let hgt = 1.3 * (0.3 + lb.id) * (0.25 + 0.75 * lumpy);
+        var g = lb.g * s1 * hgt;
         let rk = saturate(1.0 - fp / 0.22);
         if (rk > 0.0) {
             let rp = lb.f1 * 42.0 + noise_value2(p.xz * 0.9) * 2.5;
-            g += -lb.r1 / max(lb.f1, 1e-3) * s1 * cos(rp) * 42.0 * 0.014 * rk * sstep(0.04, 0.16, lb.e);
+            g += -lb.r1 / max(lb.f1, 1e-3) * s1 * cos(rp) * 42.0 * 0.014 * rk * sstep(0.02, 0.12, lb.e);
         }
         n = normalize(n - vec3f(g.x, 0.0, g.y) * lk);
         crack = mix(1.0, 0.45 + 0.55 * sstep(0.0, 0.04, lb.e), lk * saturate(1.3 - fp / 1.2) * (0.3 + 0.7 * lumpy));
-        shine = mix(1.0, 0.35 + 0.9 * lb.id, lk);
+        shine = mix(1.0, 0.2 + 0.65 * lb.id, lk);
         tone = mix(0.5, lb.id, lk);
     }
     // older, larger inflation lobes and tumuli further out
     let bk2 = saturate(1.0 - fp / 6.0) * (1.0 - lk * 0.5);
     if (bk2 > 0.0) {
         let lb2 = lobes(p.xz * 0.07 + vec2f(9.1, 4.3));
-        let g2 = lb2.g * 0.07 * exp(-lb2.e * 3.0) * 3.0 * 2.0;
+        let g2 = lb2.g * 0.07 * 2.6;
         n = normalize(n - vec3f(g2.x, 0.0, g2.y) * bk2);
         crack *= mix(1.0, sstep(0.0, 0.06, lb2.e), bk2 * 0.7);
     }
@@ -616,7 +623,7 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
     }
     col += fire_temperature_color(0.66) * l.lava * tr_.y * 0.004;
     // the steam column in front of whatever lies behind it
-    let st = steam(ro, rd, tt, ctx.t, ctx.jitter, l, steps(28.0, ctx));
+    let st = steam(ro, rd, tt, ctx.t, ctx.jitter, l, steps(34.0, ctx));
     col = col * st.w + st.rgb;
     return col * exp2(l.exposure);
 }
