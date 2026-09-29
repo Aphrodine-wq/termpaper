@@ -329,9 +329,13 @@ pub struct InstanceInfo {
     pub cols: usize,
     pub rows: usize,
     pub geo: Option<(i32, i32, i32, i32)>,
-    /// terminal padding in px (x, y) — the cell grid is inset by this much
-    /// inside the window geometry, so wall crops must account for it
-    pub pad: (i32, i32),
+    /// terminal padding in layout px (x, y) — the cell grid is inset by
+    /// this much inside the window geometry, so wall crops must account for it
+    pub pad: (f32, f32),
+    /// measured cell size in layout px (proto 2; None when unmeasured)
+    pub cell: Option<(f32, f32)>,
+    /// where the terminal puts its leftover strip
+    pub placement: crate::wall::Placement,
     /// running the group's shared anchor — false after a local `--cycle`
     /// switch; such a peer must not lead the group
     pub synced: bool,
@@ -501,7 +505,9 @@ pub struct Guard {
     cols: usize,
     rows: usize,
     geo: Option<(i32, i32, i32, i32)>,
-    pad: (i32, i32),
+    pad: (f32, f32),
+    cell: Option<(f32, f32)>,
+    placement: crate::wall::Placement,
     synced: bool,
     reanchor: Option<Stamp>,
     ctrl_seen: Option<FileSig>,
@@ -575,7 +581,9 @@ impl Guard {
             cols: 0,
             rows: 0,
             geo: None,
-            pad: (0, 0),
+            pad: (0.0, 0.0),
+            cell: None,
+            placement: crate::wall::Placement::TopLeft,
             synced: true,
             reanchor: None,
             ctrl_seen: None,
@@ -606,10 +614,15 @@ impl Guard {
             Some(s) => format!(",\"reanchor\":\"{}\"", s.encode()),
             None => String::new(),
         };
+        let cell_json = match self.cell {
+            Some((w, h)) => format!(",\"cw\":{w},\"ch\":{h}"),
+            None => String::new(),
+        };
+        // px/py stay whole numbers for older binaries; padx/pady are exact
         atomic_write(
             &self.path(),
             &format!(
-                "{{\"pid\":{},\"proto\":{},\"scene\":\"{}\",\"group\":\"{}\",\"started_at_epoch_secs\":{},\"cols\":{},\"rows\":{},\"px\":{},\"py\":{},\"synced\":{},\"version\":\"{}\"{}{}}}",
+                "{{\"pid\":{},\"proto\":{},\"scene\":\"{}\",\"group\":\"{}\",\"started_at_epoch_secs\":{},\"cols\":{},\"rows\":{},\"px\":{},\"py\":{},\"padx\":{},\"pady\":{},\"place\":\"{}\",\"synced\":{},\"version\":\"{}\"{}{}{}}}",
                 self.pid,
                 PROTO,
                 esc(&self.scene),
@@ -617,10 +630,14 @@ impl Guard {
                 self.started_at,
                 self.cols,
                 self.rows,
+                self.pad.0.round() as i32,
+                self.pad.1.round() as i32,
                 self.pad.0,
                 self.pad.1,
+                self.placement.name(),
                 self.synced,
                 env!("CARGO_PKG_VERSION"),
+                cell_json,
                 reanchor_json,
                 geo_json,
             ),
@@ -637,10 +654,13 @@ impl Guard {
         }
     }
 
-    /// Record terminal padding in px (set once at startup from --pad/config).
-    pub fn set_pad(&mut self, pad: (i32, i32)) {
-        if self.pad != pad {
+    /// Record the facts peers need to place this pane's cell grid exactly:
+    /// terminal padding (layout px), leftover placement, measured cell size.
+    pub fn set_layout(&mut self, pad: (f32, f32), placement: crate::wall::Placement, cell: Option<(f32, f32)>) {
+        if self.pad != pad || self.placement != placement || self.cell != cell {
             self.pad = pad;
+            self.placement = placement;
+            self.cell = cell;
             let _ = self.write();
         }
     }
@@ -861,10 +881,21 @@ pub fn parse_instance(text: &str) -> Option<InstanceInfo> {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0),
         geo,
-        pad: (
-            json_get(text, "px").and_then(|v| v.parse().ok()).unwrap_or(0),
-            json_get(text, "py").and_then(|v| v.parse().ok()).unwrap_or(0),
-        ),
+        pad: {
+            let f = |exact: &str, whole: &str| {
+                json_get(text, exact)
+                    .or_else(|| json_get(text, whole))
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .filter(|v| v.is_finite() && *v >= 0.0)
+                    .unwrap_or(0.0)
+            };
+            (f("padx", "px"), f("pady", "py"))
+        },
+        cell: json_get(text, "cw")
+            .zip(json_get(text, "ch"))
+            .and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?)))
+            .filter(|(w, h)| w.is_finite() && h.is_finite() && *w >= 1.0 && *h >= 1.0),
+        placement: json_get(text, "place").and_then(crate::wall::Placement::parse).unwrap_or_default(),
         // older instance files predate the flag: treat them as anchored
         synced: json_get(text, "synced").map(|v| v != "false").unwrap_or(true),
         reanchor: json_get(text, "reanchor").and_then(Stamp::decode),
@@ -1206,6 +1237,25 @@ mod tests {
         assert_eq!(info.proto, PROTO);
         g.set_reanchor(None);
         assert_eq!(parse_instance(&std::fs::read_to_string(&inst).unwrap()).unwrap().reanchor, None);
+        drop(g);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inst_files_carry_exact_padding_cells_and_placement() {
+        let dir = temp_dir("layout");
+        let mut g = Guard::new_in(dir.clone(), "rain", "default").unwrap();
+        g.set_layout((4.6666665, 2.0), crate::wall::Placement::Center, Some((9.0, 20.0)));
+        let text = std::fs::read_to_string(dir.join(format!("inst-{}.json", g.pid))).unwrap();
+        let info = parse_instance(&text).unwrap();
+        assert_eq!(info.pad, (4.6666665, 2.0));
+        assert_eq!(info.cell, Some((9.0, 20.0)));
+        assert_eq!(info.placement, crate::wall::Placement::Center);
+        // older binaries read whole px from px/py
+        assert!(text.contains("\"px\":5,") && text.contains("\"py\":2,"), "{text}");
+        // and an older binary's file (whole px, no cells) still parses
+        let old = parse_instance("{\"pid\":7,\"scene\":\"fire\",\"started_at_epoch_secs\":1,\"px\":7,\"py\":3}").unwrap();
+        assert_eq!((old.pad, old.cell, old.placement), ((7.0, 3.0), None, crate::wall::Placement::TopLeft));
         drop(g);
         let _ = std::fs::remove_dir_all(&dir);
     }

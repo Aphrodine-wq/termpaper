@@ -46,8 +46,21 @@ pub struct Config {
     pub gpu_budget_ms: Option<f32>,
     /// fps cap while a Studio scene is showing (default 60)
     pub shader_fps: Option<u32>,
+    /// terminal padding, so wall crops line up across window borders:
+    /// `7` (px), `"3.5pt"` (points, e.g. kitty's `window_padding_width`),
+    /// or `[x, y]` of either
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pad: Option<i32>,
+    pub pad: Option<PadSpec>,
+    /// where the terminal puts the leftover strip when the window is not a
+    /// whole number of cells: `"top-left"` (kitty's default: grid at the
+    /// padding, leftover right/bottom) or `"center"`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement: Option<crate::wall::Placement>,
+    /// Studio scenes: cells whose colours move by at most this many levels
+    /// (and keep their glyph) are re-sent unchanged, so the terminal diff
+    /// skips them. 0 = off; default 3. Classic scenes never use it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hysteresis: Option<u8>,
     /// global hue rotation in degrees (0 = off)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hue_shift: Option<f32>,
@@ -71,6 +84,70 @@ pub struct Config {
     /// action → key remaps
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub keys: HashMap<String, String>,
+}
+
+/// One padding length: a number of px, or a string with a unit (`"3.5pt"`,
+/// `"7px"`, `"7"`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PadLen {
+    Px(f64),
+    Text(String),
+}
+
+/// Terminal padding: one length for both axes, or `[x, y]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PadSpec {
+    One(PadLen),
+    Two([PadLen; 2]),
+}
+
+/// CSS px per pt: terminals size points at 96 dpi logical.
+const PX_PER_PT: f64 = 96.0 / 72.0;
+
+impl PadLen {
+    /// Length in the compositor's layout px. `scale` is layout px per
+    /// logical px: 1 on Hyprland, whose window geometry is already logical
+    /// (a terminal's points are logical too: 96 dpi × monitor scale in
+    /// physical px). None for an unparsable string.
+    pub fn px(&self, scale: f64) -> Option<f64> {
+        let v = match self {
+            PadLen::Px(v) => *v,
+            PadLen::Text(s) => {
+                let s = s.trim();
+                if let Some(pt) = s.strip_suffix("pt") {
+                    pt.trim().parse::<f64>().ok()? * PX_PER_PT * scale
+                } else {
+                    s.strip_suffix("px").unwrap_or(s).trim().parse::<f64>().ok()?
+                }
+            }
+        };
+        (v.is_finite() && v >= 0.0).then_some(v)
+    }
+}
+
+impl PadSpec {
+    /// (x, y) padding in layout px; unparsable parts count as 0.
+    pub fn to_px(&self, scale: f64) -> (f32, f32) {
+        let px = |l: &PadLen| l.px(scale).unwrap_or(0.0) as f32;
+        match self {
+            PadSpec::One(l) => (px(l), px(l)),
+            PadSpec::Two([x, y]) => (px(x), px(y)),
+        }
+    }
+
+    /// The `--pad` flag: `7`, `3.5pt`, or `x,y` of either.
+    pub fn parse(s: &str) -> Option<PadSpec> {
+        let len = |t: &str| {
+            let l = PadLen::Text(t.trim().to_string());
+            l.px(1.0).map(|_| l)
+        };
+        match s.split_once(',') {
+            Some((x, y)) => Some(PadSpec::Two([len(x)?, len(y)?])),
+            None => Some(PadSpec::One(len(s)?)),
+        }
+    }
 }
 
 /// Built-in runtime defaults (empty config file, no CLI overrides).
@@ -322,6 +399,34 @@ mod tests {
         assert_eq!(cfg.group, None);
         assert!(cfg.themes.is_empty());
         assert_eq!(cfg.keys.get("quit").map(|s| s.as_str()), Some("x"));
+    }
+
+    #[test]
+    fn pad_accepts_px_points_and_pairs() {
+        let parse = |t: &str| toml::from_str::<Config>(t).unwrap().pad.unwrap().to_px(1.0);
+        assert_eq!(parse("pad = 7"), (7.0, 7.0));
+        assert_eq!(parse("pad = 4.5"), (4.5, 4.5));
+        let (x, y) = parse("pad = \"3.5pt\"");
+        assert!((x - 4.6667).abs() < 1e-3 && x == y, "3.5pt is {x}px");
+        assert_eq!(parse("pad = \"7px\""), (7.0, 7.0));
+        let (x, y) = parse("pad = [6, \"3pt\"]");
+        assert_eq!((x, y), (6.0, 4.0));
+        // at 2x (layout px per logical px) points double
+        let two = toml::from_str::<Config>("pad = \"3pt\"").unwrap().pad.unwrap().to_px(2.0);
+        assert_eq!(two, (8.0, 8.0));
+        // the --pad flag
+        assert_eq!(PadSpec::parse("7").unwrap().to_px(1.0), (7.0, 7.0));
+        assert_eq!(PadSpec::parse("3pt,2").unwrap().to_px(1.0), (4.0, 2.0));
+        assert!(PadSpec::parse("wide").is_none());
+        assert!(PadSpec::parse("-3").is_none());
+        // round-trips through the saved config in the user's own form
+        let cfg: Config = toml::from_str("pad = \"3.5pt\"\nplacement = \"center\"\nhysteresis = 2").unwrap();
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.pad, Some(PadSpec::One(PadLen::Text("3.5pt".into()))));
+        assert_eq!(back.placement, Some(crate::wall::Placement::Center));
+        assert_eq!(back.hysteresis, Some(2));
+        let tl: Config = toml::from_str("placement = \"top-left\"").unwrap();
+        assert_eq!(tl.placement, Some(crate::wall::Placement::TopLeft));
     }
 
     #[test]

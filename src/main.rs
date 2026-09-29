@@ -116,10 +116,11 @@ struct Args {
     #[arg(long)]
     wall: Option<String>,
 
-    /// Terminal padding in px (all sides) so wall crops line up across
-    /// window borders despite the margin
+    /// Terminal padding so wall crops line up across window borders despite
+    /// the margin: px (`7`), points (`3.5pt`, e.g. kitty's
+    /// window_padding_width), or `x,y`
     #[arg(long)]
-    pad: Option<i32>,
+    pad: Option<String>,
 }
 
 fn detect_truecolor() -> bool {
@@ -314,7 +315,15 @@ fn main() -> std::io::Result<()> {
         dim: cfg.dim.unwrap_or(1.0),
         fade: cfg.fade.unwrap_or(0.25),
         clock: cfg.clock.unwrap_or(true),
-        pad: args.pad.or(cfg.pad).unwrap_or(0),
+        pad: args
+            .pad
+            .as_deref()
+            .and_then(config::PadSpec::parse)
+            .or_else(|| cfg.pad.clone())
+            // layout px: Hyprland geometry is logical, and so are points
+            .map(|p| p.to_px(1.0))
+            .unwrap_or((0.0, 0.0)),
+        placement: cfg.placement.unwrap_or_default(),
         cfg,
         keymap,
         text_scale,
@@ -395,7 +404,10 @@ struct Settings {
     dim: f32,
     fade: f32,
     clock: bool,
-    pad: i32,
+    /// terminal padding in layout px (x, y)
+    pad: (f32, f32),
+    /// where the terminal puts its leftover strip
+    placement: wall::Placement,
     cfg: config::Config,
     theme: Option<String>,
     text_scale: Option<u32>,
@@ -418,6 +430,20 @@ struct Settings {
     gpu_budget_ms: f32,
     /// fps cap for Studio scenes: they animate on the shared 60 Hz tick
     shader_fps: u32,
+}
+
+/// The terminal's cell size in layout px from its reported pixel size
+/// (TIOCGWINSZ), divided by the monitor scale when the compositor tells us.
+fn measure_cell_px(geo: Option<&wall::GeoWatcher>) -> Option<(f32, f32)> {
+    let ws = crossterm::terminal::window_size().ok()?;
+    wall::measure_cell(
+        ws.columns as usize,
+        ws.rows as usize,
+        ws.width,
+        ws.height,
+        geo.and_then(|w| w.latest_scale()),
+        geo.and_then(|w| w.latest()),
+    )
 }
 
 /// How long before the frame deadline to stop sleeping and busy-wait.
@@ -746,12 +772,13 @@ fn reset_link_guard(
     enabled: bool,
     group: &str,
     scene: &str,
-    pad: (i32, i32),
+    pad: (f32, f32),
 ) {
     *guard = None;
     if enabled {
         *guard = link::Guard::new(scene, group).map(|mut g| {
-            g.set_pad(pad);
+            // placement and cell size follow with the next wall refresh
+            g.set_layout(pad, wall::Placement::default(), None);
             g
         });
     }
@@ -809,7 +836,7 @@ fn apply_defaults(
         settings.link_enabled,
         &settings.link_group,
         scene_name,
-        (settings.pad, settings.pad),
+        settings.pad,
     );
 }
 
@@ -819,9 +846,12 @@ fn run(
     mut settings: Settings,
 ) -> std::io::Result<()> {
     let names = scene::all_names();
+    // the terminal's true cell size (layout px), when it reports one
+    let mut cell_px: Option<(f32, f32)> = None;
+    let mut cell_grid = (0usize, 0usize);
     let mut guard = if settings.link_enabled {
         link::Guard::new(start_scene, &settings.link_group).map(|mut g| {
-            g.set_pad((settings.pad, settings.pad));
+            g.set_layout(settings.pad, settings.placement, cell_px);
             g
         })
     } else {
@@ -1041,12 +1071,22 @@ fn run(
             lead.reset();
         }
 
+        // the terminal's true cell size, re-measured whenever the grid
+        // changes (and with every wall refresh: the monitor scale may have)
+        let term = terminal.size()?;
+        if (term.width as usize, term.height as usize) != cell_grid {
+            cell_grid = (term.width as usize, term.height as usize);
+            cell_px = measure_cell_px(geo_watcher.as_ref());
+            wall_refresh = Instant::now() - Duration::from_secs(10);
+        }
+
         // video wall: refresh layout every 2s from registry geometry
         if (settings.link_enabled || settings.wall_spec.is_some())
             && wall_refresh.elapsed() > Duration::from_secs(2)
         {
             wall_refresh = Instant::now();
-            let (cols, rows) = (terminal.size()?.width as usize, terminal.size()?.height as usize);
+            let (cols, rows) = cell_grid;
+            cell_px = measure_cell_px(geo_watcher.as_ref());
             // a --no-wall pane publishes no geometry, so peers never fold it
             // into their wall either
             let geo = geo_watcher
@@ -1055,14 +1095,17 @@ fn run(
                 .and_then(|w| w.latest());
             if let Some(g) = &mut guard {
                 g.set_geometry(cols, rows, geo.map(|g| (g.x, g.y, g.w, g.h)));
+                g.set_layout(settings.pad, settings.placement, cell_px);
             }
             let old_layout = wall_layout;
             wall_layout = if let Some(spec) = &settings.wall_spec {
                 wall::manual_layout(spec, cols, rows)
             } else if settings.link_enabled && settings.wall_enabled {
+                let me = std::process::id();
                 let mut parts: Vec<wall::Participant> = peers
                     .list
                     .iter()
+                    .filter(|i| i.pid != me)
                     .filter_map(|i| {
                         i.geo.map(|(x, y, w, h)| wall::Participant {
                             pid: i.pid,
@@ -1070,22 +1113,25 @@ fn run(
                             cols: i.cols.max(1),
                             rows: i.rows.max(1),
                             pad: i.pad,
+                            cell: i.cell,
+                            placement: i.placement,
                         })
                     })
                     .collect();
-                // include ourselves even if hyprctl is unavailable to others
+                // ourselves from fresh local facts (our registry entry can be
+                // two seconds stale), even if hyprctl is unavailable to others
                 if let Some(g) = geo {
-                    if !parts.iter().any(|p| p.pid == std::process::id()) {
-                        parts.push(wall::Participant {
-                            pid: std::process::id(),
-                            geo: g,
-                            cols,
-                            rows,
-                            pad: (settings.pad, settings.pad),
-                        });
-                    }
+                    parts.push(wall::Participant {
+                        pid: me,
+                        geo: g,
+                        cols,
+                        rows,
+                        pad: settings.pad,
+                        cell: cell_px,
+                        placement: settings.placement,
+                    });
                 }
-                wall::compute_layout(parts, std::process::id())
+                wall::compute_layout(parts, me)
             } else {
                 None
             };
@@ -1148,7 +1194,12 @@ fn run(
                     grid: (area.width as usize, area.height as usize),
                     crop,
                     pixels: shown_pixels,
-                    cell_aspect: termpaper::engine::DEFAULT_CELL_ASPECT,
+                    // the real cell shape: this pane's own when local, one
+                    // shared by every pane in a wall (else the 1:2 default)
+                    cell_aspect: match wall_layout {
+                        Some(l) => l.cell_aspect.unwrap_or(termpaper::engine::DEFAULT_CELL_ASPECT),
+                        None => cell_px.map(|(w, h)| h / w).unwrap_or(termpaper::engine::DEFAULT_CELL_ASPECT),
+                    },
                     rev: view_rev,
                 },
                 // a paused anchor freezes elapsed itself: the worker keeps
@@ -1596,7 +1647,7 @@ fn run(
                                             on,
                                             &settings.link_group,
                                             names[idx],
-                                            (settings.pad, settings.pad),
+                                            settings.pad,
                                         );
                                         join_group(&mut st, &mut guard, &mut transition, &names, &mut settings, &mut opts);
                                         persist(&mut settings, names[idx], &opts);
@@ -1608,7 +1659,7 @@ fn run(
                                             settings.link_enabled,
                                             &settings.link_group,
                                             names[idx],
-                                            (settings.pad, settings.pad),
+                                            settings.pad,
                                         );
                                         join_group(&mut st, &mut guard, &mut transition, &names, &mut settings, &mut opts);
                                         persist(&mut settings, names[idx], &opts);
