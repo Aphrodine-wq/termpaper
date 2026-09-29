@@ -106,6 +106,8 @@ fn base_plan<'a>(filters: &'a [String], pixels: Pixels, cols: usize, rows: usize
         cols,
         rows,
         crop: (0, 0),
+        virt: None,
+        hysteresis: 0,
     }
 }
 

@@ -20,8 +20,14 @@ struct Params {
     fp: vec4<f32>,
     // p3, p4, p5, p6
     fp2: vec4<f32>,
-    // pixel mode (0 half, 1 quad, 2 braille), unused...
+    // pixel mode (0 half, 1 quad, 2 braille), then three pass-specific
+    // values (pack_cells: hysteresis threshold, history valid)
     flags: vec4<u32>,
+    // where this buffer sits on the wall: global x0, y0 of its pixel (0, 0)
+    // (i32 bits: an apron can start left of the wall), wall W, H. Position-
+    // dependent filters work in these coordinates so they run seamlessly
+    // across panes; a CPU canvas passes (0, 0, w, h) and nothing changes.
+    virt: vec4<u32>,
 }
 
 @group(0) @binding(0) var<storage, read>       src:   array<u32>;
@@ -29,20 +35,28 @@ struct Params {
 @group(0) @binding(2) var<uniform>             P:     Params;
 @group(0) @binding(4) var<storage, read_write> cells: array<u32>;
 
-// One scratch allocation holding three planes: the smoothing history and the
-// two bloom blur legs. They are separate conceptually but share a binding so
-// the layout needs only four storage buffers, which is the downlevel limit —
-// six would have shut out every device that only guarantees the minimum.
+// One scratch allocation holding three planes — the smoothing history and the
+// two bloom blur legs — then the previous frame's packed cells (hysteresis).
+// They are separate conceptually but share a binding so the layout needs only
+// four storage buffers, which is the downlevel limit — six would have shut out
+// every device that only guarantees the minimum.
 @group(0) @binding(3) var<storage, read_write> scratch: array<u32>;
 
 fn plane_prev(i: u32) -> u32 { return i; }
 fn plane_aux0(i: u32) -> u32 { return P.dims.x * P.dims.y + i; }
 fn plane_aux1(i: u32) -> u32 { return 2u * P.dims.x * P.dims.y + i; }
+fn plane_hist(i: u32) -> u32 { return 3u * P.dims.x * P.dims.y + i; }
 
 // ---------------------------------------------------------------- primitives
 
 fn W() -> u32 { return P.dims.x; }
 fn H() -> u32 { return P.dims.y; }
+
+// Wall coordinates of buffer pixel (x, y), and the wall's size.
+fn gx(x: u32) -> i32 { return i32(x) + bitcast<i32>(P.virt.x); }
+fn gy(y: u32) -> i32 { return i32(y) + bitcast<i32>(P.virt.y); }
+fn VW() -> u32 { return P.virt.z; }
+fn VH() -> u32 { return P.virt.w; }
 
 fn idx(x: u32, y: u32) -> u32 { return y * W() + x; }
 
@@ -143,7 +157,8 @@ fn scanlines(@builtin(global_invocation_id) g: vec3<u32>) {
     let i = idx(g.x, g.y);
     // CPU darkens odd rows only, and leaves even rows byte-identical —
     // including their glyph flag, since it never calls `set` on them.
-    if ((g.y & 1u) == 1u) {
+    // Odd rows of the wall, so the pattern runs on across panes.
+    if ((gy(g.y) & 1) == 1) {
         dst[i] = pack(floor(unpack(src[i]) * 0.72));
     } else {
         dst[i] = src[i];
@@ -153,10 +168,11 @@ fn scanlines(@builtin(global_invocation_id) g: vec3<u32>) {
 @compute @workgroup_size(8, 8)
 fn vignette(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
-    let cx = f32(W()) / 2.0;
-    let cy = f32(H()) / 2.0;
-    let dx = (f32(g.x) - cx) / cx;
-    let dy = (f32(g.y) - cy) / cy;
+    // one vignette around the whole wall, not one per pane
+    let cx = f32(VW()) / 2.0;
+    let cy = f32(VH()) / 2.0;
+    let dx = (f32(gx(g.x)) - cx) / cx;
+    let dy = (f32(gy(g.y)) - cy) / cy;
     let d = min(sqrt(dx * dx + dy * dy) / 1.4142135, 1.0);
     let f = 1.0 - d * d * 0.45;
     dst[idx(g.x, g.y)] = pack(floor(load(g.x, g.y) * f));
@@ -180,7 +196,9 @@ fn hash3(a: u32, b: u32, c: u32) -> u32 {
 fn grain(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
     let tick = u32(P.fp.x * 30.0);
-    let n = f32(hash3(g.x, g.y, tick) % 29u) - 14.0;
+    // hashed on wall coordinates: the grain of a pixel is the same whichever
+    // pane (or apron) draws it
+    let n = f32(hash3(bitcast<u32>(gx(g.x)), bitcast<u32>(gy(g.y)), tick) % 29u) - 14.0;
     dst[idx(g.x, g.y)] = pack(clamp(load(g.x, g.y) + n, vec3<f32>(0.0), vec3<f32>(255.0)));
 }
 
@@ -295,8 +313,9 @@ fn dim(@builtin(global_invocation_id) g: vec3<u32>) {
 @compute @workgroup_size(8, 8)
 fn chroma(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
-    let cx = f32(W()) / 2.0;
-    let off = i32((f32(g.x) - cx) / cx * 2.0);
+    // fringes grow toward the wall's edges, not each pane's
+    let cx = f32(VW()) / 2.0;
+    let off = i32((f32(gx(g.x)) - cx) / cx * 2.0);
     let xr = clampx(i32(g.x) - off);
     let xb = clampx(i32(g.x) + off);
     let mid = load(g.x, g.y);
@@ -306,13 +325,23 @@ fn chroma(@builtin(global_invocation_id) g: vec3<u32>) {
 @compute @workgroup_size(8, 8)
 fn pixelate(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
-    let block = 3u;
-    let bx = (g.x / block) * block;
-    let by = (g.y / block) * block;
+    // blocks on the wall's 3 px grid (floor division: an apron can sit at
+    // negative wall coordinates), clipped to this buffer
+    let block = 3;
+    let wx = gx(g.x);
+    let wy = gy(g.y);
+    let x0 = bitcast<i32>(P.virt.x);
+    let y0 = bitcast<i32>(P.virt.y);
+    let bx = wx - ((wx % block) + block) % block - x0;
+    let by = wy - ((wy % block) + block) % block - y0;
+    let xa = u32(max(bx, 0));
+    let ya = u32(max(by, 0));
+    let xb = u32(min(bx + block, i32(W())));
+    let yb = u32(min(by + block, i32(H())));
     var sum = vec3<f32>(0.0);
     var n = 0u;
-    for (var y = by; y < min(by + block, H()); y = y + 1u) {
-        for (var x = bx; x < min(bx + block, W()); x = x + 1u) {
+    for (var y = ya; y < yb; y = y + 1u) {
+        for (var x = xa; x < xb; x = x + 1u) {
             sum = sum + load(x, y);
             n = n + 1u;
         }
@@ -341,7 +370,8 @@ fn edges(@builtin(global_invocation_id) g: vec3<u32>) {
 @compute @workgroup_size(8, 8)
 fn warp(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
-    let shift = i32(round(2.0 * sin(f32(g.y) * 0.35 + P.fp.x * 1.8)));
+    // the wave follows wall rows; the 2 px shift reads into the apron
+    let shift = i32(round(2.0 * sin(f32(gy(g.y)) * 0.35 + P.fp.x * 1.8)));
     let w = i32(W());
     var xs = (i32(g.x) - shift) % w;
     if (xs < 0) { xs = xs + w; }
@@ -574,10 +604,40 @@ fn braille_glyph(mask: u32) -> u32 {
     return 0x2800u + m;
 }
 
+// Every channel of two packed colours within `t` levels.
+fn within_levels(a: u32, b: u32, t: u32) -> bool {
+    for (var s = 0u; s < 24u; s = s + 8u) {
+        let ca = i32((a >> s) & 0xffu);
+        let cb = i32((b >> s) & 0xffu);
+        if (u32(abs(ca - cb)) > t) { return false; }
+    }
+    return true;
+}
+
+// Write a cell. With hysteresis on (flags.y = threshold) a cell whose fg and
+// bg each moved by at most the threshold — keeping its glyph, or being flat
+// (fg ≈ bg) so the glyph does not show — re-emits last frame's values, so
+// the terminal diff skips it. The history holds what was emitted, so a slow
+// drift is sent once it adds up past the threshold: error stays bounded.
 fn store_cell(ci: u32, glyph: u32, fg: vec3<f32>, bg: vec3<f32>) {
-    cells[ci * 3u + 0u] = glyph;
-    cells[ci * 3u + 1u] = pack(fg);
-    cells[ci * 3u + 2u] = pack(bg);
+    var out = vec3<u32>(glyph, pack(fg), pack(bg));
+    let t = P.flags.y;
+    if (t > 0u) {
+        let h = plane_hist(ci * 3u);
+        if (P.flags.z != 0u) {
+            let prev = vec3<u32>(scratch[h], scratch[h + 1u], scratch[h + 2u]);
+            let steady = within_levels(out.y, prev.y, t) && within_levels(out.z, prev.z, t);
+            if (steady && (out.x == prev.x || within_levels(out.y, out.z, t))) {
+                out = prev;
+            }
+        }
+        scratch[h] = out.x;
+        scratch[h + 1u] = out.y;
+        scratch[h + 2u] = out.z;
+    }
+    cells[ci * 3u + 0u] = out.x;
+    cells[ci * 3u + 1u] = out.y;
+    cells[ci * 3u + 2u] = out.z;
 }
 
 // Sentinel: this cell carries a glyph the CPU owns. fg/bg are still valid.

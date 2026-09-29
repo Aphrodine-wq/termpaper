@@ -105,10 +105,11 @@ struct Args {
     #[arg(long, help_heading = "Linking & wall")]
     wall: Option<String>,
 
-    /// Terminal padding in px (all sides) so wall crops line up across
-    /// window borders despite the margin
+    /// Terminal padding so wall crops line up across window borders despite
+    /// the margin: px (`7`), points (`3.5pt`, e.g. kitty's
+    /// window_padding_width), or `x,y`
     #[arg(long, help_heading = "Linking & wall")]
-    pad: Option<i32>,
+    pad: Option<String>,
 
     // Pre-subcommand spellings, kept working but out of --help.
     /// Old spelling of `termpaper list`
@@ -167,21 +168,39 @@ fn print_instances() {
     }
 }
 
-fn switch_remote(scene: &str, group: Option<&str>, all: bool) -> std::io::Result<()> {
+fn switch_remote(scene: &str, group: Option<&str>, all: bool, args: &Args) -> std::io::Result<()> {
     if !scene::exists(scene) {
         eprintln!("termpaper: unknown scene '{scene}'. See `termpaper list`.");
         std::process::exit(2);
     }
     let seed: u64 = rand::rng().random();
-    let t0 = link::epoch_now_ms();
+    // a short fade-out lead, so running panes swap together
+    let t0 = link::epoch_now_ms() + (config::DEFAULT_FADE * 1000.0) as u64 + SWITCH_MARGIN_MS;
+    // sim settings for a group that has no anchor yet: this config's
+    let cfg = config::load();
+    let defaults = link::Anchor {
+        stamp: link::Stamp::default(),
+        scene: scene.to_string(),
+        theme: None,
+        seed,
+        t0_ms: t0,
+        paused_at_ms: None,
+        speed: args.speed.or(cfg.speed).unwrap_or(config::DEFAULT_SPEED),
+        detail: args.detail.as_deref().or(cfg.detail.as_deref()).and_then(Detail::parse)
+            .unwrap_or_else(platform_default_detail).name().to_string(),
+        pixels: args.pixels.as_deref().or(cfg.pixels.as_deref()).and_then(Pixels::parse)
+            .unwrap_or_else(platform_default_pixels).name().to_string(),
+        text_scale: args.text_scale.or(cfg.text_scale),
+        proto: link::PROTO,
+    };
     if all {
-        link::publish_remote_all_groups(scene, seed, t0)?;
+        link::publish_remote_all_groups(scene, seed, t0, &defaults)?;
         println!("published switch to '{scene}' (all groups)");
     } else {
         let group = group
             .map(link::sanitize_group)
             .unwrap_or_else(|| "default".into());
-        link::publish_remote(scene, seed, t0, &group)?;
+        link::publish_remote(scene, seed, t0, &group, &defaults)?;
         println!("published switch to '{scene}' (group {group})");
     }
     Ok(())
@@ -267,7 +286,7 @@ fn main() -> std::io::Result<()> {
         Some(Command::Switch { scene, group, all }) => {
             // `termpaper --group G switch X` works as well as `switch X --group G`
             let group = group.or_else(|| args.group.clone());
-            return switch_remote(&scene, group.as_deref(), all);
+            return switch_remote(&scene, group.as_deref(), all, &args);
         }
         Some(Command::List { category }) => {
             print_list(category.as_deref());
@@ -360,7 +379,16 @@ fn main() -> std::io::Result<()> {
         dim: cfg.dim.unwrap_or(1.0),
         fade: cfg.fade.unwrap_or(0.25),
         clock: cfg.clock.unwrap_or(true),
-        pad: args.pad.or(cfg.pad).unwrap_or(0),
+        pad: args
+            .pad
+            .as_deref()
+            .and_then(config::PadSpec::parse)
+            .or_else(|| cfg.pad.clone())
+            // layout px: Hyprland geometry is logical, and so are points
+            .map(|p| p.to_px(1.0))
+            .unwrap_or((0.0, 0.0)),
+        placement: cfg.placement.unwrap_or_default(),
+        hysteresis: cfg.hysteresis.unwrap_or(DEFAULT_HYSTERESIS),
         cycle_scope: cfg.cycle_scope.as_deref().map(CycleScope::parse).unwrap_or_default(),
         cfg,
         keymap,
@@ -383,15 +411,48 @@ fn main() -> std::io::Result<()> {
         shader_fps: cfg_shader_fps,
     };
 
-    let mut terminal = ratatui::init();
+    let mut terminal = init_terminal()?;
     terminal.hide_cursor()?;
     // focus reporting lets unfocused instances skip the pacing spin (and
     // honor --idle-fps); terminals without support just never send events
-    let _ = crossterm::execute!(std::io::stdout(), event::EnableFocusChange);
+    let _ = crossterm::execute!(terminal.backend_mut(), event::EnableFocusChange);
     let result = run(&mut terminal, &scene_name, settings);
-    let _ = crossterm::execute!(std::io::stdout(), event::DisableFocusChange);
-    ratatui::restore();
+    let _ = crossterm::execute!(terminal.backend_mut(), event::DisableFocusChange);
+    restore_terminal();
     result
+}
+
+/// The terminal every frame is drawn through. Output is block-buffered: a
+/// frame is hundreds of KB of SGR sequences, and the line-buffered `Stdout`
+/// that `ratatui::init` uses would split it into hundreds of writes the
+/// terminal can render half-way through (tearing).
+type Term = ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::BufWriter<std::io::Stdout>>>;
+
+/// Frame output buffer. Big enough for a full braille frame of a large
+/// terminal, so a frame normally leaves in one write.
+const OUT_BUFFER: usize = 1 << 20;
+
+/// `ratatui::init` with a buffered writer: raw mode, alternate screen, and a
+/// panic hook that restores the terminal before the message prints.
+fn init_terminal() -> std::io::Result<Term> {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        hook(info);
+    }));
+    crossterm::terminal::enable_raw_mode()?;
+    crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
+    let out = std::io::BufWriter::with_capacity(OUT_BUFFER, std::io::stdout());
+    ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(out))
+}
+
+fn restore_terminal() {
+    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::terminal::LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
 }
 
 struct Settings {
@@ -409,7 +470,12 @@ struct Settings {
     dim: f32,
     fade: f32,
     clock: bool,
-    pad: i32,
+    /// terminal padding in layout px (x, y)
+    pad: (f32, f32),
+    /// where the terminal puts its leftover strip
+    placement: wall::Placement,
+    /// Studio scenes' cell hysteresis threshold (levels; 0 = off)
+    hysteresis: u8,
     cfg: config::Config,
     theme: Option<String>,
     text_scale: Option<u32>,
@@ -436,51 +502,50 @@ struct Settings {
     shader_fps: u32,
 }
 
-/// Snapshot the current runtime settings for broadcast.
+/// The terminal's cell size in layout px from its reported pixel size
+/// (TIOCGWINSZ), divided by the monitor scale when the compositor tells us.
+fn measure_cell_px(geo: Option<&wall::GeoWatcher>) -> Option<(f32, f32)> {
+    let ws = crossterm::terminal::window_size().ok()?;
+    wall::measure_cell(
+        ws.columns as usize,
+        ws.rows as usize,
+        ws.width,
+        ws.height,
+        geo.and_then(|w| w.latest_scale()),
+        geo.and_then(|w| w.latest()),
+    )
+}
+
+/// Cell hysteresis for Studio scenes unless the config says otherwise:
+/// colour changes of up to this many levels are not re-sent.
+const DEFAULT_HYSTERESIS: u8 = 3;
+
 /// How long before the frame deadline to stop sleeping and busy-wait.
 /// Sized from `examples/pace_bench.rs` — see the frame loop for the tradeoff.
 const SPIN_TAIL: Duration = Duration::from_micros(100);
 
-/// Largest single simulation step. Bounds physics after a stall.
-const MAX_STEP: f32 = 1.0 / 30.0;
-/// Most catch-up steps per frame, so repaying a hitch never starves render.
-const MAX_CATCHUP: usize = 4;
-/// Debt past this is written off: returning from suspend should not simulate
-/// minutes of scene time to catch up.
-const MAX_DEBT: f32 = 1.5;
-
-/// Spend owed wall time as bounded simulation steps, draining `debt`.
-///
-/// Returns the per-step dt values (already speed-scaled) and how many are live.
-/// Always at least one step so the frame still redraws when nothing is owed.
-fn plan_steps(debt: &mut f32, speed: f32) -> ([f32; MAX_CATCHUP], usize) {
-    let mut step_dt = [0.0f32; MAX_CATCHUP];
-    let spend = debt.min(MAX_CATCHUP as f32 * MAX_STEP);
-    if spend <= 1e-6 {
-        // paused, or nothing owed yet — still redraw the current state
-        return (step_dt, 1);
+/// Frame period for a scene: Classic scenes snap to a divisor of their
+/// 60 Hz tick; Studio scenes use continuous time, so any rate works (capped
+/// by `shader_fps`). Either way the deadlines sit on the anchor's slot grid.
+fn frame_period_ms(settings: &Settings, focused: bool, scene_name: &str) -> f64 {
+    let mut fps = match settings.idle_fps {
+        Some(idle) if !focused => settings.fps.min(idle),
+        _ => settings.fps,
+    };
+    if scene::lookup(scene_name).is_some_and(|e| e.needs_gpu()) {
+        fps = fps.min(settings.shader_fps);
+    } else {
+        fps = termpaper::sync::classic_fps(fps);
     }
-    // split the owed time into EQUAL steps rather than MAX_STEP chunks plus
-    // a small remainder: verlet velocity is displacement-per-previous-step,
-    // so a 1/30 step followed by a 1/300 remainder mis-scales it 10x for a
-    // step — a visible speed pulse in every verlet scene after a hitch
-    let n = ((spend / MAX_STEP).ceil() as usize).clamp(1, MAX_CATCHUP);
-    let s = spend / n as f32;
-    for slot in step_dt.iter_mut().take(n) {
-        *slot = s * speed;
-    }
-    *debt -= spend;
-    (step_dt, n)
+    1000.0 / fps.max(1) as f64
 }
 
-fn settings_msg(settings: &Settings, opts: &SceneOptions, quick: &Option<String>) -> link::SettingsMsg {
+/// The appearance settings peers mirror. Sim settings (speed, detail,
+/// pixels, text scale, theme) travel in the anchor instead: any change to
+/// them is picked up by `sync_sim` and published as a new anchor.
+fn settings_msg(settings: &Settings, _opts: &SceneOptions, quick: &Option<String>) -> link::SettingsMsg {
     link::SettingsMsg {
-        pixels: settings.pixels.name().to_string(),
-        detail: opts.detail.name().to_string(),
         filters: settings.filters.clone(),
-        theme: opts.theme.clone(),
-        text_scale: settings.text_scale,
-        speed: settings.speed,
         fps: settings.fps,
         smooth: settings.smooth,
         dim: settings.dim,
@@ -492,6 +557,243 @@ fn settings_msg(settings: &Settings, opts: &SceneOptions, quick: &Option<String>
         contrast: settings.contrast,
     }
 }
+
+/// Session-only apply of a peer's appearance settings.
+fn apply_appearance(
+    m: link::SettingsMsg,
+    settings: &mut Settings,
+    transition: &mut transition::Transition,
+    quick_filter: &mut Option<String>,
+) {
+    settings.filters = m.filters;
+    settings.fps = m.fps.clamp(1, 240);
+    settings.smooth = m.smooth;
+    settings.dim = m.dim;
+    settings.fade = m.fade;
+    settings.clock = m.clock;
+    transition.set_fade_secs(m.fade);
+    *quick_filter = m.quick;
+    settings.hue_shift = m.hue_shift;
+    settings.saturation = m.saturation;
+    settings.contrast = m.contrast;
+}
+
+/// Grace before a published switch takes effect, on top of the fade: time
+/// for every peer's per-frame poll to see the anchor before its fade-out
+/// has to start, so all panes fade and swap together.
+const SWITCH_MARGIN_MS: u64 = 120;
+
+/// What the pane simulates now, and what a scheduled switch will swap in.
+struct SimState {
+    /// the anchor on screen: the group's, or a local one (unlinked/--cycle)
+    cur: link::Anchor,
+    /// `cur` is the group's anchor
+    synced: bool,
+    /// anchor to swap to at its `t0_ms`, and whether it is the group's
+    next: Option<(link::Anchor, bool)>,
+}
+
+impl SimState {
+    /// The anchor the pane is running or about to run: what incoming
+    /// anchors and local edits are compared against.
+    fn target(&self) -> &link::Anchor {
+        self.next.as_ref().map(|n| &n.0).unwrap_or(&self.cur)
+    }
+
+    fn target_synced(&self) -> bool {
+        self.next.as_ref().map(|n| n.1).unwrap_or(self.synced)
+    }
+
+    /// Replace the timing (t0/pause) of the target anchor, keeping its
+    /// simulation: a retime never rebuilds.
+    fn retime(&mut self, a: &link::Anchor, transition: &mut transition::Transition, names: &[&str]) {
+        match &mut self.next {
+            Some((n, _)) => {
+                n.t0_ms = a.t0_ms;
+                n.paused_at_ms = a.paused_at_ms;
+                n.stamp = a.stamp;
+                if let Some(i) = names.iter().position(|s| *s == n.scene) {
+                    transition.schedule(i, n.t0_ms);
+                }
+            }
+            None => {
+                self.cur.t0_ms = a.t0_ms;
+                self.cur.paused_at_ms = a.paused_at_ms;
+                self.cur.stamp = a.stamp;
+            }
+        }
+    }
+}
+
+/// An anchor for `scene` carrying the pane's current sim settings.
+fn anchor_from(settings: &Settings, opts: &SceneOptions, scene: &str, seed: u64, t0_ms: u64) -> link::Anchor {
+    link::Anchor {
+        stamp: link::Stamp::default(),
+        scene: scene.to_string(),
+        theme: opts.theme.clone(),
+        seed,
+        t0_ms,
+        paused_at_ms: None,
+        speed: settings.speed,
+        detail: opts.detail.name().to_string(),
+        pixels: settings.pixels.name().to_string(),
+        text_scale: opts.text_scale,
+        proto: link::PROTO,
+    }
+}
+
+/// Mirror an anchor's sim settings into the local settings (session only),
+/// so the pane's desired state matches what it runs.
+fn adopt_settings(a: &link::Anchor, settings: &mut Settings, opts: &mut SceneOptions) {
+    opts.theme = a.theme.clone();
+    if let Some(d) = Detail::parse(&a.detail) {
+        opts.detail = d;
+    }
+    opts.text_scale = a.text_scale;
+    settings.text_scale = a.text_scale;
+    settings.speed = a.speed;
+    if let Some(p) = Pixels::parse(&a.pixels) {
+        settings.pixels = p;
+        opts.pixels = p;
+    }
+}
+
+/// Start a switch to `a`: it takes effect after the fade (plus a grace
+/// period when linked, so peers fade out with us), published to the group
+/// when `publish` and there is one.
+fn begin_switch(
+    st: &mut SimState,
+    guard: &mut Option<link::Guard>,
+    transition: &mut transition::Transition,
+    names: &[&str],
+    mut a: link::Anchor,
+    publish: bool,
+) {
+    let linked = publish && guard.is_some();
+    a.t0_ms = link::epoch_now_ms() + transition.fade_ms() + if linked { SWITCH_MARGIN_MS } else { 0 };
+    a.paused_at_ms = None;
+    if let (true, Some(g)) = (linked, guard.as_mut()) {
+        g.publish_anchor(&mut a);
+    }
+    if let Some(i) = names.iter().position(|n| *n == a.scene) {
+        transition.schedule(i, a.t0_ms);
+        st.next = Some((a, linked));
+    }
+}
+
+/// Apply an anchor another instance published: a retime moves the clock,
+/// anything else schedules a switch at the anchor's t0 (immediately, when
+/// that already passed).
+fn receive_anchor(
+    st: &mut SimState,
+    a: link::Anchor,
+    transition: &mut transition::Transition,
+    names: &[&str],
+    settings: &mut Settings,
+    opts: &mut SceneOptions,
+) {
+    if !names.contains(&a.scene.as_str()) {
+        return; // a scene this binary lacks: keep what we have
+    }
+    match link::classify(st.target(), &a) {
+        link::AnchorChange::Same => {}
+        link::AnchorChange::Retime => st.retime(&a, transition, names),
+        link::AnchorChange::Switch => {
+            adopt_settings(&a, settings, opts);
+            if let Some(i) = names.iter().position(|n| *n == a.scene) {
+                transition.schedule(i, a.t0_ms);
+            }
+            st.next = Some((a, true));
+            return;
+        }
+    }
+    // a retime of the group's anchor makes a locally cycling pane rejoin
+    match &mut st.next {
+        Some((_, s)) => *s = true,
+        None => st.synced = true,
+    }
+}
+
+/// Local edits to sim settings (menu, keys, reset) show up as a mismatch
+/// between the settings and the target anchor: publish that as a switch.
+fn sync_sim(
+    st: &mut SimState,
+    guard: &mut Option<link::Guard>,
+    transition: &mut transition::Transition,
+    names: &[&str],
+    settings: &Settings,
+    opts: &SceneOptions,
+) {
+    let t = st.target();
+    let desired = anchor_from(settings, opts, &t.scene, t.seed, t.t0_ms);
+    if !desired.same_sim(t) {
+        begin_switch(st, guard, transition, names, desired, true);
+    }
+}
+
+/// A user-initiated switch to scene `i` with its remembered theme,
+/// published to the group.
+fn switch_scene(
+    i: usize,
+    st: &mut SimState,
+    guard: &mut Option<link::Guard>,
+    transition: &mut transition::Transition,
+    names: &[&str],
+    settings: &Settings,
+    opts: &mut SceneOptions,
+) {
+    opts.theme = settings.cfg.themes.get(names[i]).cloned().or_else(|| settings.theme.clone());
+    let a = anchor_from(settings, opts, names[i], rand::rng().random(), 0);
+    begin_switch(st, guard, transition, names, a, true);
+}
+
+/// The lowest live pid running the group's anchor leads: it answers
+/// re-anchor requests and retimes the group after a suspend.
+fn is_leader(peers: &[link::InstanceInfo], synced: bool) -> bool {
+    let me = std::process::id();
+    let lowest = peers
+        .iter()
+        .filter(|i| i.synced)
+        .map(|i| i.pid)
+        .chain(synced.then_some(me))
+        .min();
+    lowest == Some(me)
+}
+
+/// Join the (new) group: adopt its anchor, or publish ours when it has none.
+fn join_group(
+    st: &mut SimState,
+    guard: &mut Option<link::Guard>,
+    transition: &mut transition::Transition,
+    names: &[&str],
+    settings: &mut Settings,
+    opts: &mut SceneOptions,
+) {
+    let Some(g) = guard.as_mut() else {
+        st.synced = false;
+        return;
+    };
+    match g.latest_anchor(st.target()) {
+        Some(a) => receive_anchor(st, a, transition, names, settings, opts),
+        None => {
+            if st.next.is_none() {
+                g.publish_anchor(&mut st.cur);
+                st.synced = true;
+            } else if let Some((n, s)) = &mut st.next {
+                g.publish_anchor(n);
+                *s = true;
+            }
+        }
+    }
+}
+
+/// Realtime jumps beyond this relative to the monotonic clock are a system
+/// suspend: the anchor is retimed so the scene resumes where it stopped.
+const SUSPEND_JUMP_MS: i64 = 5_000;
+
+/// A rebuilt simulation estimated to need longer than this to replay up to
+/// the anchor's clock asks for a fresh anchor instead.
+const REANCHOR_ETA_MS: u32 = 3_000;
 
 /// Merge current runtime settings into the stored config and save it. Only
 /// values that differ from the defaults are written, floats rounded to two
@@ -551,8 +853,10 @@ fn persist(settings: &mut Settings, scene_name: &str, theme: Option<&str>, detai
 struct PreviewOrigin {
     idx: usize,
     theme: Option<String>,
-    /// the group anchor the original scene was running on
-    sync: Option<(u64, u64)>,
+    /// the anchor the original scene was running on, and whether it was
+    /// the group's
+    anchor: link::Anchor,
+    synced: bool,
     /// scene being previewed now
     showing: usize,
 }
@@ -631,12 +935,13 @@ fn reset_link_guard(
     enabled: bool,
     group: &str,
     scene: &str,
-    pad: (i32, i32),
+    pad: (f32, f32),
 ) {
     *guard = None;
     if enabled {
         *guard = link::Guard::new(scene, group).map(|mut g| {
-            g.set_pad(pad);
+            // placement and cell size follow with the next wall refresh
+            g.set_layout(pad, wall::Placement::default(), None);
             g
         });
     }
@@ -695,33 +1000,29 @@ fn apply_defaults(
         settings.link_enabled,
         &settings.link_group,
         scene_name,
-        (settings.pad, settings.pad),
+        settings.pad,
     );
 }
 
 fn run(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut Term,
     start_scene: &str,
     mut settings: Settings,
 ) -> std::io::Result<()> {
     let names = scene::all_names();
+    // the terminal's true cell size (layout px), when it reports one
+    let mut cell_px: Option<(f32, f32)> = None;
+    let mut cell_grid = (0usize, 0usize);
     let mut guard = if settings.link_enabled {
         link::Guard::new(start_scene, &settings.link_group).map(|mut g| {
-            g.set_pad((settings.pad, settings.pad));
+            g.set_layout(settings.pad, settings.placement, cell_px);
             g
         })
     } else {
         None
     };
-    // Guard reaps dead sessions; adopt a living group's scene immediately.
+    // legacy control.json: only older binaries still speak through it
     let mut control_stamp = link::Stamp::default();
-    // artwork sync: (seed, t0_ms) for the next scene creation, if any
-    let mut sync_params: Option<(u64, u64)> = None;
-    let mut sync_theme: Option<Option<String>> = None;
-    // sync params of the scene currently on screen — lets receivers skip
-    // identical re-publishes (heartbeat/duplicates) without a visible
-    // restart, and lets the leader re-publish the exact same sim state
-    let mut cur_sync: Option<(u64, u64)> = None;
     let mut menu = Menu::new();
     // menu effects queue here and apply at the top of the next frame
     let mut pending_fx: Vec<Effect> = Vec::new();
@@ -738,7 +1039,6 @@ fn run(
     };
     let mut transition = transition::Transition::new();
     transition.set_fade_secs(settings.fade);
-    let mut paused = false;
     // terminals that report focus keep this current; ones that don't never
     // send the events, so it stays true and nothing changes for them
     let mut focused = true;
@@ -747,27 +1047,41 @@ fn run(
         .iter()
         .position(|n| *n == start_scene)
         .unwrap_or(0);
+    // The simulation anchor: a local one from the launch settings, replaced
+    // by the group's when there is one (Guard::new reaped dead sessions, so
+    // anchor.json belongs to a living group). Otherwise ours becomes it.
+    let mut st = SimState {
+        cur: anchor_from(&settings, &opts, names[idx], rand::rng().random(), link::epoch_now_ms()),
+        synced: false,
+        next: None,
+    };
     if let Some(g) = &mut guard {
-        if let Some(ctrl) = g.latest_scene() {
-            sync_params = Some((ctrl.seed, ctrl.t0_ms));
-            cur_sync = sync_params;
-            sync_theme = Some(ctrl.theme);
-            if let Some(i) = names.iter().position(|n| *n == ctrl.scene) {
-                transition.request(i);
+        match g.latest_anchor(&st.cur).filter(|a| names.contains(&a.scene.as_str())) {
+            Some(a) => {
+                adopt_settings(&a, &mut settings, &mut opts);
+                idx = names.iter().position(|n| *n == a.scene).unwrap_or(idx);
+                st.cur = a;
             }
-        } else {
-            let seed = rand::rng().random();
-            let t0 = link::epoch_now_ms();
-            cur_sync = Some((seed, t0));
-            g.publish(names[idx], opts.theme.as_deref(), seed, t0);
+            None => g.publish_anchor(&mut st.cur),
         }
+        st.synced = true;
+        g.set_scene(names[idx]);
     }
     let mut worker = termpaper::engine::Worker::new(settings.renderer);
     let mut rendered: Option<termpaper::engine::Frame> = None;
     // backend status while no frame is coming (a Studio shader compiling)
     let mut worker_status: Option<String> = None;
-    let mut local_seed: u64 = rand::rng().random();
-    let mut local_elapsed = 0.0f64;
+    // the shared epoch clock and the anchor's slot grid frames are paced on;
+    // also detects a suspend (realtime jumping ahead of the monotonic clock)
+    let mut clock = termpaper::sync::FrameClock::new();
+    // how many slots ahead of display each frame is requested
+    let mut lead = termpaper::sync::Lead::new();
+    // origin of the slot grid the lead's outstanding requests refer to
+    let mut grid_origin = st.cur.t0_ms;
+    // the anchor this pane asked the leader to replace (catch-up too long)
+    let mut reanchor_wanted: Option<link::Stamp> = None;
+    // bumped whenever the wall layout moves this pane's window
+    let mut view_rev = 0u64;
     let mut wall_layout: Option<wall::WallLayout> = None;
     let mut wall_refresh = Instant::now() - Duration::from_secs(10);
     // hyprctl inside the frame loop stalls the frame it lands on
@@ -777,7 +1091,7 @@ fn run(
         None
     };
 
-    // one registry snapshot shared by the heartbeat, wall layout, and menu.
+    // one registry snapshot shared by the leader duties, wall layout, and menu.
     // Scanning the registry means readdir + a /proc stat per entry + a file
     // read per peer — doing that every frame with the menu open was the
     // hottest path in the whole loop with many instances up.
@@ -796,49 +1110,35 @@ fn run(
 
     let launch = Instant::now();
     let mut last_switch = Instant::now();
-    let mut last_frame = Instant::now();
-    // un-simulated wall time carried forward (see `plan_steps`)
-    let mut sim_debt = 0.0f32;
-    let mut last_heartbeat = Instant::now();
     // cached "HH:MM" for the clock overlay (refreshed at most every 10s)
     let mut clock_text = String::new();
     let mut clock_stamp = Instant::now() - Duration::from_secs(60);
 
     loop {
         let now = Instant::now();
-        let wall_dt = (now - last_frame).as_secs_f32();
-        // transition fades are cosmetic: clamp and never carry a remainder
-        let raw_dt = wall_dt.min(MAX_STEP);
-        last_frame = now;
-        if !paused { local_elapsed += wall_dt as f64; }
 
-        // Scene time is owed against the wall clock. Linked instances agree on
-        // a scene only because each simulates `now - t0` worth of time, so any
-        // time the per-step clamp drops has to be carried forward rather than
-        // discarded — otherwise every frame that overruns MAX_STEP leaves this
-        // pane permanently behind its peers, and the 15s heartbeat won't repair
-        // it (peers already holding this (seed, t0) skip the rebuild).
-        let (_step_dt, _n_steps) = if paused {
-            // frozen: accrue nothing and spend nothing, but still redraw. Note
-            // debt left over from a hitch must not be drained here either, or
-            // the scene would keep creeping forward while paused.
-            ([0.0f32; MAX_CATCHUP], 1)
-        } else {
-            sim_debt = (sim_debt + wall_dt).min(MAX_DEBT);
-            plan_steps(&mut sim_debt, settings.speed)
-        };
-        let mut fps_target = match settings.idle_fps {
-            Some(idle) if !focused => settings.fps.min(idle),
-            _ => settings.fps,
-        };
-        // Studio scenes change once per 60 Hz tick: more frames would only
-        // re-send identical cells
-        if scene::lookup(names[idx]).is_some_and(|e| e.needs_gpu()) {
-            fps_target = fps_target.min(settings.shader_fps);
+        // System suspend: the realtime clock ran on while the monotonic one
+        // stood still. Move t0 forward by the gap so the scene resumes where
+        // it stopped instead of replaying the whole sleep. The leader
+        // publishes the retime; the others apply the same shift locally
+        // right away and then adopt the leader's (a retime: no rebuild).
+        {
+            let jump = clock.resync(now, termpaper::sync::epoch_now_ms_f64()) as i64;
+            // (a clock stepped backwards is the mirror case: without the
+            // shift a Classic scene would hold still until it caught up)
+            if jump.abs() > SUSPEND_JUMP_MS && !st.target().paused() {
+                let mut a = st.target().clone();
+                a.t0_ms = a.t0_ms.saturating_add_signed(jump);
+                if let (true, Some(g)) = (st.target_synced() && is_leader(&peers.list, true), guard.as_mut()) {
+                    g.publish_anchor(&mut a);
+                }
+                st.retime(&a, &mut transition, &names);
+            }
         }
-        let frame_dur = Duration::from_secs_f64(1.0 / fps_target as f64);
 
-        // menu: fire the preview timer, then apply what the menu asked for
+        // menu: fire the preview timer, then apply what the menu asked for.
+        // Sim settings (theme, detail, pixels, speed, text size) only need
+        // setting: `sync_sim` publishes the difference as a synced switch.
         if menu.open {
             pending_fx.extend(menu.tick(now));
         }
@@ -851,28 +1151,17 @@ fn run(
                     };
                     menu::browser::push_recent(&mut settings.cfg.recents, name);
                     save.mark(now);
-                    let kept = preview.take().is_some() && i == idx && transition.pending().is_none();
+                    let kept = preview.take().is_some() && st.next.is_none() && st.cur.scene == name;
                     if kept {
                         // the preview becomes the real scene as it is: its
-                        // local clock turns into the group's anchor, so
-                        // nothing restarts here or on the peers
-                        let t0 = link::epoch_now_ms().saturating_sub((local_elapsed * 1000.0) as u64);
-                        cur_sync = Some((local_seed, t0));
+                        // local anchor turns into the group's, so nothing
+                        // restarts here or on the peers
                         if let Some(g) = &mut guard {
-                            g.set_synced(true);
-                            g.publish(name, opts.theme.as_deref(), local_seed, t0);
+                            g.publish_anchor(&mut st.cur);
+                            st.synced = true;
                         }
                     } else {
-                        let seed: u64 = rand::rng().random();
-                        let t0 = link::epoch_now_ms();
-                        sync_params = Some((seed, t0));
-                        let theme = settings.cfg.themes.get(name).cloned()
-                            .or_else(|| settings.theme.clone());
-                        sync_theme = Some(theme.clone());
-                        transition.request(i);
-                        if let Some(g) = &mut guard {
-                            g.publish(name, theme.as_deref(), seed, t0);
-                        }
+                        switch_scene(i, &mut st, &mut guard, &mut transition, &names, &settings, &mut opts);
                     }
                     last_switch = now;
                 }
@@ -883,25 +1172,32 @@ fn run(
                     let p = preview.get_or_insert_with(|| PreviewOrigin {
                         idx,
                         theme: opts.theme.clone(),
-                        sync: cur_sync,
+                        anchor: st.target().clone(),
+                        synced: st.target_synced(),
                         showing: idx,
                     });
                     p.showing = i;
-                    // local only: no shared anchor and nothing published;
-                    // the scene's remembered theme applies at the swap
-                    sync_params = None;
-                    sync_theme = None;
-                    transition.request(i);
+                    // local only: nothing published; the previewed scene
+                    // shows with its remembered theme
+                    let mut o = opts.clone();
+                    o.theme = settings.cfg.themes.get(names[i]).cloned().or_else(|| settings.theme.clone());
+                    let a = anchor_from(&settings, &o, names[i], rand::rng().random(), 0);
+                    opts.theme = o.theme;
+                    begin_switch(&mut st, &mut guard, &mut transition, &names, a, false);
                     last_switch = now;
                 }
                 Effect::EndPreview => {
                     if let Some(p) = preview.take() {
-                        // restore only if the preview is still what is on
-                        // screen — a peer's switch meanwhile wins
-                        if idx == p.showing || transition.pending() == Some(p.showing) {
-                            sync_params = p.sync;
-                            sync_theme = Some(p.theme);
-                            transition.request(p.idx);
+                        // restore only if the preview is still what runs —
+                        // a peer's switch meanwhile wins
+                        if st.target().scene == names[p.showing] && !st.target_synced() {
+                            if p.synced && guard.is_some() {
+                                // back to whatever the group runs now
+                                join_group(&mut st, &mut guard, &mut transition, &names, &mut settings, &mut opts);
+                            } else {
+                                opts.theme = p.anchor.theme.clone();
+                                begin_switch(&mut st, &mut guard, &mut transition, &names, p.anchor, false);
+                            }
                             last_switch = now;
                         }
                     }
@@ -912,12 +1208,16 @@ fn run(
                     if let Some(p) = &mut preview {
                         if names[p.idx] == scene {
                             p.theme = Some(theme.clone());
+                            p.anchor.theme = Some(theme.clone());
                         }
                     }
-                    if scene == names[idx] {
+                    if scene == st.target().scene {
                         if preview.is_some() {
                             // a previewed scene re-themes locally
-                            opts.theme = Some(theme);
+                            let mut a = st.target().clone();
+                            a.theme = Some(theme);
+                            opts.theme = a.theme.clone();
+                            begin_switch(&mut st, &mut guard, &mut transition, &names, a, false);
                         } else {
                             effects.push_front(Effect::SetTheme(Some(theme)));
                         }
@@ -929,43 +1229,23 @@ fn run(
                 }
                 Effect::SetPixels(p) => {
                     settings.pixels = p;
-                    if let Some(g) = &mut guard {
-                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                    }
                     save.mark(now);
                 }
                 Effect::SetDetail(d) => {
                     opts.detail = d;
-                    if let Some(g) = &mut guard {
-                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                    }
                     save.mark(now);
                 }
                 Effect::SetTheme(t) => {
-                    if let Some(g) = &mut guard {
-                        let seed: u64 = rand::rng().random();
-                        let t0 = link::epoch_now_ms();
-                        sync_params = Some((seed, t0));
-                        sync_theme = Some(t.clone());
-                        transition.request(idx);
-                        g.publish(names[idx], t.as_deref(), seed, t0);
-                    }
                     opts.theme = t;
                     save.mark(now);
                 }
                 Effect::SetTextScale(ts) => {
                     settings.text_scale = ts;
                     opts.text_scale = ts;
-                    if let Some(g) = &mut guard {
-                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                    }
                     save.mark(now);
                 }
                 Effect::SetSpeed(sp) => {
                     settings.speed = sp;
-                    if let Some(g) = &mut guard {
-                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                    }
                     save.mark(now);
                 }
                 Effect::SetFps(fps) => {
@@ -1025,13 +1305,8 @@ fn run(
                 }
                 Effect::SetLink(on) => {
                     settings.link_enabled = on;
-                    reset_link_guard(
-                        &mut guard,
-                        on,
-                        &settings.link_group,
-                        names[idx],
-                        (settings.pad, settings.pad),
-                    );
+                    reset_link_guard(&mut guard, on, &settings.link_group, names[idx], settings.pad);
+                    join_group(&mut st, &mut guard, &mut transition, &names, &mut settings, &mut opts);
                     if !on && settings.wall_spec.is_none() {
                         // the wall refresh stops with linking: drop the crop now
                         wall_layout = None;
@@ -1040,13 +1315,8 @@ fn run(
                 }
                 Effect::SetLinkGroup(g) => {
                     settings.link_group = g;
-                    reset_link_guard(
-                        &mut guard,
-                        settings.link_enabled,
-                        &settings.link_group,
-                        names[idx],
-                        (settings.pad, settings.pad),
-                    );
+                    reset_link_guard(&mut guard, settings.link_enabled, &settings.link_group, names[idx], settings.pad);
+                    join_group(&mut st, &mut guard, &mut transition, &names, &mut settings, &mut opts);
                     save.mark(now);
                 }
                 Effect::SetWall(on) => {
@@ -1095,20 +1365,15 @@ fn run(
             persist(&mut settings, scene_name, theme, opts.detail);
         }
 
-        // scene cycling
+        // scene cycling (local: rotations don't propagate)
         if let Some(secs) = settings.cycle {
-            if now.duration_since(last_switch).as_secs_f64() >= secs {
-                sync_params = None; // local cycle: no shared seed
-                cur_sync = None;
-                if let Some(g) = &mut guard {
-                    g.set_synced(false);
-                }
-                transition.request(menu::browser::cycle_next(
-                    &names,
-                    idx,
-                    settings.cycle_scope,
-                    &settings.cfg.favorites,
-                ));
+            if preview.is_none() && now.duration_since(last_switch).as_secs_f64() >= secs {
+                let i = menu::browser::cycle_next(&names, idx, settings.cycle_scope, &settings.cfg.favorites);
+                let mut o = opts.clone();
+                o.theme = settings.cfg.themes.get(names[i]).cloned().or_else(|| settings.theme.clone());
+                let a = anchor_from(&settings, &o, names[i], rand::rng().random(), 0);
+                opts.theme = o.theme;
+                begin_switch(&mut st, &mut guard, &mut transition, &names, a, false);
                 last_switch = now;
             }
         }
@@ -1137,34 +1402,17 @@ fn run(
             }
         }
 
-        // sync heartbeat: the lowest-pid live instance re-publishes the
-        // current scene with its ORIGINAL (seed, t0) every 15s — late
-        // joiners adopt it and drifted peers re-align, while in-sync
-        // receivers skip the identical control without a visible restart
+        // instance linking: a stat per channel per frame; a file is only
+        // read and parsed when a publish replaced it
         if let Some(g) = &mut guard {
-            if now.duration_since(last_heartbeat).as_secs() >= 15 {
-                last_heartbeat = now;
-                if let Some((seed, t0)) = cur_sync {
-                    // a peer that cycled locally holds no shared anchor, so it
-                    // must not win the election and then publish nothing
-                    let leader = peers
-                        .list
-                        .iter()
-                        .filter(|i| i.synced)
-                        .map(|i| i.pid)
-                        .min()
-                        .map(|m| m == std::process::id())
-                        .unwrap_or(false);
-                    if leader {
-                        g.publish(names[idx], opts.theme.as_deref(), seed, t0);
-                    }
-                }
+            if let Some(a) = g.poll_anchor() {
+                receive_anchor(&mut st, a, &mut transition, &names, &mut settings, &mut opts);
+                last_switch = Instant::now();
             }
-        }
-
-        // instance linking: control channel poll — a stat per frame; the
-        // file is only read+parsed when a publish replaced it
-        if let Some(g) = &mut guard {
+            if let Some(m) = g.poll_settings() {
+                apply_appearance(m, &mut settings, &mut transition, &mut quick_filter);
+            }
+            // an older binary in the group speaks through control.json
             if let Some(ctrl) = g.poll_control(control_stamp) {
                 control_stamp = link::Stamp {
                     epoch: ctrl.epoch,
@@ -1173,82 +1421,66 @@ fn run(
                 };
                 match ctrl.kind {
                     link::ControlKind::Scene => {
-                        if let Some(i) = names.iter().position(|n| *n == ctrl.scene) {
-                            // identical re-publish (heartbeat/duplicate) —
-                            // already running this exact sim, skip silently
-                            let identical = i == idx && cur_sync == Some((ctrl.seed, ctrl.t0_ms));
-                            if !identical {
-                                sync_theme = Some(ctrl.theme);
-                                sync_params = Some((ctrl.seed, ctrl.t0_ms));
-                                transition.request(i);
-                                last_switch = Instant::now();
-                            }
-                        }
+                        let a = link::Anchor::from_legacy(&ctrl, st.target());
+                        receive_anchor(&mut st, a, &mut transition, &names, &mut settings, &mut opts);
+                        last_switch = Instant::now();
                     }
                     link::ControlKind::Settings => {
-                        // session-only apply: never persisted to config
                         if let Some(m) = ctrl.settings {
-                            if let Some(p) = render::Pixels::parse(&m.pixels) {
-                                settings.pixels = p;
-                            }
-                            settings.filters = m.filters;
-                            settings.speed = m.speed;
-                            settings.fps = m.fps;
-                            settings.smooth = m.smooth;
-                            settings.dim = m.dim;
-                            settings.fade = m.fade;
-                            settings.clock = m.clock;
-                            transition.set_fade_secs(m.fade);
-                            quick_filter = m.quick;
-                            settings.hue_shift = m.hue_shift;
-                            settings.saturation = m.saturation;
-                            settings.contrast = m.contrast;
-                            let mut recreate = false;
-                            if let Some(d) = scene::Detail::parse(&m.detail) {
-                                if d != opts.detail {
-                                    opts.detail = d;
-                                    recreate = true;
-                                }
-                            }
-                            if m.theme != opts.theme {
-                                opts.theme = m.theme;
-                                recreate = true;
-                            }
-                            if m.text_scale != settings.text_scale {
-                                settings.text_scale = m.text_scale;
-                                opts.text_scale = m.text_scale;
-                                recreate = true;
-                            }
-                            if recreate && cur_sync.is_none() {
-                                transition.request(idx);
-                                sync_params = None;
-                            }
+                            apply_appearance(m, &mut settings, &mut transition, &mut quick_filter);
                         }
                     }
                 }
             }
         }
+        // local edits to sim settings become a new anchor
+        // a preview is local: its settings must not go out as a switch
+        if preview.is_none() {
+            sync_sim(&mut st, &mut guard, &mut transition, &names, &settings, &opts);
+        }
 
-        // transition: fade out → swap → fade in
-        let (fade, swap) = transition.tick(raw_dt);
-        if let Some(i) = swap {
-            idx = i % names.len();
-            opts.theme = sync_theme.take().unwrap_or_else(|| {
-                settings.cfg.themes.get(names[idx]).cloned()
-                    .or_else(|| settings.theme.clone())
-            });
-            // artwork sync: linked switches carry (seed, t0) so every
-            // instance builds the identical simulation
-            let sp = sync_params.take();
-            cur_sync = sp;
-            local_seed = rand::rng().random();
-            local_elapsed = 0.0;
-            sim_debt = 0.0;
+        // Frame slots: this frame is presented at `slot` of the anchor's
+        // grid (t0 + n·period, the same on every pane) and requests the
+        // frame for `slot + lead`, so what the terminal shows at a slot was
+        // rendered for that slot.
+        let mut period = frame_period_ms(&settings, focused, &st.cur.scene);
+        let mut slot = clock.slot_at(now, st.cur.t0_ms, period);
+        let mut target = slot + lead.lead() as i64;
+
+        // transition: fade out → swap → fade in, on the shared epoch clock,
+        // evaluated for the moment the requested frame will be on screen
+        let shown_at = termpaper::sync::FrameClock::slot_epoch(st.cur.t0_ms, period, target) as u64;
+        let (fade, swap) = transition.tick_at(shown_at);
+        if swap.is_some() {
+            if let Some((a, synced)) = st.next.take() {
+                st.cur = a;
+                st.synced = synced;
+            }
+            idx = names.iter().position(|n| *n == st.cur.scene).unwrap_or(idx);
+            reanchor_wanted = None;
             if let Some(g) = &mut guard {
                 g.set_scene(names[idx]);
-                g.set_synced(cur_sync.is_some());
+                g.set_synced(st.synced);
+                g.set_reanchor(None);
             }
             last_switch = now;
+            period = frame_period_ms(&settings, focused, &st.cur.scene);
+            slot = clock.slot_at(now, st.cur.t0_ms, period);
+            target = slot + lead.lead() as i64;
+        }
+        if st.cur.t0_ms != grid_origin {
+            // new grid: outstanding requests no longer map onto it
+            grid_origin = st.cur.t0_ms;
+            lead.reset();
+        }
+
+        // the terminal's true cell size, re-measured whenever the grid
+        // changes (and with every wall refresh: the monitor scale may have)
+        let term = terminal.size()?;
+        if (term.width as usize, term.height as usize) != cell_grid {
+            cell_grid = (term.width as usize, term.height as usize);
+            cell_px = measure_cell_px(geo_watcher.as_ref());
+            wall_refresh = Instant::now() - Duration::from_secs(10);
         }
 
         // video wall: refresh layout every 2s from registry geometry
@@ -1256,7 +1488,8 @@ fn run(
             && wall_refresh.elapsed() > Duration::from_secs(2)
         {
             wall_refresh = Instant::now();
-            let (cols, rows) = (terminal.size()?.width as usize, terminal.size()?.height as usize);
+            let (cols, rows) = cell_grid;
+            cell_px = measure_cell_px(geo_watcher.as_ref());
             // a --no-wall pane publishes no geometry, so peers never fold it
             // into their wall either
             let geo = geo_watcher
@@ -1265,13 +1498,17 @@ fn run(
                 .and_then(|w| w.latest());
             if let Some(g) = &mut guard {
                 g.set_geometry(cols, rows, geo.map(|g| (g.x, g.y, g.w, g.h)));
+                g.set_layout(settings.pad, settings.placement, cell_px);
             }
+            let old_layout = wall_layout;
             wall_layout = if let Some(spec) = &settings.wall_spec {
                 wall::manual_layout(spec, cols, rows)
             } else if settings.link_enabled && settings.wall_enabled {
+                let me = std::process::id();
                 let mut parts: Vec<wall::Participant> = peers
                     .list
                     .iter()
+                    .filter(|i| i.pid != me)
                     .filter_map(|i| {
                         i.geo.map(|(x, y, w, h)| wall::Participant {
                             pid: i.pid,
@@ -1279,22 +1516,25 @@ fn run(
                             cols: i.cols.max(1),
                             rows: i.rows.max(1),
                             pad: i.pad,
+                            cell: i.cell,
+                            placement: i.placement,
                         })
                     })
                     .collect();
-                // include ourselves even if hyprctl is unavailable to others
+                // ourselves from fresh local facts (our registry entry can be
+                // two seconds stale), even if hyprctl is unavailable to others
                 if let Some(g) = geo {
-                    if !parts.iter().any(|p| p.pid == std::process::id()) {
-                        parts.push(wall::Participant {
-                            pid: std::process::id(),
-                            geo: g,
-                            cols,
-                            rows,
-                            pad: (settings.pad, settings.pad),
-                        });
-                    }
+                    parts.push(wall::Participant {
+                        pid: me,
+                        geo: g,
+                        cols,
+                        rows,
+                        pad: settings.pad,
+                        cell: cell_px,
+                        placement: settings.placement,
+                    });
                 }
-                wall::compute_layout(parts, std::process::id())
+                wall::compute_layout(parts, me)
             } else {
                 None
             };
@@ -1302,6 +1542,9 @@ fn run(
                 if l.too_big {
                     wall_layout = None; // guard: virtual area too big, stay local
                 }
+            }
+            if wall_layout != old_layout {
+                view_rev += 1;
             }
         }
 
@@ -1317,30 +1560,73 @@ fn run(
                 .unwrap_or_default();
         }
 
+        // DEC 2026 synchronized output: the terminal holds the old frame
+        // until the end marker, so a frame never shows half-written. The
+        // begin marker rides in the same buffered write as the frame (draw
+        // flushes); terminals without support ignore both.
+        crossterm::queue!(terminal.backend_mut(), crossterm::terminal::BeginSynchronizedUpdate)?;
+        // what is on screen comes from the running anchor; `settings` may
+        // already hold the next one's values while a switch is pending
+        let shown_pixels = Pixels::parse(&st.cur.pixels).unwrap_or(settings.pixels);
+        let shown_opts = SceneOptions {
+            theme: st.cur.theme.clone(),
+            detail: Detail::parse(&st.cur.detail).unwrap_or(opts.detail),
+            text_scale: st.cur.text_scale,
+            pixels: shown_pixels,
+        };
+        // the scene clock of the target slot (frozen while the wall is paused)
+        let elapsed_ms = match st.cur.paused_at_ms {
+            Some(at) => at.saturating_sub(st.cur.t0_ms),
+            None => termpaper::sync::slot_elapsed_ms(target, period),
+        };
         terminal.draw(|f| {
             let area = f.area();
-            let (pw, ph) = settings.pixels.cell_size();
+            let (pw, ph) = shown_pixels.cell_size();
             let size = match wall_layout {
                 Some(l) => (l.virtual_w * pw, l.virtual_h * ph),
                 None => (area.width as usize * pw, area.height as usize * ph),
             };
             let crop = wall_layout.map(|l| (l.crop_x * pw, l.crop_y * ph)).unwrap_or((0, 0));
-            let (seed, elapsed_ms) = cur_sync.map(|(s, t0)| (s, link::epoch_now_ms().saturating_sub(t0)))
-                .unwrap_or((local_seed, (local_elapsed * 1000.0) as u64));
             let request = termpaper::engine::Request {
                 generation: 0,
-                key: termpaper::engine::SceneKey {
-                    name: names[idx].into(), seed, opts: opts.clone(), size,
-                    grid: (area.width as usize, area.height as usize), crop, pixels: settings.pixels,
+                // what is simulated: a change rebuilds (and replays out of sight)
+                sim: termpaper::engine::SimKey::new(&st.cur.scene, st.cur.seed, shown_opts.clone(), size, st.cur.speed),
+                // how it is shown: a change keeps the simulation running
+                view: termpaper::engine::ViewKey {
+                    canvas: size,
+                    grid: (area.width as usize, area.height as usize),
+                    crop,
+                    pixels: shown_pixels,
+                    // the real cell shape: this pane's own when local, one
+                    // shared by every pane in a wall (else the 1:2 default)
+                    cell_aspect: match wall_layout {
+                        Some(l) => l.cell_aspect.unwrap_or(termpaper::engine::DEFAULT_CELL_ASPECT),
+                        None => cell_px.map(|(w, h)| h / w).unwrap_or(termpaper::engine::DEFAULT_CELL_ASPECT),
+                    },
+                    rev: view_rev,
                 },
-                elapsed_ms, speed: settings.speed, paused, filters: settings.filters.clone(),
+                // a paused anchor freezes elapsed itself: the worker keeps
+                // replaying up to it (a pane joining a paused wall catches up)
+                elapsed_ms, paused: false, filters: settings.filters.clone(),
                 quick: quick_filter.clone(), hue: settings.hue_shift, saturation: settings.saturation,
                 contrast: settings.contrast, dim: fade * settings.dim, smooth: settings.smooth,
                 budget_ms: settings.gpu_budget_ms,
                 prefetch: transition.pending().map(|i| names[i % names.len()].to_string()),
+                // Studio scenes only: Classic GPU output stays identical to
+                // the CPU path, which has no hysteresis
+                hysteresis: if scene::lookup(&st.cur.scene).is_some_and(|e| e.needs_gpu()) {
+                    settings.hysteresis
+                } else {
+                    0
+                },
             };
-            if let Some(frame) = worker.submit(request) { rendered = Some(frame); worker_status = None; }
-            if let Some(st) = worker.take_status() { worker_status = Some(st); }
+            if let Some(frame) = worker.submit(request) {
+                lead.on_frame(frame.elapsed_ms, slot);
+                rendered = Some(frame);
+                worker_status = None;
+            }
+            lead.on_submit(elapsed_ms, slot);
+            if let Some(status) = worker.take_status() { worker_status = Some(status); }
             if rendered.as_ref().is_some_and(|frame| frame.generation != worker.generation()) {
                 rendered = None;
             }
@@ -1349,16 +1635,18 @@ fn run(
                 let mut drawn = false;
                 #[cfg(feature = "gpu")]
                 if let Some(words) = &frame.cells {
+                    // the frame's own grid: after a resize the last frame
+                    // (same simulation, old view) stays up until the next
                     let cells = termpaper::gpu::FrameCells {
-                        words, cols: area.width as usize, rows: area.height as usize,
+                        words, cols: frame.grid.0, rows: frame.grid.1,
                     };
-                    termpaper::gpu::blit(&cells, &frame.canvas, crop, settings.pixels, area,
+                    termpaper::gpu::blit(&cells, &frame.canvas, crop, shown_pixels, area,
                         f.buffer_mut(), settings.truecolor);
                     drawn = true;
                 }
                 if !drawn {
                     render::draw_crop(&frame.canvas, crop.0 as i32, crop.1 as i32, area,
-                        f.buffer_mut(), settings.truecolor, settings.pixels);
+                        f.buffer_mut(), settings.truecolor, shown_pixels);
                 }
             }
             // bottom-left hint, fading out over its last second
@@ -1404,7 +1692,7 @@ fn run(
 
             // the menu floats over the live scene
             if menu.open {
-                let status = worker_status.clone().or_else(|| rendered.as_ref().map(|f| format!("{} · worker {:.1} ms", f.backend, f.render_ms)))
+                let status = worker_status.clone().or_else(|| rendered.as_ref().map(|f| format!("{} · worker {:.1} ms · lead {}", f.backend, f.render_ms, lead.lead())))
                     .unwrap_or_else(|| "Renderer initializing…".into());
                 let wall_status = match wall_layout {
                     Some(l) => format!("wall: {}x{} cells @ ({},{})", l.virtual_w, l.virtual_h, l.crop_x, l.crop_y),
@@ -1429,6 +1717,35 @@ fn run(
                 );
             }
         })?;
+        crossterm::execute!(terminal.backend_mut(), crossterm::terminal::EndSynchronizedUpdate)?;
+
+        // A rebuilt simulation that would need more than a few seconds of
+        // replay to reach the anchor's clock (an hours-old anchor, a wall
+        // resize) asks for a fresh anchor instead: the leader restarts the
+        // scene for the whole group, together, after a fade.
+        if st.next.is_none() && worker.catchup_ms().is_some_and(|eta| eta > REANCHOR_ETA_MS) {
+            match guard.as_mut().filter(|_| st.synced) {
+                Some(g) => {
+                    g.set_reanchor(Some(st.cur.stamp));
+                    reanchor_wanted = Some(st.cur.stamp);
+                }
+                None => {
+                    let mut a = st.cur.clone();
+                    a.seed = rand::rng().random();
+                    begin_switch(&mut st, &mut guard, &mut transition, &names, a, false);
+                }
+            }
+        }
+        // the leader answers re-anchor requests for the anchor it runs
+        if st.synced && st.next.is_none() && guard.is_some() && is_leader(&peers.list, true) {
+            let stamp = st.cur.stamp;
+            let wanted = reanchor_wanted == Some(stamp) || peers.list.iter().any(|i| i.reanchor == Some(stamp));
+            if wanted {
+                let mut a = st.cur.clone();
+                a.seed = rand::rng().random();
+                begin_switch(&mut st, &mut guard, &mut transition, &names, a, true);
+            }
+        }
 
         // steady pacing: coarse sleep to ~1ms before the deadline, then
         // Sleep (inside the event poll) to just before the deadline, then spin
@@ -1437,7 +1754,11 @@ fn run(
         // and several instances pacing on one machine then starve each other
         // into dropped frames. 100us holds jitter at ~0.025ms — 0.6% of a
         // 240fps frame — for ~1% CPU.
-        let deadline = last_frame + frame_dur;
+        //
+        // The deadline is the next slot of the anchor's grid, not "last frame
+        // + period": every pane with this anchor and rate presents at the same
+        // moments, and a late frame does not push every later one back.
+        let deadline = clock.slot_instant(grid_origin, period, slot + 1);
         let mut events_handled = 0;
         loop {
             let now2 = Instant::now();
@@ -1564,6 +1885,8 @@ fn run(
                         );
                         save.take();
                         persist(&mut settings, names[idx], opts.theme.as_deref(), opts.detail);
+                        // the reset may have moved us to the default group
+                        join_group(&mut st, &mut guard, &mut transition, &names, &mut settings, &mut opts);
                         if let Some(g) = &mut guard {
                             g.publish_settings(&settings_msg(
                                 &settings,
@@ -1605,30 +1928,30 @@ fn run(
                         }
                         continue;
                     }
-                    let mut switch_to = |i: usize, _: &mut usize| {
-                        let i = i % names.len();
-                        // publisher picks the seed + start time; both sides
-                        // will build the scene from them
-                        let seed: u64 = rand::rng().random();
-                        let t0 = link::epoch_now_ms();
-                        sync_params = Some((seed, t0));
-                        let theme = settings.cfg.themes.get(names[i]).cloned()
-                            .or_else(|| settings.theme.clone());
-                        sync_theme = Some(theme.clone());
-                        transition.request(i);
-                        if let Some(g) = &mut guard {
-                            g.publish(names[i], theme.as_deref(), seed, t0);
-                        }
+                    // relative to the scene a pending switch lands on, so
+                    // rapid presses keep stepping
+                    let base = names.iter().position(|n| *n == st.target().scene).unwrap_or(idx);
+                    let mut switch_to = |i: usize| {
+                        // the publisher picks the seed and start time; every
+                        // pane builds the scene from them
+                        switch_scene(i % names.len(), &mut st, &mut guard, &mut transition,
+                            &names, &settings, &mut opts);
                         last_switch = Instant::now();
                     };
                     if km.matches("next", key.code) || key.code == KeyCode::Tab {
-                        let i = (idx + 1) % names.len();
-                        switch_to(i, &mut idx);
+                        switch_to(base + 1);
                     } else if km.matches("prev", key.code) {
-                        let i = (idx + names.len() - 1) % names.len();
-                        switch_to(i, &mut idx);
+                        switch_to(base + names.len() - 1);
                     } else if km.matches("pause", key.code) {
-                        paused = !paused;
+                        // wall-wide: a retime anchor freezes (or resumes) the
+                        // shared clock; the simulation itself is untouched
+                        let now_ms = link::epoch_now_ms();
+                        let mut a = st.target().clone();
+                        if a.paused() { a.resume(now_ms) } else { a.pause(now_ms) }
+                        if let (true, Some(g)) = (st.target_synced(), guard.as_mut()) {
+                            g.publish_anchor(&mut a);
+                        }
+                        st.retime(&a, &mut transition, &names);
                     } else if km.matches("filter_next", key.code) {
                         if quick_filter.as_deref() == Some("smooth-off") {
                             settings.smooth = 0.3;
@@ -1701,125 +2024,6 @@ fn run(
             }
             break;
         }
-    }
-}
-
-#[cfg(test)]
-mod sync_tests {
-    use super::*;
-
-    /// A normal frame simulates exactly the wall time that passed.
-    #[test]
-    fn steady_frame_spends_all_its_time() {
-        let mut debt = 1.0 / 120.0;
-        let (dts, n) = plan_steps(&mut debt, 1.0);
-        assert_eq!(n, 1);
-        assert!((dts[0] - 1.0 / 120.0).abs() < 1e-6);
-        assert!(debt < 1e-6, "steady frames must leave nothing owed");
-    }
-
-    /// The core sync property: over many frames, simulated time tracks wall
-    /// time even when individual frames overrun MAX_STEP. Before the catch-up
-    /// the clamp silently discarded the overrun and the pane fell behind.
-    #[test]
-    fn hitches_are_repaid_so_sim_time_tracks_wall_time() {
-        let mut debt = 0.0f32;
-        let mut simulated = 0.0f32;
-        let mut wall = 0.0f32;
-        // 200 good frames at 120fps with a 150ms stall every 20th
-        for i in 0..200 {
-            let frame = if i % 20 == 19 { 0.150 } else { 1.0 / 120.0 };
-            wall += frame;
-            debt = (debt + frame).min(MAX_DEBT);
-            let (dts, n) = plan_steps(&mut debt, 1.0);
-            simulated += dts.iter().take(n).sum::<f32>();
-        }
-        // whatever is still owed is bounded by one frame's worth of steps
-        let drift = (wall - simulated - debt).abs();
-        assert!(drift < 1e-3, "sim time drifted from wall time by {drift}s");
-        assert!(
-            debt < MAX_CATCHUP as f32 * MAX_STEP,
-            "debt should stay bounded, got {debt}"
-        );
-    }
-
-    /// No single step may exceed MAX_STEP, or a stall would blow up physics.
-    #[test]
-    fn no_single_step_exceeds_the_clamp() {
-        let mut debt = 5.0; // absurd stall
-        let (dts, n) = plan_steps(&mut debt, 1.0);
-        for s in dts.iter().take(n) {
-            assert!(*s <= MAX_STEP + 1e-6, "step {s} exceeds MAX_STEP");
-        }
-        assert_eq!(n, MAX_CATCHUP, "a big stall should use the full budget");
-    }
-
-    /// Debt is capped, so resuming from suspend does not simulate minutes.
-    #[test]
-    fn debt_is_capped_for_suspend() {
-        let mut debt = 0.0f32;
-        debt = (debt + 3600.0).min(MAX_DEBT);
-        assert_eq!(debt, MAX_DEBT);
-        let mut total = 0.0;
-        // draining is bounded: a handful of frames, not an hour of simulation
-        for _ in 0..20 {
-            let (dts, n) = plan_steps(&mut debt, 1.0);
-            total += dts.iter().take(n).sum::<f32>();
-        }
-        assert!(total <= MAX_DEBT + 1e-3, "drained {total}s, cap is {MAX_DEBT}");
-        assert!(debt < 1e-6, "cap should fully drain within 20 frames");
-    }
-
-    /// Nothing owed still yields one redraw step (the paused path in the frame
-    /// loop bypasses `plan_steps` entirely so leftover debt is not drained).
-    #[test]
-    fn idle_still_yields_a_redraw_step() {
-        let mut debt = 0.0f32;
-        let (dts, n) = plan_steps(&mut debt, 1.0);
-        assert_eq!(n, 1);
-        assert_eq!(dts[0], 0.0);
-    }
-
-    /// Pausing must not spend debt carried in from a hitch.
-    #[test]
-    fn pausing_preserves_outstanding_debt() {
-        let mut debt = 0.5f32;
-        let before = debt;
-        // the loop's paused branch: no accrual, no plan_steps call
-        let (dts, n) = ([0.0f32; MAX_CATCHUP], 1);
-        assert_eq!(n, 1);
-        assert_eq!(dts[0], 0.0);
-        assert_eq!(debt, before, "paused frames must leave debt untouched");
-        // and it is still there to repay on resume
-        let (dts, n) = plan_steps(&mut debt, 1.0);
-        assert!(dts.iter().take(n).sum::<f32>() > 0.0);
-    }
-
-    /// Catch-up steps are equal-sized: a hitch must never emit a big step
-    /// followed by a tiny remainder, or verlet velocity (displacement per
-    /// previous step) mis-scales for one step and the scene visibly pulses.
-    #[test]
-    fn catchup_steps_are_equal_sized() {
-        let mut debt = MAX_STEP + MAX_STEP / 10.0; // just past one step
-        let (dts, n) = plan_steps(&mut debt, 1.0);
-        assert_eq!(n, 2);
-        assert!(
-            (dts[0] - dts[1]).abs() < 1e-6,
-            "steps should be equal, got {} and {}",
-            dts[0],
-            dts[1]
-        );
-        assert!((dts[0] + dts[1] - (MAX_STEP + MAX_STEP / 10.0)).abs() < 1e-6);
-    }
-
-    /// `--speed` scales simulated time without changing the debt accounting.
-    #[test]
-    fn speed_scales_steps_only() {
-        let mut debt = 1.0 / 60.0;
-        let (dts, n) = plan_steps(&mut debt, 4.0);
-        assert_eq!(n, 1);
-        assert!((dts[0] - 4.0 / 60.0).abs() < 1e-6);
-        assert!(debt < 1e-6);
     }
 }
 

@@ -43,6 +43,13 @@ impl ShaderView {
     /// taller than wide, of which this pane renders the window whose top-left
     /// pixel is `win`. A single terminal is `win = (0, 0)` of its own canvas.
     pub fn for_canvas(full: (usize, usize), win: (usize, usize), aspect: f64) -> Self {
+        Self::for_window(full, (win.0 as i64, win.1 as i64), aspect)
+    }
+
+    /// `for_canvas` for a window that may start outside the canvas (a crop
+    /// widened by an apron): the scene is defined everywhere, so pixels left
+    /// of or above the wall are simply further out in composition space.
+    pub fn for_window(full: (usize, usize), win: (i64, i64), aspect: f64) -> Self {
         let w = full.0.max(1) as f64;
         let h = full.1.max(1) as f64 * aspect;
         let short = w.min(h);
@@ -53,11 +60,12 @@ impl ShaderView {
     }
 }
 
-/// Scene time from the shared clock. Time is quantised to the 60 Hz tick grid
-/// the Classic scenes use, so every pane rendering within the same tick draws
-/// identical pixels; and wrapped hourly (f32 loses sub-frame precision after a
-/// few hours), with the first seconds of each hour blended from the previous
-/// cycle so nothing jumps.
+/// Scene time from the shared clock. Continuous (ms resolution): a Studio
+/// scene has no tick grid, so any frame rate animates evenly, and panes still
+/// draw identical pixels because the frame clock renders every pane for the
+/// same slot times. Wrapped hourly (f32 loses sub-frame precision after a few
+/// hours), with the first seconds of each hour blended from the previous
+/// cycle so nothing jumps. `tick` is the 60 Hz Classic tick of the moment.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShaderTime {
     pub t: f32,
@@ -71,7 +79,7 @@ pub const WRAP_BLEND_SECS: f64 = 8.0;
 
 pub fn shader_time(elapsed_ms: u64, speed: f32) -> ShaderTime {
     let tick = elapsed_ms.saturating_mul(60) / 1000;
-    let t = tick as f64 / 60.0 * speed.max(0.0) as f64;
+    let t = elapsed_ms as f64 / 1000.0 * speed.max(0.0) as f64;
     let cycle = (t / WRAP_SECS).floor();
     let tw = t - cycle * WRAP_SECS;
     let blend = if cycle >= 1.0 && tw < WRAP_BLEND_SECS {
@@ -565,6 +573,15 @@ mod tests {
     }
 
     #[test]
+    fn an_apron_extends_the_same_mapping() {
+        let crop = ShaderView::for_canvas((300, 120), (4, 2), 2.0);
+        let apron = ShaderView::for_window((300, 120), (4 - 8, 2 - 8), 2.0);
+        assert!((apron.origin[0] - (crop.origin[0] - 8.0 * crop.step[0])).abs() < 1e-12);
+        assert!((apron.origin[1] - (crop.origin[1] + 8.0 * crop.step[1])).abs() < 1e-12);
+        assert_eq!((apron.step, apron.half), (crop.step, crop.half));
+    }
+
+    #[test]
     fn crops_tile_the_same_mapping() {
         let full = ShaderView::for_canvas((300, 120), (0, 0), 1.0);
         let crop = ShaderView::for_canvas((300, 120), (150, 60), 1.0);
@@ -574,10 +591,11 @@ mod tests {
     }
 
     #[test]
-    fn time_is_tick_quantised_and_wraps_with_a_blend() {
+    fn time_is_continuous_and_wraps_with_a_blend() {
         let a = shader_time(1000, 1.0);
         let b = shader_time(1008, 1.0);
-        assert_eq!(a.t, b.t, "within one 60 Hz tick");
+        assert!((b.t - a.t - 0.008).abs() < 1e-5, "no 60 Hz quantisation: any fps animates evenly");
+        assert_eq!((a.tick, b.tick), (60, 60));
         assert_eq!(a.blend, 1.0);
         let wrap = shader_time(3_600_000 + 2000, 1.0);
         assert!(wrap.t < 3.0 && wrap.blend < 1.0 && wrap.blend > 0.0);

@@ -237,7 +237,8 @@ Look:
       --no-truecolor             Force 256-color output even on truecolor terminals
 
 Performance:
-      --fps <FPS>            Target frames per second
+      --fps <FPS>            Target frames per second (Classic scenes snap to a divisor
+                             of their 60 Hz tick; Studio scenes cap at shader_fps)
       --idle-fps <IDLE_FPS>  Throttle while the terminal is unfocused
       --detail <DETAIL>      Quality: low, medium or high (particle/layer counts)
       --renderer <RENDERER>  auto, gpu, cpu or shader
@@ -248,7 +249,8 @@ Linking & wall:
       --group <GROUP>  Link group for this instance (instances in the same group sync)
       --no-wall        Never join a video wall
       --wall <WALL>    Manual video-wall tiling: COLSxROWS:INDEX (e.g. 2x1:0)
-      --pad <PAD>      Terminal padding in px so wall crops line up across windows
+      --pad <PAD>      Terminal padding so wall crops line up across windows:
+                       px (7), points (3.5pt, like kitty's window_padding_width), or x,y
 ```
 
 The pre-subcommand spellings (`--list`, `--instances`, `--switch`,
@@ -286,18 +288,24 @@ termpaper instances
 
 Or **`?` → Wall** — live peers in your cluster, `(you)` on this window.
 
-Spin up a second monitor? It adopts the group's saved scene anchor and
-replays toward the shared frame. Catch-up is spread across display frames;
-joining a long-running scene can take time.
+Spin up a second monitor? It adopts the group's anchor (`anchor.json`: scene,
+seed, start time, pause state, speed, detail, pixels, text scale, theme) and
+replays toward the shared frame out of sight. If that replay would take more
+than a few seconds, the group restarts the scene together after a fade.
 
 ### Sync clusters
 
-Same link group = same heartbeat:
+Same link group = same clock:
 
-- Scene switches (`←` / `→`, menu, `termpaper switch`) — one command, every window
-- Live settings — pixels, detail, filters, theme, speed, fps, smooth, dim,
-  fade, color grade, `f` quick-filter preview
-- **Frame lock** — identical animation state, like one wallpaper torn across panes
+- Scene switches (`←` / `→`, menu, `termpaper switch`) — one command, every
+  window, fading out and in at the same moment
+- Sim settings — speed, detail, pixels, text scale, theme — travel in the
+  anchor, so panes started with different flags converge
+- Live appearance settings — filters, fps, smooth, dim, fade, color grade, `f`
+  quick-filter preview
+- Pause (`space`) freezes the whole wall; resuming continues where it stopped
+- **Frame lock** — identical animation state, presented on the same frame
+  slots, like one wallpaper torn across panes
 
 `--cycle` auto-rotation stays local. Your desk doesn't have to follow your wall.
 
@@ -311,8 +319,9 @@ termpaper --group desk candy        # independent cluster
 ```
 
 Remote tweaks are **session-only** — nobody's config file gets overwritten.
-The lowest-pid instance in a cluster re-broadcasts the current scene every 15s
-as a sync anchor. Identical repeats are dropped — no stutter, no restart flash.
+The anchor persists as long as any member of the cluster lives, so there is no
+heartbeat. The lowest-pid instance leads: it answers restart requests and
+retimes the cluster after a system suspend.
 
 ### Go solo
 
@@ -359,9 +368,11 @@ termpaper --wall 2x1:1 --group wallpaper rain   # right half
 termpaper --no-wall                             # local canvas only, never folded into a wall
 ```
 
-**Padding:** kitty/alacritty window margins? Set `pad = 7` or `--pad 7` so
-crops line up at the text edge, not the window chrome. Every instance publishes
-its inset; the wall math handles the rest.
+**Padding:** kitty/alacritty window margins? Set `pad = 7` (px), `pad = "3.5pt"`
+(kitty's `window_padding_width` is in points) or `pad = [x, y]`, plus
+`placement = "center"` if your terminal centres its grid (default `top-left`),
+so crops line up at the text edge, not the window chrome. Every instance
+publishes its inset and its measured cell size; the wall math handles the rest.
 
 Shared seed + geometry = **one continuous frame** across the grid. If the
 virtual canvas gets too huge (~3× standard area), instances gracefully fall
@@ -545,7 +556,7 @@ override.
 
 ```toml
 scene = "life"
-fps = 120                 # 10–240; 120 = high-refresh sweet spot
+fps = 120                 # 10–240; Classic scenes snap to 60/30/20/15..., Studio cap at shader_fps
 speed = 4.0               # 0.25–4.0 animation multiplier
 pixels = "braille"        # half|quad|braille
 detail = "low"            # low|medium|high — particle counts
@@ -556,7 +567,9 @@ fade = 0.25             # scene transition seconds
 hue_shift = 0           # global hue 0–360°
 saturation = 1.0        # 0 = grayscale, 2+ = vivid
 contrast = 1.0          # 0.5–2.5
-pad = 0                 # terminal padding px (wall alignment)
+pad = 0                 # terminal padding: px, "3.5pt", or [x, y] (wall alignment)
+placement = "top-left"  # top-left|center — where the terminal puts leftover space
+hysteresis = 3          # Studio scenes: don't resend cells that moved <= 3 levels
 link = true             # false = solo art
 group = "wallpaper"     # sync cluster
 wall = true             # false = never crop into a video wall
