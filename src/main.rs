@@ -318,15 +318,48 @@ fn main() -> std::io::Result<()> {
         shader_fps: cfg_shader_fps,
     };
 
-    let mut terminal = ratatui::init();
+    let mut terminal = init_terminal()?;
     terminal.hide_cursor()?;
     // focus reporting lets unfocused instances skip the pacing spin (and
     // honor --idle-fps); terminals without support just never send events
-    let _ = crossterm::execute!(std::io::stdout(), event::EnableFocusChange);
+    let _ = crossterm::execute!(terminal.backend_mut(), event::EnableFocusChange);
     let result = run(&mut terminal, &scene_name, settings);
-    let _ = crossterm::execute!(std::io::stdout(), event::DisableFocusChange);
-    ratatui::restore();
+    let _ = crossterm::execute!(terminal.backend_mut(), event::DisableFocusChange);
+    restore_terminal();
     result
+}
+
+/// The terminal every frame is drawn through. Output is block-buffered: a
+/// frame is hundreds of KB of SGR sequences, and the line-buffered `Stdout`
+/// that `ratatui::init` uses would split it into hundreds of writes the
+/// terminal can render half-way through (tearing).
+type Term = ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::BufWriter<std::io::Stdout>>>;
+
+/// Frame output buffer. Big enough for a full braille frame of a large
+/// terminal, so a frame normally leaves in one write.
+const OUT_BUFFER: usize = 1 << 20;
+
+/// `ratatui::init` with a buffered writer: raw mode, alternate screen, and a
+/// panic hook that restores the terminal before the message prints.
+fn init_terminal() -> std::io::Result<Term> {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        hook(info);
+    }));
+    crossterm::terminal::enable_raw_mode()?;
+    crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
+    let out = std::io::BufWriter::with_capacity(OUT_BUFFER, std::io::stdout());
+    ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(out))
+}
+
+fn restore_terminal() {
+    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::terminal::LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
 }
 
 struct Settings {
@@ -545,7 +578,7 @@ fn apply_defaults(
 }
 
 fn run(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut Term,
     start_scene: &str,
     mut settings: Settings,
 ) -> std::io::Result<()> {
@@ -895,6 +928,11 @@ fn run(
                 .unwrap_or_default();
         }
 
+        // DEC 2026 synchronized output: the terminal holds the old frame
+        // until the end marker, so a frame never shows half-written. The
+        // begin marker rides in the same buffered write as the frame (draw
+        // flushes); terminals without support ignore both.
+        crossterm::queue!(terminal.backend_mut(), crossterm::terminal::BeginSynchronizedUpdate)?;
         terminal.draw(|f| {
             let area = f.area();
             let (pw, ph) = settings.pixels.cell_size();
@@ -1040,6 +1078,7 @@ fn run(
                 );
             }
         })?;
+        crossterm::execute!(terminal.backend_mut(), crossterm::terminal::EndSynchronizedUpdate)?;
 
         // steady pacing: coarse sleep to ~1ms before the deadline, then
         // Sleep (inside the event poll) to just before the deadline, then spin
