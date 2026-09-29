@@ -334,10 +334,13 @@ pub enum Effect {
     DeleteTheme(String),
     /// copy a theme's share code (OSC 52) and show it
     ShareTheme(String),
-    /// a tp1: code or a theme file's path
+    /// a tp1: code, a gallery link, or a theme file's path
     ImportTheme(String),
     /// switch to the scene (and variant) a theme was made for
     SceneFromTheme(String),
+    /// ask the gallery for its themes (`g` on the Themes page): they come
+    /// back as the Gallery shelf, where Enter installs one
+    FetchGallery,
 }
 
 impl Effect {
@@ -809,6 +812,7 @@ impl Menu {
                     }
                     Some(t) if t.yours && active(&t) => self.flash("No changes to save"),
                     Some(t) if t.yours => self.flash("U saves your edits into the theme in use: apply this one first"),
+                    Some(t) if themes::is_gallery(&t.slug) => self.flash("Enter installs it; then it is yours to change"),
                     _ => self.flash("Built-in themes stay as they are: n saves your look as a new theme"),
                 }
                 return Vec::new();
@@ -816,6 +820,9 @@ impl Menu {
             Input::Char('r') => {
                 match hit.filter(|t| t.yours) {
                     Some(t) => self.prompt = Some(themes::Prompt::new(themes::PromptKind::Rename(t.slug), t.name)),
+                    None if self.highlighted_theme(ctx).is_some_and(|t| themes::is_gallery(&t.slug)) => {
+                        self.flash("Enter installs it; then it is yours to change")
+                    }
                     None => self.flash("Built-in themes keep their names: n saves your look as a new theme"),
                 }
                 return Vec::new();
@@ -823,6 +830,9 @@ impl Menu {
             Input::Char('x') => {
                 match hit.filter(|t| t.yours) {
                     Some(t) => self.prompt = Some(themes::Prompt::new(themes::PromptKind::Delete(t.slug), "")),
+                    None if self.highlighted_theme(ctx).is_some_and(|t| themes::is_gallery(&t.slug)) => {
+                        self.flash("Not installed: it only lives in the gallery")
+                    }
                     None => self.flash("Built-in themes cannot be deleted"),
                 }
                 return Vec::new();
@@ -837,6 +847,7 @@ impl Menu {
                 self.prompt = Some(themes::Prompt::new(themes::PromptKind::Import, ""));
                 return Vec::new();
             }
+            Input::Char('g') => return vec![Effect::FetchGallery],
             Input::Char('u') => return vec![Effect::Undo],
             Input::Char('?') => {
                 self.help = true;
@@ -1121,6 +1132,12 @@ impl Menu {
                 }
             }
             Input::Char('t') if on_scenes => return self.cycle_theme(ctx),
+            Input::Char('r') => {
+                // a surprise from the list on show; it previews like any other
+                self.browser.column = Column::Scenes;
+                self.browser.random_row(ctx);
+                self.touch(ctx);
+            }
             Input::Char('?') => self.help = true,
             Input::Esc => return self.close(),
             _ => {}

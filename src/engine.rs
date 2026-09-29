@@ -24,15 +24,16 @@ use std::time::Instant;
 )]
 #[serde(rename_all = "lowercase")]
 pub enum Renderer {
-    /// GPU post-processing when compiled and available; scenes run on the CPU.
+    /// The GPU when there is one: Studio scenes and post-processing
+    /// (Classic scenes are drawn on the CPU); else everything on the CPU.
     #[default]
     Auto,
-    /// Like `Auto`, but reports when the GPU was requested and is missing.
+    /// Like `Auto`, but says so when the GPU is missing.
     Gpu,
-    /// Everything on the CPU.
+    /// Everything on the CPU: Studio scenes show their Classic fallback.
     Cpu,
-    /// GPU post-processing and every Classic scene drawn from its WGSL arm
-    /// (the experimental GPU worlds) instead of the Rust scene.
+    /// Like `Auto`, and Classic scenes are drawn from their experimental
+    /// WGSL worlds instead of their Rust code.
     Shader,
 }
 

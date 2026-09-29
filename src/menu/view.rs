@@ -1119,14 +1119,16 @@ pub fn key_hints(m: &Menu, ctx: &MenuCtx) -> Vec<(&'static str, &'static str)> {
             let t = m.highlighted_theme(ctx);
             let active = t.is_some_and(|t| ctx.active_theme.as_deref() == Some(t.slug.as_str()));
             let edited = active && ctx.theme_modified;
-            let mut v = vec![("↑↓", "move"), ("Enter", if edited { "revert" } else { "apply" })];
+            let shared = t.is_some_and(|t| super::themes::is_gallery(&t.slug));
+            let enter = if shared { "install" } else if edited { "revert" } else { "apply" };
+            let mut v = vec![("↑↓", "move"), ("Enter", enter)];
             if t.is_some_and(|t| t.scene.is_some()) {
                 v.push(("s", "its scene"));
             }
             if edited && t.is_some_and(|t| t.yours) {
                 v.push(("U", "save changes"));
             }
-            v.extend([("e", "edit"), ("n", "save as new"), ("c", "share"), ("i", "import")]);
+            v.extend([("e", "edit"), ("n", "save as new"), ("c", "share"), ("i", "import"), ("g", "gallery")]);
             if t.is_some_and(|t| t.yours) {
                 v.extend([("r", "rename"), ("x", "delete")]);
             }
@@ -1153,7 +1155,7 @@ pub fn key_hints(m: &Menu, ctx: &MenuCtx) -> Vec<(&'static str, &'static str)> {
                         v.push(("t", "variant"));
                     }
                 }
-                v.extend([("/", "search"), ("←", "categories")]);
+                v.extend([("r", "random"), ("/", "search"), ("←", "categories")]);
             }
             v.extend([("Tab", "page"), ("?", "help"), ("Esc", close)]);
             v

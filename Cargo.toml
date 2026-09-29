@@ -38,6 +38,11 @@ miniz_oxide = "0.8"
 wgpu = { version = "30.0.0", optional = true, default-features = false, features = ["std", "vulkan", "metal", "dx12", "wgsl"] }
 bytemuck = { version = "1.25", optional = true, features = ["derive"] }
 pollster = { version = "1.0", optional = true }
+# The theme gallery (`termpaper theme install/browse/publish`, the Community
+# shelf): HTTPS with rustls and bundled root certificates, so it works the
+# same everywhere. Only ever used when you ask; `--no-default-features`
+# leaves it out.
+ureq = { version = "3.4", optional = true, default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 # wgsl-in validates every shader; the MSL and HLSL writers catch constructs
@@ -60,8 +65,9 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [features]
-default = ["gpu"]
+default = ["gpu", "net"]
 gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
+net = ["dep:ureq"]
 
 # These link the GPU backend, so they only exist in a `gpu` build.
 [[example]]

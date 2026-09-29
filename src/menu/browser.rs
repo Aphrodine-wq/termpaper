@@ -208,6 +208,17 @@ impl Browser {
         self.row = (cur.saturating_add(delta)).clamp(0, n.saturating_sub(1) as isize) as usize;
     }
 
+    /// `r`: a different scene from the same list, at random.
+    pub fn random_row(&mut self, ctx: &MenuCtx) {
+        let n = self.list(ctx).len();
+        if n < 2 {
+            return;
+        }
+        let cur = self.row_in(n);
+        let step = rand::random_range(1..n);
+        self.row = (cur + step) % n;
+    }
+
     pub fn move_shelf(&mut self, delta: isize) {
         let n = shelves().len();
         let cur = self.shelf.min(n - 1) as isize;

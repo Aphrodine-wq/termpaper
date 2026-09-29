@@ -71,20 +71,57 @@ pub fn list(store: &Store, color: bool, user_dir: Option<&Path>, width: Option<u
     out
 }
 
+/// `theme browse`: themes shared in the gallery, id first (what `theme
+/// install` takes), with swatches when the terminal shows colour.
+pub fn gallery_list(list: &[crate::gallery::Listed], color: bool, width: Option<usize>, host: &str, more: bool) -> String {
+    if list.is_empty() {
+        return format!("Nothing shared at {host} matches that yet.\n");
+    }
+    let mut out = format!("Shared at {host}\n\n");
+    for l in list {
+        let sw = l.theme().map(|t| swatch_line(&t.look, color)).unwrap_or_default();
+        let pad = if sw.is_empty() { String::new() } else { " ".repeat(14) };
+        let sw = if sw.is_empty() { String::new() } else { format!("{sw}  ") };
+        let by = match (l.builtin, l.author.trim()) {
+            (true, _) => "built in".to_string(),
+            (false, "") => "by someone".to_string(),
+            (false, a) => format!("by {a}"),
+        };
+        let stats = if l.builtin { String::new() } else { format!(" · {} installs", l.installs) };
+        out.push_str(&format!("  {sw}{:<10} {} ({by}{stats})\n", l.id, l.name));
+        if !l.description.is_empty() {
+            let desc = match width {
+                Some(w) => cut(&l.description, w.saturating_sub(2 + pad.len() + 11).max(20)),
+                None => l.description.clone(),
+            };
+            out.push_str(&format!("  {pad}{:<10} {desc}\n", ""));
+        }
+    }
+    if more {
+        out.push_str("  … and more: add words to narrow it down, or browse the gallery online\n");
+    }
+    out.push_str("\nInstall one:  termpaper theme install ID\n");
+    out
+}
+
 /// `theme list --json`: one object per theme, with its share code.
 pub fn list_json(store: &Store) -> String {
+    // serialized straight from the structs, not through serde_json::Value,
+    // which would widen every f32 (0.7 → 0.699999988079071)
+    #[derive(serde::Serialize)]
+    struct Item<'a> {
+        slug: &'a str,
+        shelf: &'a str,
+        yours: bool,
+        code: String,
+        theme: &'a Theme,
+    }
     let rows = crate::menu::themes::rows(store);
-    let items: Vec<serde_json::Value> = rows
+    let items: Vec<Item> = rows
         .iter()
         .filter_map(|r| {
             let e = store.get(&r.slug)?;
-            Some(serde_json::json!({
-                "slug": e.slug,
-                "shelf": r.shelf,
-                "yours": r.yours,
-                "code": e.theme.to_code(),
-                "theme": e.theme,
-            }))
+            Some(Item { slug: &e.slug, shelf: r.shelf, yours: r.yours, code: e.theme.to_code(), theme: &e.theme })
         })
         .collect();
     serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".into())

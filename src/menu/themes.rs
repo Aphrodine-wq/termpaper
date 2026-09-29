@@ -57,7 +57,7 @@ impl Prompt {
             PromptKind::NewTheme => "Save your look as".into(),
             PromptKind::Rename(_) => "New name".into(),
             PromptKind::Delete(_) => "Delete it? type y".into(),
-            PromptKind::Import => "Paste a tp1: code or a file path".into(),
+            PromptKind::Import => "Paste a tp1: code, a gallery link or a file path".into(),
             PromptKind::NewGroup => "Name for the group".into(),
         }
     }
@@ -120,6 +120,32 @@ fn row(e: &Entry, shelf: &'static str) -> ThemeRow {
         scene: t.scene.as_ref().map(|s| (s.name.clone(), s.variant.clone())),
         look: t.look.clone(),
     }
+}
+
+/// Rows of the Gallery shelf are named `gallery:<id>`: they are not in the
+/// store until installed.
+pub const GALLERY_PREFIX: &str = "gallery:";
+
+pub fn is_gallery(slug: &str) -> bool {
+    slug.starts_with(GALLERY_PREFIX)
+}
+
+/// The Gallery shelf: themes fetched from the gallery (`g`), by id.
+pub fn gallery_rows(list: &[(String, crate::theme::Theme)]) -> Vec<ThemeRow> {
+    list.iter()
+        .map(|(id, t)| ThemeRow {
+            slug: format!("{GALLERY_PREFIX}{id}"),
+            name: t.name.clone(),
+            author: t.author.clone(),
+            description: t.description.clone(),
+            tags: t.tags.clone(),
+            shelf: "Gallery",
+            yours: false,
+            swatches: swatches(&t.look),
+            scene: t.scene.as_ref().map(|s| (s.name.clone(), s.variant.clone())),
+            look: t.look.clone(),
+        })
+        .collect()
 }
 
 /// Every theme in the store as the Themes page lists it: Clean to start
@@ -190,6 +216,20 @@ mod tests {
         assert!(gb.swatches.iter().all(|s| pal.contains(s)), "palette themes show their colours");
         assert_eq!(gb.swatches.first(), pal.first());
         assert_eq!(gb.swatches.last(), pal.last());
+    }
+
+    #[test]
+    fn gallery_rows_are_named_apart_from_the_store() {
+        let store = Store::load_from(None);
+        let mut t = store.get("nord").unwrap().theme.clone();
+        t.name = "Fjord".into();
+        t.author = "someone".into();
+        let r = gallery_rows(&[("k3Xa9QpZ".into(), t)]);
+        assert_eq!(r[0].slug, "gallery:k3Xa9QpZ");
+        assert!(is_gallery(&r[0].slug) && !is_gallery("nord"));
+        assert_eq!((r[0].shelf, r[0].yours, r[0].author.as_str()), ("Gallery", false, "someone"));
+        // found by its author too
+        assert_eq!(visible(&r, "someone").len(), 1);
     }
 
     #[test]

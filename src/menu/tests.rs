@@ -1299,3 +1299,45 @@ fn snapshot() {
         }
     }
 }
+
+#[test]
+fn g_asks_the_gallery_and_its_shelf_installs_on_enter() {
+    let mut c = ctx();
+    let mut m = on_themes(&c);
+    assert_eq!(keys(&mut m, &c, &[Input::Char('g')]), vec![Effect::FetchGallery]);
+    assert!(view::key_hints(&m, &c).contains(&("g", "gallery")));
+    // the shelf arrives: rows named gallery:<id>, after everything else
+    let store = crate::theme::Store::load_from(None);
+    let mut t = store.get("nord").unwrap().theme.clone();
+    t.name = "Fjord".into();
+    let mut rows = themes::rows(&store);
+    rows.extend(themes::gallery_rows(&[("k3Xa9QpZ".into(), t)]));
+    c.themes = std::sync::Arc::new(rows);
+    m.focus_theme("gallery:k3Xa9QpZ", &c.themes);
+    assert_eq!(m.highlighted_theme(&c).unwrap().name, "Fjord");
+    assert!(view::key_hints(&m, &c).contains(&("Enter", "install")));
+    // not yours until installed: nothing to rename or delete
+    assert!(keys(&mut m, &c, &[Input::Char('r')]).is_empty());
+    assert!(m.prompt.is_none());
+    assert!(keys(&mut m, &c, &[Input::Char('x')]).is_empty());
+    assert!(m.prompt.is_none());
+    assert_eq!(keys(&mut m, &c, &[Input::Char('c')]), vec![Effect::ShareTheme("gallery:k3Xa9QpZ".into())]);
+    assert_eq!(keys(&mut m, &c, &[Input::Enter]), vec![Effect::ApplyTheme("gallery:k3Xa9QpZ".into())]);
+}
+
+#[test]
+fn r_picks_another_scene_from_the_list_on_show() {
+    let c = ctx();
+    let mut m = opened(&c);
+    let list: Vec<&str> = m.browser.list(&c).iter().map(|e| e.name()).collect();
+    for _ in 0..20 {
+        keys(&mut m, &c, &[Input::Char('r')]);
+        let now = m.browser.highlighted(&c).unwrap().name();
+        assert!(list.contains(&now), "{now} is from the same list");
+    }
+    // never the one it was on
+    let before = m.browser.highlighted(&c).unwrap().name();
+    keys(&mut m, &c, &[Input::Char('r')]);
+    assert_ne!(m.browser.highlighted(&c).unwrap().name(), before);
+    assert_eq!(m.browser.column, Column::Scenes);
+}

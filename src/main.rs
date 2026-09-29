@@ -50,11 +50,12 @@ struct Args {
     #[arg(long, help_heading = "Scene")]
     screensaver: bool,
 
-    /// Post-processing filter, repeatable (e.g. --filter crt --filter bloom)
+    /// An effect, repeatable (e.g. --filter crt --filter bloom); `--theme`
+    /// sets a whole look
     #[arg(long, help_heading = "Look")]
     filter: Vec<String>,
 
-    /// Pixel mode: half, quad or braille
+    /// Pixel mode: half, quad, sextant, braille, ascii or blocks
     #[arg(long, help_heading = "Look")]
     pixels: Option<String>,
 
@@ -70,8 +71,9 @@ struct Args {
     #[arg(long, help_heading = "Performance")]
     fps: Option<u32>,
 
-    /// Throttle to this fps while the terminal is unfocused (needs a
-    /// terminal that reports focus; off unless set)
+    /// While the terminal is unfocused, drop to 30 fps (or 15 for values up
+    /// to 20); Display → When unfocused keeps it for good (needs a terminal
+    /// that reports focus)
     #[arg(long, help_heading = "Performance")]
     idle_fps: Option<u32>,
 
@@ -79,10 +81,11 @@ struct Args {
     #[arg(long, help_heading = "Performance")]
     detail: Option<String>,
 
-    /// Rendering backend: auto = GPU post-processing when compiled and
-    /// available, scenes run on the CPU; gpu = same, but reports if the GPU
-    /// is missing; cpu = everything on the CPU; shader = draw every scene
-    /// from its experimental WGSL world instead of the Rust scene
+    /// Rendering backend: auto = the GPU when there is one (Studio scenes
+    /// and post-processing), else the CPU; gpu = the same, but says so when
+    /// the GPU is missing; cpu = everything on the CPU (Studio scenes show
+    /// their Classic fallback); shader = also draw Classic scenes from their
+    /// experimental WGSL worlds
     #[arg(long, value_enum, help_heading = "Performance")]
     renderer: Option<termpaper::engine::Renderer>,
 
@@ -170,7 +173,8 @@ enum Command {
         #[command(subcommand)]
         action: WallCmd,
     },
-    /// Themes: list, show, apply, make, share and check them
+    /// Themes: list, apply, make and share them, and install them from the
+    /// gallery
     Theme {
         #[command(subcommand)]
         action: ThemeCmd,
@@ -220,6 +224,28 @@ enum ThemeCmd {
     Check { file: String },
     /// Delete one of your themes
     Delete { name: String },
+    /// Add a theme from the gallery: its id, a link to its page, or a share
+    /// code
+    Install { what: String },
+    /// Themes people shared in the gallery (every word must match)
+    Browse {
+        query: Vec<String>,
+        /// Only themes with this tag
+        #[arg(long)]
+        tag: Option<String>,
+        /// Most installed first (default: newest first)
+        #[arg(long)]
+        popular: bool,
+    },
+    /// Share one of your themes in the gallery, for anyone to install
+    Publish {
+        name: String,
+        /// Publish without asking first
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Take a theme you published from here out of the gallery
+    Unpublish { id: String },
 }
 
 #[derive(Subcommand)]
@@ -589,6 +615,60 @@ fn theme_command(action: ThemeCmd, args: &Args) -> std::io::Result<()> {
             }
             format!("Deleted “{title}”\n")
         }
+        ThemeCmd::Install { what } => {
+            let dir = user_dir.clone().unwrap_or_else(|| fail("no config directory for your themes".into()));
+            match termpaper::gallery::target(&what).unwrap_or_else(|e| fail(e)) {
+                termpaper::gallery::Target::Code(code) => {
+                    let (theme, warnings) = termpaper::theme::Theme::from_code(&code).unwrap_or_else(|e| fail(e));
+                    theme_cli::import(&mut store, &dir, theme, &warnings, None).unwrap_or_else(|e| fail(e))
+                }
+                termpaper::gallery::Target::Id { base: link, id } => {
+                    // one of termpaper's own: nothing to fetch
+                    let own = |slug: &str| store.get(slug).filter(|e| e.source == Source::Builtin).map(|e| e.theme.name.clone());
+                    if let Some(name) = link.is_none().then(|| own(&id)).flatten() {
+                        format!("{name} comes with termpaper: termpaper --theme {id}\n")
+                    } else {
+                        gallery_install(&mut store, &dir, link, &id).unwrap_or_else(|e| fail(e))
+                    }
+                }
+            }
+        }
+        ThemeCmd::Browse { query, tag, popular } => {
+            let width = std::io::stdout()
+                .is_terminal()
+                .then(|| crossterm::terminal::size().ok().map(|(w, _)| w as usize))
+                .flatten();
+            gallery_browse(&query.join(" "), tag.as_deref(), popular, color, width).unwrap_or_else(|e| fail(e))
+        }
+        ThemeCmd::Publish { name, yes } => {
+            let e = store.find(&name).unwrap_or_else(|| fail(format!("no theme called '{name}' (see `termpaper theme list`)")));
+            if e.source == Source::Builtin {
+                fail(format!("{} comes with termpaper, so everyone has it already", e.theme.name));
+            }
+            let theme = e.theme.clone();
+            let base = termpaper::gallery::base_url(config::load().gallery_url.as_deref());
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    fail("publishing asks first: run it in a terminal, or add --yes".into());
+                }
+                print!(
+                    "Publish “{}” to {}? Anyone will be able to see and install it. [y/N] ",
+                    theme.name,
+                    termpaper::gallery::host(&base)
+                );
+                let _ = std::io::stdout().flush();
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                    fail("not published".into());
+                }
+            }
+            gallery_publish(&base, &theme).unwrap_or_else(|e| fail(e))
+        }
+        ThemeCmd::Unpublish { id } => {
+            let base = termpaper::gallery::base_url(config::load().gallery_url.as_deref());
+            gallery_unpublish(&base, &id).unwrap_or_else(|e| fail(e))
+        }
         ThemeCmd::Apply { name, group } => {
             let e = store.find(&name).unwrap_or_else(|| fail(format!("no theme called '{name}' (see `termpaper theme list`)")));
             let mut cfg = config::load();
@@ -615,6 +695,81 @@ fn theme_command(action: ThemeCmd, args: &Args) -> std::io::Result<()> {
     // one write: piping into `head` shouldn't panic on SIGPIPE
     let _ = std::io::stdout().write_all(out.as_bytes());
     Ok(())
+}
+
+/// `theme install ID`: fetch it, keep it among your themes (once: the same
+/// theme again is not copied twice) and count the install.
+#[cfg(feature = "net")]
+fn gallery_install(store: &mut termpaper::theme::Store, dir: &std::path::Path, link: Option<String>, id: &str) -> Result<String, String> {
+    use termpaper::gallery;
+    let base = link.unwrap_or_else(|| gallery::base_url(config::load().gallery_url.as_deref()));
+    let l = gallery::fetch(&base, id)?;
+    let (theme, warnings) = termpaper::theme::Theme::from_code(&l.code)?;
+    if l.builtin {
+        return Ok(format!("{} comes with termpaper: termpaper --theme {id}\n", theme.name));
+    }
+    let code = theme.to_code();
+    if let Some(e) = store.entries.iter().find(|e| e.source == termpaper::theme::Source::User && e.theme.to_code() == code) {
+        return Ok(format!("You have “{}” already, as {}: termpaper --theme {}\n", e.theme.name, e.slug, e.slug));
+    }
+    let by = if l.author.trim().is_empty() { String::new() } else { format!(" by {}", l.author.trim()) };
+    let out = termpaper::theme_cli::import(store, dir, theme, &warnings, None)?;
+    gallery::count_install(&base, id);
+    Ok(format!("From {}{by}.\n{out}", gallery::host(&base)))
+}
+
+#[cfg(feature = "net")]
+fn gallery_browse(query: &str, tag: Option<&str>, popular: bool, color: bool, width: Option<usize>) -> Result<String, String> {
+    use termpaper::gallery;
+    let base = gallery::base_url(config::load().gallery_url.as_deref());
+    let (list, next) = gallery::list(&base, query, tag, popular, 0)?;
+    Ok(termpaper::theme_cli::gallery_list(&list, color, width, gallery::host(&base), next.is_some()))
+}
+
+#[cfg(feature = "net")]
+fn gallery_publish(base: &str, theme: &termpaper::theme::Theme) -> Result<String, String> {
+    use termpaper::gallery;
+    let p = gallery::publish(base, theme)?;
+    let kept = match gallery::save_token(base, &p.id, &p.token) {
+        Ok(path) => format!("Its edit token is kept in {}: `termpaper theme unpublish {}` takes it down.", termpaper::theme_cli::tidy_path(&path), p.id),
+        Err(_) => format!("Keep its edit token to take it down later: {}", p.token),
+    };
+    let mut out = format!("Published “{}”: {}\nAnyone can install it:  termpaper theme install {}\n{kept}\n", theme.name, p.url, p.id);
+    for w in &p.warnings {
+        out.push_str(&format!("  note: {w}\n"));
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "net")]
+fn gallery_unpublish(base: &str, id: &str) -> Result<String, String> {
+    use termpaper::gallery;
+    let token = gallery::token(base, id).ok_or_else(|| {
+        format!("no edit token here for {id} at {}: a theme can be taken down from where it was published (on the website, from the browser that published it)", gallery::host(base))
+    })?;
+    gallery::unpublish(base, id, &token)?;
+    gallery::forget_token(base, id);
+    Ok(format!("Took {id} out of the gallery. Copies people installed keep working.\n"))
+}
+
+#[cfg(not(feature = "net"))]
+fn gallery_install(_: &mut termpaper::theme::Store, _: &std::path::Path, _: Option<String>, _: &str) -> Result<String, String> {
+    Err(termpaper::gallery::NO_NET.into())
+}
+
+#[cfg(not(feature = "net"))]
+fn gallery_browse(_: &str, _: Option<&str>, _: bool, _: bool, _: Option<usize>) -> Result<String, String> {
+    Err(termpaper::gallery::NO_NET.into())
+}
+
+#[cfg(not(feature = "net"))]
+fn gallery_publish(_: &str, _: &termpaper::theme::Theme) -> Result<String, String> {
+    Err(termpaper::gallery::NO_NET.into())
+}
+
+#[cfg(not(feature = "net"))]
+fn gallery_unpublish(_: &str, _: &str) -> Result<String, String> {
+    Err(termpaper::gallery::NO_NET.into())
 }
 
 /// `termpaper list --json`: the catalog the website and other tools read.
@@ -875,7 +1030,8 @@ fn main() -> std::io::Result<()> {
         look: termpaper::look::Baked::new(look),
         look_theme,
         look_preview: None,
-        theme_rows: theme_rows(&themes),
+        theme_rows: theme_rows(&themes, &[]),
+        gallery: Vec::new(),
         themes,
         fps,
         speed,
@@ -995,6 +1151,9 @@ struct Settings {
     /// every theme (built in and yours), and the rows the menu shows
     themes: termpaper::theme::Store,
     theme_rows: std::sync::Arc<Vec<menu::themes::ThemeRow>>,
+    /// themes fetched from the gallery (`g` on the Themes page), by id: the
+    /// Gallery shelf, installed into `themes` when picked
+    gallery: Vec<(String, termpaper::theme::Theme)>,
     fps: u32,
     speed: f32,
     cycle: Option<f64>,
@@ -1600,8 +1759,69 @@ fn remembered_scene<'a>(
 /// The Themes page's rows: the neutral theme, then yours, then the built-in
 /// categories. Swatches are worked out here once: a theme's palette, or
 /// reference colours run through its grade.
-fn theme_rows(store: &termpaper::theme::Store) -> std::sync::Arc<Vec<menu::themes::ThemeRow>> {
-    std::sync::Arc::new(menu::themes::rows(store))
+fn theme_rows(store: &termpaper::theme::Store, gallery: &[(String, termpaper::theme::Theme)]) -> std::sync::Arc<Vec<menu::themes::ThemeRow>> {
+    let mut rows = menu::themes::rows(store);
+    rows.extend(menu::themes::gallery_rows(gallery));
+    std::sync::Arc::new(rows)
+}
+
+/// A Gallery shelf row's theme (`gallery:<id>`), while it is not installed.
+fn gallery_theme<'a>(settings: &'a Settings, slug: &str) -> Option<&'a termpaper::theme::Theme> {
+    let id = slug.strip_prefix(menu::themes::GALLERY_PREFIX)?;
+    settings.gallery.iter().find(|(i, _)| i == id).map(|(_, t)| t)
+}
+
+/// What a gallery request running in the background came back with.
+#[cfg(feature = "net")]
+enum GalleryReply {
+    /// the Gallery shelf: each theme with its id
+    List(Result<Vec<(String, termpaper::theme::Theme)>, String>),
+    /// one theme, from a pasted link: install it and wear it
+    One(Result<(String, termpaper::theme::Theme), String>),
+}
+
+/// Ask the gallery in the background; the answer arrives on `tx`. The
+/// shelf holds the most installed themes and the newest, once each.
+#[cfg(feature = "net")]
+fn gallery_fetch(base: String, tx: std::sync::mpsc::Sender<GalleryReply>) {
+    use termpaper::gallery;
+    std::thread::spawn(move || {
+        let popular = gallery::list(&base, "", None, true, 0);
+        let newest = gallery::list(&base, "", None, false, 0);
+        let reply = match (popular, newest) {
+            (Err(e), _) => Err(e),
+            (Ok((a, _)), b) => {
+                let mut seen = std::collections::HashSet::new();
+                let all = a.into_iter().chain(b.map(|(l, _)| l).unwrap_or_default());
+                Ok(all
+                    .filter(|l| !l.builtin && seen.insert(l.id.clone()))
+                    .filter_map(|l| l.theme().ok().map(|t| (l.id, t)))
+                    .collect())
+            }
+        };
+        let _ = tx.send(GalleryReply::List(reply));
+    });
+}
+
+/// Fetch one theme by a pasted link, in the background.
+#[cfg(feature = "net")]
+fn gallery_fetch_one(base: String, id: String, tx: std::sync::mpsc::Sender<GalleryReply>) {
+    std::thread::spawn(move || {
+        let r = termpaper::gallery::fetch(&base, &id).and_then(|l| {
+            let t = l.theme()?;
+            if l.builtin {
+                return Err(format!("{} comes with termpaper: it is on this page", t.name));
+            }
+            Ok((l.id, t))
+        });
+        let _ = tx.send(GalleryReply::One(r));
+    });
+}
+
+/// Count an install from the Themes page (best effort, in the background).
+#[cfg(feature = "net")]
+fn gallery_count(base: String, id: String) {
+    std::thread::spawn(move || termpaper::gallery::count_install(&base, &id));
 }
 
 /// Wear a theme: its look (and brightness hint) replaces this pane's,
@@ -1819,6 +2039,11 @@ fn run(
     let mut menu = Menu::new();
     // menu effects queue here and apply at the top of the next frame
     let mut pending_fx: Vec<Effect> = Vec::new();
+    // the gallery runs in the background: answers come back here
+    #[cfg(feature = "net")]
+    let (gallery_tx, gallery_rx) = std::sync::mpsc::channel::<GalleryReply>();
+    #[cfg(feature = "net")]
+    let mut gallery_busy = false;
     // set while the browser previews a scene on this pane only
     let mut preview: Option<PreviewOrigin> = None;
     let mut save = config::SaveTimer::default();
@@ -1977,6 +2202,38 @@ fn run(
                     g.publish_anchor(&mut a);
                 }
                 st.retime(&a, &mut transition, &names);
+            }
+        }
+
+        // the gallery answered: the shelf (`g`), or a theme from a pasted link
+        #[cfg(feature = "net")]
+        while let Ok(reply) = gallery_rx.try_recv() {
+            match reply {
+                GalleryReply::List(Ok(list)) => {
+                    gallery_busy = false;
+                    let n = list.len();
+                    settings.gallery = list;
+                    settings.theme_rows = theme_rows(&settings.themes, &settings.gallery);
+                    if let Some((id, _)) = settings.gallery.first() {
+                        menu.focus_theme(&format!("{}{id}", menu::themes::GALLERY_PREFIX), &settings.theme_rows);
+                    }
+                    menu.flash(match n {
+                        0 => "Nothing shared in the gallery yet".to_string(),
+                        n => format!("{n} themes from the gallery · Enter installs one"),
+                    });
+                }
+                GalleryReply::List(Err(e)) => {
+                    gallery_busy = false;
+                    menu.flash(e);
+                }
+                GalleryReply::One(Ok((id, theme))) => {
+                    if !settings.gallery.iter().any(|(i, _)| *i == id) {
+                        settings.gallery.push((id.clone(), theme));
+                    }
+                    settings.theme_rows = theme_rows(&settings.themes, &settings.gallery);
+                    pending_fx.push(Effect::ApplyTheme(format!("{}{id}", menu::themes::GALLERY_PREFIX)));
+                }
+                GalleryReply::One(Err(e)) => menu.flash(e),
             }
         }
 
@@ -2347,6 +2604,53 @@ fn run(
                     }
                     undo_last = None;
                 }
+                Effect::ApplyTheme(slug) if menu::themes::is_gallery(&slug) => {
+                    let Some(theme) = gallery_theme(&settings, &slug).cloned() else {
+                        menu.flash("That theme is gone");
+                        continue;
+                    };
+                    // installed once: picking it again wears the copy you have
+                    let code = theme.to_code();
+                    let have = settings
+                        .themes
+                        .entries
+                        .iter()
+                        .find(|e| e.source == termpaper::theme::Source::User && e.theme.to_code() == code)
+                        .map(|e| e.slug.clone());
+                    let fresh = have.is_none();
+                    let real = match have {
+                        Some(s) => s,
+                        None => match settings.themes.save_new(&theme) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                menu.flash(format!("Could not install it: {e}"));
+                                continue;
+                            }
+                        },
+                    };
+                    if fresh {
+                        #[cfg(feature = "net")]
+                        gallery_count(
+                            termpaper::gallery::base_url(settings.cfg.gallery_url.as_deref()),
+                            slug[menu::themes::GALLERY_PREFIX.len()..].to_string(),
+                        );
+                        settings.theme_rows = theme_rows(&settings.themes, &settings.gallery);
+                        // Yours grew a row: stay on the one picked
+                        menu.focus_theme(&slug, &settings.theme_rows);
+                    }
+                    apply_theme(&real, &mut settings);
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                    let by = if theme.author.trim().is_empty() { String::new() } else { format!(" by {}", theme.author.trim()) };
+                    let hint = if theme.scene.is_some() { " · s: its scene" } else { "" };
+                    menu.flash(if fresh {
+                        format!("Installed “{}”{by}: now under Yours{hint}", theme.name)
+                    } else {
+                        format!("Theme: {}{hint}", theme.name)
+                    });
+                }
                 Effect::ApplyTheme(slug) => match apply_theme(&slug, &mut settings) {
                     Some(t) => {
                         if let Some(g) = &mut guard {
@@ -2386,7 +2690,7 @@ fn run(
                     };
                     match settings.themes.save_new(&t) {
                         Ok(slug) => {
-                            settings.theme_rows = theme_rows(&settings.themes);
+                            settings.theme_rows = theme_rows(&settings.themes, &settings.gallery);
                             menu.focus_theme(&slug, &settings.theme_rows);
                             settings.look_theme = Some(slug);
                             save.mark(now);
@@ -2403,7 +2707,7 @@ fn run(
                     match settings.themes.update(&slug, &t) {
                         Ok(()) => {
                             settings.look_theme = Some(slug);
-                            settings.theme_rows = theme_rows(&settings.themes);
+                            settings.theme_rows = theme_rows(&settings.themes, &settings.gallery);
                             save.mark(now);
                             menu.flash(format!("Updated “{}”", t.name));
                         }
@@ -2412,7 +2716,7 @@ fn run(
                 }
                 Effect::RenameTheme { slug, name } => match settings.themes.rename(&slug, &name) {
                     Ok(new) => {
-                        settings.theme_rows = theme_rows(&settings.themes);
+                        settings.theme_rows = theme_rows(&settings.themes, &settings.gallery);
                         menu.focus_theme(&new, &settings.theme_rows);
                         if settings.look_theme.as_deref() == Some(slug.as_str()) {
                             settings.look_theme = Some(new);
@@ -2428,11 +2732,18 @@ fn run(
                             settings.look_theme = None;
                             save.mark(now);
                         }
-                        settings.theme_rows = theme_rows(&settings.themes);
+                        settings.theme_rows = theme_rows(&settings.themes, &settings.gallery);
                         menu.flash("Deleted");
                     }
                     Err(e) => menu.flash(format!("Could not delete: {e}")),
                 },
+                Effect::ShareTheme(slug) if menu::themes::is_gallery(&slug) => {
+                    if let Some(t) = gallery_theme(&settings, &slug) {
+                        let code = t.to_code();
+                        osc52_copy(&code);
+                        menu.flash(format!("Share code copied ({} chars)", code.len()));
+                    }
+                }
                 Effect::ShareTheme(slug) => {
                     let Some(e) = settings.themes.get(&slug) else {
                         continue;
@@ -2461,6 +2772,20 @@ fn run(
                         None => menu.flash(format!("Share code copied ({} chars)", code.len())),
                     }
                 }
+                Effect::ImportTheme(text) if text.trim().starts_with("https://") || text.trim().starts_with("http://") => {
+                    #[cfg(feature = "net")]
+                    match termpaper::gallery::target(&text) {
+                        Ok(termpaper::gallery::Target::Id { base, id }) => {
+                            let base = base.unwrap_or_else(|| termpaper::gallery::base_url(settings.cfg.gallery_url.as_deref()));
+                            menu.flash(format!("Fetching it from {}…", termpaper::gallery::host(&base)));
+                            gallery_fetch_one(base, id, gallery_tx.clone());
+                        }
+                        Ok(termpaper::gallery::Target::Code(_)) => {}
+                        Err(e) => menu.flash(e),
+                    }
+                    #[cfg(not(feature = "net"))]
+                    menu.flash("This termpaper was built without the gallery: paste the theme's tp1: code instead");
+                }
                 Effect::ImportTheme(text) => {
                     let parsed = if text.trim_start().starts_with("tp1:") {
                         termpaper::theme::Theme::from_code(&text)
@@ -2473,7 +2798,7 @@ fn run(
                     match parsed {
                         Ok((theme, warnings)) => match settings.themes.save_new(&theme) {
                             Ok(slug) => {
-                                settings.theme_rows = theme_rows(&settings.themes);
+                                settings.theme_rows = theme_rows(&settings.themes, &settings.gallery);
                                 menu.focus_theme(&slug, &settings.theme_rows);
                                 // wearing it is one undo step, like applying
                                 undo.push(Snapshot::take(&settings, &opts));
@@ -2495,8 +2820,28 @@ fn run(
                         Err(e) => menu.flash(e),
                     }
                 }
+                Effect::FetchGallery => {
+                    #[cfg(feature = "net")]
+                    {
+                        let base = termpaper::gallery::base_url(settings.cfg.gallery_url.as_deref());
+                        if gallery_busy {
+                            menu.flash(format!("Still waiting for {}…", termpaper::gallery::host(&base)));
+                        } else {
+                            gallery_busy = true;
+                            menu.flash(format!("Asking {} for its themes…", termpaper::gallery::host(&base)));
+                            gallery_fetch(base, gallery_tx.clone());
+                        }
+                    }
+                    #[cfg(not(feature = "net"))]
+                    menu.flash("This termpaper was built without the gallery");
+                }
                 Effect::SceneFromTheme(slug) => {
-                    let hint = settings.themes.get(&slug).and_then(|e| e.theme.scene.clone());
+                    let hint = settings
+                        .themes
+                        .get(&slug)
+                        .map(|e| &e.theme)
+                        .or_else(|| gallery_theme(&settings, &slug))
+                        .and_then(|t| t.scene.clone());
                     let Some(hint) = hint else {
                         continue;
                     };

@@ -104,6 +104,10 @@ pub struct Config {
     /// the first-run welcome has been seen
     #[serde(skip_serializing_if = "Option::is_none")]
     pub onboarded: Option<bool>,
+    /// the theme gallery to install from and publish to (default: termpaper's
+    /// website; `$TERMPAPER_GALLERY` wins)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gallery_url: Option<String>,
     /// a manual wall layout for this machine's panes, `COLSxROWS:INDEX`
     /// (what `--wall` takes), set from the Wall page
     #[serde(skip_serializing_if = "Option::is_none")]
