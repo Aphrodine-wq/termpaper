@@ -9,10 +9,14 @@
 //! fallback: clouds
 //! credits: original
 
-// World units are metres. We stand in a wheat field on the Plains; 18 km
-// away a supercell's rotating updraft rises ten kilometres, its sides cut
-// into stacked, spiralling plates. A wall cloud hangs under the flat base,
-// the rain core falls to its left, and a farm with its windbreak sits in
+// World units are metres. We stand in a wheat field on the Plains, the sun
+// low behind our right shoulder. Twenty kilometres out a supercell's
+// updraft climbs twelve kilometres: its rotating lower half is cut into
+// hard, corkscrewing shelves; above, the tower boils into cauliflower and
+// punches through the anvil, which streams off downwind over our heads.
+// Under the flat, dark, rain-free base a wall cloud hangs low; beside it the
+// forward-flank core drops a grey curtain of rain and hail. A line of
+// younger towers steps down to the right. A farm and its windbreak sit in
 // the middle distance for scale.
 
 struct Look {
@@ -33,7 +37,7 @@ fn look(theme: u32) -> Look {
                         vec3f(0.55, 0.85, 0.62));
         }
         case 2u: {
-            return Look(normalize(vec3f(0.3, 0.6, 0.5)), vec3f(0.012, 0.014, 0.02), vec3f(0.0015, 0.0018, 0.003), 1.0, 1.0, 0.75, 1.0,
+            return Look(normalize(vec3f(0.3, 0.6, 0.5)), vec3f(0.009, 0.01, 0.014), vec3f(0.0018, 0.0022, 0.0036), 1.0, 1.0, 0.32, 1.0,
                         vec3f(0.8, 0.85, 1.0));
         }
         default: {
@@ -50,181 +54,302 @@ fn ozone_t(sun_y: f32) -> vec3f {
 
 // ------------------------------------------------------------------ storm
 
-const AXIS: vec2f = vec2f(3200.0, -19000.0);  // updraft centre (xz)
-const BASE: f32 = 1400.0;                     // flat cloud base
-const TOPY: f32 = 12000.0;
+const UPD: vec2f = vec2f(2200.0, -16000.0);  // updraft centre at the base (xz)
+const BASE: f32 = 1500.0;                    // the flat rain-free base
+const ANVIL: f32 = 12200.0;                  // anvil top
+const WIND: vec2f = vec2f(-0.76, 0.65);      // downwind: left and toward us
+const SOFT: f32 = 200.0;                     // edge softness of the cloud
 
-// signed distance to the storm (approximate), with its rotation at time t.
-// fine adds the billows; the laminar mesocyclone stays smooth.
-fn storm(p: vec3f, t: f32, fine: bool) -> f32 {
-    let q = p.xz - AXIS;
-    let r = length(q);
-    let ang = atan2(q.y, q.x);
-    let y = p.y;
-    // the mesocyclone: an inverted bell of stacked, spiralling plates,
-    // widening from the base up to ~6 km
-    let h = (y - BASE) / 5000.0;
-    // a wedding cake, not an onion: widest just above the flat base,
-    // stepping in as it climbs into the tower
-    var rm = 5600.0 + 500.0 * smoothstep(-0.05, 0.12, h) - 1900.0 * smoothstep(0.15, 1.05, h);
-    // not a lathe-turned bell: lopsided, lumpier on one flank
-    rm *= 1.0 + 0.1 * sin(ang * 2.0 + 1.3) + 0.07 * sin(ang * 3.0 + y / 1900.0);
-    let warp = noise_value2(vec2f(ang * 1.4, y / 2300.0)) - 0.5;
-    let ph = y / 700.0 + ang * 0.28 - t * 0.012 + warp * 0.9;
-    let f = fract(ph);
-    // sharp upper lip, sloping underside: each plate is a shelf; some
-    // plates are bold, others barely there
-    let groove = smoothstep(0.0, 0.12, f) * sstep(1.0, 0.35, f);
-    let lean = 0.5 + 0.5 * cos(ang - 0.6);
-    let bold = smoothstep(0.25, 0.75, noise_value2(vec2f(floor(ph) * 0.83, 0.5 + ang * 0.3)));
-    var d = r - rm + (90.0 + 520.0 * lean * bold) * (1.0 - groove);
-    d = max(d, y - (BASE + 5400.0) - 600.0 * cos(ang * 2.0 + 1.0));
-    // the updraft tower above it, cumuliform, sheared downwind
-    let sh = (y - 5000.0) * vec2f(-0.18, 0.1);
-    let tq = q - sh;
-    let tr_ = 3200.0 + 500.0 * sin(y / 1300.0 + 1.0) - 1200.0 * smoothstep(9000.0, 11800.0, y) + 900.0 * (noise_value3(p * 0.00022) - 0.5);
-    var tower = max(length(tq) - tr_, max(4200.0 - y, y - 11800.0));
-    tower = min(tower, length(vec3f(tq.x, (y - 11300.0) * 1.8, tq.y)) - 2600.0);
-    // the anvil: a thin wedge fanning out downwind, flat underneath
-    let aq = q + vec2f(7000.0, -2500.0);
-    let ar = length(aq * vec2f(0.5, 0.85)) - 8500.0;
-    let anvil = max(ar, max(10600.0 - y + 0.08 * max(-ar, 0.0) * 0.0, y - (11600.0 - 0.1 * max(ar + 8500.0 - 3000.0, 0.0))));
-    var dt = min(tower, anvil * 0.8);
-    if (fine) {
-        // cumulus billows on the tower and anvil edge
-        let n = noise_fbm3(p * 0.0006 + vec3f(0.0, -t * 0.002, 0.0), 3);
-        dt += (n - 0.5) * 1300.0;
-        d += (noise_value3(p * 0.00045) - 0.5) * 350.0;
-    }
-    d = min(d, dt);
-    // flat base, broken only by the wall cloud hanging under the updraft
-    d = max(d, BASE - y);
-    let wq = vec2f(q.x + 700.0, q.y + 900.0);
-    let wall = max(length(wq) - 1900.0 - 220.0 * sin(atan2(wq.y, wq.x) * 3.0 - t * 0.05), max(650.0 - y, y - BASE - 250.0));
-    return min(d, wall);
+// the updraft leans downshear as it climbs
+fn upd_axis(y: f32) -> vec2f {
+    return UPD + vec2f(-0.13, -0.05) * max(y - BASE, 0.0);
 }
 
-// the bare shape (bell, tower, anvil) for the long light march: plates and
-// billows are too small to matter for the large-scale shadowing
+// round heads, sharp creases: |gradient noise| summed over three scales
+// (fine = false drops the smallest scale: for stepping toward the skin)
+fn billow(p: vec3f, fine: bool) -> f32 {
+    let a = abs(noise_grad3(p * (1.0 / 2300.0)));
+    let b = abs(noise_grad3(p * (1.0 / 1050.0) + vec3f(5.1, 2.3, 7.7)));
+    var s = a * 900.0 + b * 380.0;
+    if (fine) { s += abs(noise_grad3(p * (1.0 / 480.0) + vec3f(1.9, 8.1, 3.3))) * 150.0; } else { s += 75.0; }
+    return s;
+}
+
+fn smin(a: f32, b: f32, k: f32) -> f32 {
+    let h = saturate(0.5 + 0.5 * (b - a) / k);
+    return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+// radius of the updraft: a broad rotating bell over the base, narrowing
+// into the tower, pinched in under the overshooting top
+fn upd_r(y: f32) -> f32 {
+    let h = saturate((y - BASE) / 5200.0);
+    return 3700.0 + 2500.0 * (1.0 - smoothstep(0.05, 1.0, h)) + 300.0 * sin(y / 1500.0 + 1.0) - 1200.0 * smoothstep(9500.0, 11800.0, y);
+}
+
+// the anvil: flat on top, streaming off downwind and widening
+fn anvil(p: vec3f) -> f32 {
+    let at = p.xz - upd_axis(11000.0);
+    let al = dot(at, WIND);
+    let ac = dot(at, vec2f(WIND.y, -WIND.x));
+    let thick = mix(2000.0, 600.0, saturate(al / 45000.0));
+    let top = ANVIL - 0.01 * max(al, 0.0);
+    return max(max(abs(ac) - (5000.0 + 0.5 * max(al, 0.0)), -al - 3600.0), max(p.y - top, top - thick - p.y));
+}
+
+// one tower of the flanking line: a tapering column with a domed head
+fn flank(p: vec3f, i: i32) -> f32 {
+    let fi = f32(i);
+    let c = UPD + vec2f(7000.0 + 3000.0 * fi, 2600.0 + 1300.0 * fi);
+    let ht = 6900.0 - 2300.0 * fi;
+    let u = saturate((p.y - BASE) / (ht - BASE));
+    let rr = (1800.0 - 300.0 * fi) * (1.0 - 0.3 * u);
+    let yy = p.y - clamp(p.y, BASE + 200.0, ht - rr);
+    return max(length(vec3f(p.x - c.x, yy, p.z - c.y)) - rr, BASE + 200.0 - p.y);
+}
+
+// the bare shapes, no detail: a cheap bound for skipping empty air and the
+// long shadow probes (billows add at most ~1.5 km)
 fn storm_lo(p: vec3f) -> f32 {
-    let q = p.xz - AXIS;
     let y = p.y;
-    let h = (y - BASE) / 5000.0;
-    let rm = 5600.0 + 500.0 * smoothstep(-0.05, 0.12, h) - 1900.0 * smoothstep(0.15, 1.05, h);
-    var d = max(length(q) - rm, y - (BASE + 5400.0));
-    let tq = q - (y - 5000.0) * vec2f(-0.18, 0.1);
-    d = min(d, max(length(tq) - 3200.0, max(4200.0 - y, y - 11800.0)));
-    let aq = q + vec2f(7000.0, -2500.0);
-    d = min(d, max(length(aq * vec2f(0.5, 0.85)) - 8500.0, abs(y - 11100.0) - 500.0) * 0.8);
-    return max(d, BASE - y);
+    let a = p.xz - upd_axis(y);
+    var d = max(length(a) - upd_r(y), max(BASE - y, y - 11600.0));
+    d = min(d, length(vec3f(a.x, (y - 11800.0) * 1.7, a.y)) - 2400.0);
+    d = min(d, anvil(p));
+    d = min(d, min(flank(p, 0), flank(p, 1)));
+    return d;
 }
 
-// soft storm radiance along a ray: sphere-trace to the shell, then integrate
-// a thin volume. Light: a short march toward the sun through the coarse
-// shape (the tower shades the plates and the base), a skylight term that
-// darkens with depth under the storm, and the lightning when it fires.
-// Returns (rgb, transmittance).
-fn storm_march(ro: vec3f, rd: vec3f, l: Look, t: f32, flash: vec4f, n: i32) -> vec4f {
-    // bound: the storm's cylinder
-    let oc = ro.xz - (AXIS + vec2f(-3500.0, 1000.0));
+// a lower bound of storm(): each bare shape less the most its detail can
+// push it out, the flat base exact (it carries no detail), for skipping
+fn storm_bound(p: vec3f) -> f32 {
+    let y = p.y;
+    let a = p.xz - upd_axis(y);
+    let r = length(a);
+    let hi = smoothstep(5000.0, 7800.0, y);
+    var d = max(r - upd_r(y) - mix(1100.0, 1450.0, hi), y - 11600.0 - 1450.0);
+    d = min(d, length(vec3f(a.x, (y - 11800.0) * 1.7, a.y)) - 2400.0 - 1500.0);
+    d = min(d, anvil(p) - 1000.0);
+    d = min(d, min(flank(p, 0), flank(p, 1)) - 1750.0);
+    d = max(d, BASE - y);
+    // the wall cloud hangs below the base
+    let wq = p.xz - (UPD + vec2f(-1700.0, 600.0));
+    d = min(d, max(length(wq) - 2900.0, max(350.0 - y, y - BASE - 150.0)));
+    return d;
+}
+
+// the full cloud field: signed distance (m), negative inside
+fn storm(p: vec3f, t: f32, fine: bool) -> vec2f {
+    let y = p.y;
+    let a = p.xz - upd_axis(y);
+    let r = length(a);
+    let ang = atan2(a.y, a.x);
+    let h = saturate((y - BASE) / 5200.0);
+    let bil = billow(p + vec3f(0.0, -t * 4.0, 0.0), fine);
+    // --- the updraft: its rotating lower half cut into hard shelves that
+    // corkscrew up around it; higher up it boils into cauliflower
+    // (angle-dependent terms use the direction, not the angle, so nothing
+    // seams where atan2 wraps; the helix makes a whole number of turns)
+    let striae = sstep(7000.0, 5600.0, y);
+    // (lobed, not lathe-turned: whole multiples of the angle, so no seam)
+    var d = r - upd_r(y) * (1.0 + 0.09 * sin(2.0 * ang + 0.7 + h * 2.0) + 0.05 * sin(3.0 * ang + 1.9 - h * 3.0));
+    if (striae > 0.0) {
+        let cs = a / max(r, 1.0);
+        let wv = noise_value3(vec3f(cs * 1.4, y / 2200.0)) - 0.5;
+        let ph = y / 720.0 + ang * (7.0 / TAU) - t * 0.02 + wv * 0.8;
+        let f = fract(ph);
+        // each band: a sharp lip on top, its face sloping back underneath;
+        // most bands bold, a few fading out around the column
+        let bold = 0.3 + 0.7 * smoothstep(0.1, 0.55, noise_value3(vec3f(cs * 1.1, floor(ph) * 0.71)));
+        d += (300.0 - (f * f) * sstep(1.0, 0.86, f) * 850.0 * bold) * striae;
+    }
+    // turbulence tearing at the shelves
+    if (fine) { d += (noise_value3(p * (1.0 / 800.0) + vec3f(0.0, -t * 0.002, 0.0)) - 0.5) * 380.0; }
+    d -= bil * mix(0.22, 1.0, smoothstep(5000.0, 7800.0, y));
+    d = max(d, BASE - y);
+    let top = max(d, y - 11600.0);
+    d = smin(top, length(vec3f(a.x, (y - 11800.0) * 1.7, a.y)) - 2400.0 - bil, 500.0);
+    // --- the anvil, fraying at its edges
+    let dav = anvil(p);
+    if (dav < 2500.0) {
+        let at = p.xz - upd_axis(11000.0);
+        let fib = noise_value2(vec2f(dot(at, WIND) * 0.00012, dot(at, vec2f(WIND.y, -WIND.x)) * 0.0006)) - 0.5;
+        d = smin(d, dav + fib * 900.0 - bil * 0.35, 900.0);
+    }
+    // --- the flanking line
+    let fk = min(flank(p, 0), flank(p, 1));
+    d = smin(d, fk - bil * 1.2, 700.0);
+    // --- the flat base, broken only by the wall cloud under the updraft
+    d = max(d, BASE - y);
+    // (it turns slowly, its ragged edge drifting round)
+    if (y < BASE + 600.0) {
+        let wq = p.xz - (UPD + vec2f(-1700.0, 600.0));
+        let wl = length(wq);
+        let rag = noise_value3(vec3f(rot2(t * 0.02) * (wq / max(wl, 1.0)) * 1.6, y / 280.0));
+        let wall = max(wl - 2500.0 - 600.0 * (rag - 0.5), max(500.0 + 300.0 * rag - y, y - BASE - 150.0));
+        d = min(d, wall);
+    }
+    // (x: distance; y: how far the billows push out here, for crease shading)
+    return vec2f(d, bil);
+}
+
+struct Flash { pos: vec3f, w: f32, cg: f32, seed: f32 }
+
+// lightning: rare strokes in the storm, some reaching the ground in a
+// visible channel under the base. Closed-form in time.
+fn lightning(t: f32, l: Look) -> Flash {
+    var fl: Flash;
+    fl.pos = vec3f(0.0);
+    fl.w = 0.0;
+    fl.cg = 0.0;
+    fl.seed = 0.0;
+    let ev = hash_event(t, 7.0, 0x51a7u);
+    if (ev.x > l.flash_p) { return fl; }
+    let k = u32(i32(ev.z));
+    let t_in = ev.y * 7.0 - 2.5 * hash_f(k * 13u + 1u);
+    if (t_in < 0.0) { return fl; }
+    // a stroke and its re-strokes, dying away in under a second
+    fl.w = exp(-t_in * 9.0) + 0.7 * exp(-max(t_in - 0.14, 0.0) * 12.0) * step(0.14, t_in)
+         + 0.45 * exp(-max(t_in - 0.33, 0.0) * 11.0) * step(0.33, t_in);
+    let hx = hash_f(k * 7u + 3u);
+    fl.pos = vec3f(UPD.x - 5500.0 + 7500.0 * hx, 2800.0 + 5000.0 * hash_f(k * 5u + 2u), UPD.y + (hash_f(k * 11u + 4u) - 0.5) * 4000.0);
+    fl.cg = step(0.45, hash_f(k * 17u + 9u));
+    fl.seed = f32(k % 997u);
+    return fl;
+}
+
+// march the storm: sphere-trace to its skin, then integrate a thin, dense
+// volume. Light: the sun on the side of each billow that faces it (the SDF's
+// change toward the sun), long shadows from the bare shapes, skylight that
+// dies away under the base, and lightning from inside. (rgb, transmittance)
+struct Hit { c: vec3f, tr: f32, t: f32 }
+
+fn storm_march(ro: vec3f, rd: vec3f, l: Look, t: f32, fl: Flash, jit: f32, n: i32) -> Hit {
+    var hit: Hit;
+    hit.c = vec3f(0.0);
+    hit.tr = 1.0;
+    hit.t = 1e7;
+    // bound: a big vertical cylinder around the storm and its anvil
+    let oc = ro.xz - (UPD + vec2f(-4000.0, 6000.0));
     let d2 = rd.xz;
     let a = max(dot(d2, d2), 1e-8);
     let hb = dot(oc, d2);
-    let disc = hb * hb - a * (dot(oc, oc) - 15500.0 * 15500.0);
-    if (disc <= 0.0) { return vec4f(0.0, 0.0, 0.0, 1.0); }
+    let disc = hb * hb - a * (dot(oc, oc) - 24000.0 * 24000.0);
+    if (disc <= 0.0) { return hit; }
     let sq_ = sqrt(disc);
     var tt = max((-hb - sq_) / a, 0.0);
     var t1 = (-hb + sq_) / a;
-    if (rd.y > 0.0) { t1 = min(t1, (TOPY + 800.0 - ro.y) / rd.y); }
-    if (rd.y < 0.0) { t1 = min(t1, (550.0 - ro.y) / rd.y); }
+    if (rd.y > 0.0) { t1 = min(t1, (ANVIL + 2500.0 - ro.y) / rd.y); }
+    if (rd.y < 0.0) { t1 = min(t1, (600.0 - ro.y) / rd.y); }
+    if (rd.y > 0.0) { tt = max(tt, (500.0 - ro.y) / rd.y); }
     var tr = 1.0;
     var acc = vec3f(0.0);
-    let shell = 850.0;
-    let fwd = pow(saturate(dot(rd, l.sun) * 0.5 + 0.5), 6.0);
-    for (var i = 0; i < 96; i++) {
-        if (i >= n || tt > t1 || tr < 0.03) { break; }
+    let fwd = pow(saturate(dot(rd, l.sun) * 0.5 + 0.5), 5.0);
+    let fcol = vec3f(0.75, 0.8, 1.0) * fl.w;
+    var first = true;
+    for (var i = 0; i < 110; i++) {
+        if (i >= n || tt > t1 || tr < 0.02) { break; }
         let p = ro + rd * tt;
-        // the coarse shape first: billows only matter within ~1.3 km of it
-        var d = storm(p, t, false);
-        if (d < shell + 1400.0) { d = storm(p, t, true); }
-        if (d < shell) {
-            let dens = saturate((shell - d) / (2.0 * shell));
-            // sun visibility: how deep the coarse storm lies toward the sun
-            var occ = 0.0;
-            for (var j = 1; j < 4; j++) {
-                let sd = storm_lo(p + l.sun * (f32(j) * f32(j) * 600.0));
-                occ += saturate(0.5 - sd / 1000.0) * (1.5 - f32(j) * 0.3);
-            }
-            // and a short look for the shelves: each lip shades the plate below
-            let dn = storm(p + l.sun * 280.0, t, false) - storm(p, t, false);
-            let sunv = exp(-occ * 1.4) * mix(0.15, 1.0, smoothstep(0.1, 0.9, 0.45 + dn / 280.0));
-            let under = sstep(BASE + 3500.0, BASE + 200.0, p.y);
-            // below the base (the wall cloud) only a little light gets in
-            let belly = sstep(BASE + 250.0, BASE - 350.0, p.y);
-            var c = l.sun_c * sunv * (0.35 + 0.9 * fwd) * 1.3 * (1.0 - 0.8 * belly);
-            // skylight: open sky above, the dark belly below
-            c += l.amb * mix(0.13, 0.04, under) * mix(vec3f(1.0), l.tint, under);
-            if (flash.w > 0.0) {
-                let fd = length(p - flash.xyz);
-                c += vec3f(0.75, 0.8, 1.0) * flash.w * 1.4 * exp(-fd / 1700.0) / (1.0 + sq(fd / 2500.0));
-            }
-            let step_len = max(d * 0.45, 160.0);
-            let st = exp(-dens * step_len * 0.0024);
-            acc += tr * c * (1.0 - st);
-            tr *= st;
-            tt += step_len;
-        } else {
-            tt += (d - shell * 0.5) * 0.75;
+        // far from the bare shapes nothing can be there
+        let dl = storm_bound(p);
+        if (dl > SOFT) {
+            tt += dl;
+            continue;
         }
+        // approach on the coarse field (fine detail moves the skin < 300 m)
+        let dc = storm(p, t, false).x;
+        if (dc > SOFT + 300.0) {
+            tt += max((dc - SOFT * 0.5 - 300.0) * 0.6, 50.0);
+            continue;
+        }
+        let sf = storm(p, t, true);
+        let d = sf.x;
+        if (d > SOFT) {
+            tt += max((d - SOFT * 0.5) * 0.6, 50.0);
+            continue;
+        }
+        if (first) {
+            // entering the skin: dither the first sample so the edge does not band
+            first = false;
+            hit.t = tt;
+            tt += jit * 60.0;
+        }
+        let dens = saturate(0.5 - d / (2.0 * SOFT));
+        // sun on this face: how the cloud recedes toward the light
+        // (on the coarse field: the finest billows are below a pixel's reach)
+        let ds = (storm(p + l.sun * 320.0, t, false).x - dc) / 320.0;
+        let face = smoothstep(-0.25, 0.85, ds);
+        // long shadows: the bare storm between here and the sun
+        let occ = saturate(0.4 - storm_lo(p + l.sun * 1300.0) / 1500.0) + saturate(0.4 - storm_lo(p + l.sun * 4500.0) / 2000.0);
+        // deep in the creases between billows little light reaches
+        let crease = mix(0.45, 1.0, smoothstep(200.0, 800.0, sf.y));
+        let sunv = face * exp(-occ * 2.0) * mix(1.0, crease, 0.5);
+        // skylight: open above, closed in under the base and the anvil
+        let above = storm_lo(p + vec3f(0.0, 1800.0, 0.0));
+        let open = saturate(0.3 + above / 3000.0) * smoothstep(BASE - 300.0, BASE + 3000.0, p.y);
+        let under = sstep(BASE + 400.0, BASE - 200.0, p.y);
+        var c = l.sun_c * sunv * (1.05 + 0.6 * fwd) * (1.0 - 0.85 * under);
+        c += l.amb * mix(0.04, 0.34, open) * crease * mix(vec3f(1.0), l.tint, under * 0.8);
+        if (fl.w > 0.0) {
+            let fd = length(p - fl.pos);
+            // the stroke lights the cloud from inside: a glow around it, and
+            // the billows facing it
+            let fdir = (fl.pos - p) / max(fd, 1.0);
+            let ff = smoothstep(-0.5, 0.8, (storm(p + fdir * 320.0, t, false).x - dc) / 320.0);
+            c += fcol * (2.2 * exp(-fd / 1800.0) + 0.9 * ff / (1.0 + sq(fd / 4000.0)));
+        }
+        let step_len = select(200.0, 320.0, d < -SOFT);
+        let st = exp(-dens * step_len * 0.006);
+        acc += tr * c * (1.0 - st);
+        tr *= st;
+        tt += step_len;
     }
-    return vec4f(acc, tr);
+    hit.c = acc;
+    hit.tr = tr;
+    return hit;
 }
 
-// the forward-flank rain shaft: a grey curtain falling from the base
-fn precip_shaft(ro: vec3f, rd: vec3f, l: Look, t: f32, flash: vec4f, tmax: f32) -> vec4f {
-    let c = AXIS + vec2f(-8800.0, 900.0);
+// the forward-flank core: a grey wall of rain and hail from the ground up
+// into the storm, streaked and slanting with the outflow; (rgb, transmittance)
+const RAIN_TOP: f32 = 10500.0;
+fn precip_shaft(ro: vec3f, rd: vec3f, l: Look, t: f32, fl: Flash, tmax: f32) -> vec4f {
+    let c = UPD + vec2f(-8600.0, 1500.0);
     let oc = ro.xz - c;
     let d2 = rd.xz;
     let a = max(dot(d2, d2), 1e-8);
     let hb = dot(oc, d2);
-    let rr = 3900.0;
+    let rr = 5400.0;
     let disc = hb * hb - a * (dot(oc, oc) - rr * rr);
     if (disc <= 0.0) { return vec4f(0.0, 0.0, 0.0, 1.0); }
     let sq_ = sqrt(disc);
     let t0 = max((-hb - sq_) / a, 0.0);
-    let t1 = min((-hb + sq_) / a, tmax);
+    var t1 = min((-hb + sq_) / a, tmax);
+    if (rd.y > 0.0) { t1 = min(t1, (RAIN_TOP - ro.y) / rd.y); }
     if (t1 <= t0) { return vec4f(0.0, 0.0, 0.0, 1.0); }
     var tr = 1.0;
     var acc = vec3f(0.0);
-    let dt = (t1 - t0) / 8.0;
-    for (var i = 0; i < 8; i++) {
+    let dt = (t1 - t0) / 10.0;
+    for (var i = 0; i < 10; i++) {
         let p = ro + rd * (t0 + (f32(i) + 0.5) * dt);
-        if (p.y > BASE + 100.0 || p.y < 0.0) { continue; }
-        let r = length(p.xz - c) / rr;
-        // streaky curtain, slanting with the wind, thinning at its edges
-        let streak = noise_value2(vec2f((p.x + p.y * 0.35) * 0.0035, t * 0.02)) * 0.7 + 0.3 * noise_value2(vec2f((p.x + p.y * 0.35) * 0.012, 3.0));
-        let dens = sstep(1.0, 0.3, r + (streak - 0.5) * 0.5) * sstep(BASE + 100.0, BASE - 400.0, p.y);
-        let lc = (l.amb * 0.22 + l.sun_c * 0.03) * l.tint + vec3f(0.6, 0.65, 0.8) * flash.w * 0.06;
-        let st = exp(-dens * dt * 0.0013);
+        if (p.y > RAIN_TOP || p.y < 0.0) { continue; }
+        let q = p.xz - c + vec2f(p.y * 0.35, 0.0);
+        let r = length(q * vec2f(1.0, 1.3)) / rr;
+        // streaky curtain, slanting with the wind, ragged at its edges
+        let sx = q.x + p.y * 0.3;
+        let streak = noise_value2(vec2f(sx * 0.0016, t * 0.03)) * 0.65 + 0.35 * noise_value2(vec2f(sx * 0.0045, 3.0 + p.y * 0.0003));
+        // dense low down, thinning upward into the dark mass under the anvil
+        let hfade = mix(1.0, 0.45, smoothstep(1500.0, 6000.0, p.y)) * sstep(RAIN_TOP, RAIN_TOP - 2500.0, p.y);
+        let rag = noise_value2(vec2f(sx * 0.0005, p.y * 0.00025 + 7.0)) - 0.5;
+        let dens = sstep(1.0, 0.3, r + (streak - 0.5) * 0.5 + rag * 0.5) * hfade * (0.45 + 0.55 * streak);
+        // in the storm's shadow: grey-blue, the hail core faintly green;
+        // the sun catches its flank toward the updraft
+        let sunlit = smoothstep(-0.2, 0.9, q.x / rr) * 0.08;
+        let lc = (l.amb * (0.05 + 0.06 * hfade) + l.sun_c * (0.01 + sunlit)) * l.tint + vec3f(0.6, 0.65, 0.8) * fl.w * 0.15;
+        let st = exp(-dens * dt * 0.0021);
         acc += tr * lc * (1.0 - st);
         tr *= st;
     }
     return vec4f(acc, tr);
-}
-
-// lightning: rare flashes deep in the tower; (position, intensity)
-fn lightning(t: f32, l: Look) -> vec4f {
-    let ev = hash_event(t, 5.0, 0x51a7u);
-    if (ev.x > l.flash_p) { return vec4f(0.0); }
-    let k = u32(i32(ev.z));
-    let t_in = ev.y * 5.0 - 1.5 * hash_f(k * 13u + 1u);
-    if (t_in < 0.0) { return vec4f(0.0); }
-    // a stroke and its re-strokes, dying away in under a second
-    let flick = exp(-t_in * 9.0) + 0.6 * exp(-max(t_in - 0.12, 0.0) * 14.0) * step(0.12, t_in)
-              + 0.4 * exp(-max(t_in - 0.3, 0.0) * 12.0) * step(0.3, t_in);
-    let pos = vec3f(AXIS.x + (hash_f(k * 7u + 3u) - 0.5) * 7000.0 - 1500.0, 2500.0 + 5000.0 * hash_f(k * 5u + 2u),
-                    AXIS.y + (hash_f(k * 11u + 4u) - 0.5) * 3000.0);
-    return vec4f(pos, flick);
 }
 
 // ------------------------------------------------------------------ land
@@ -232,6 +357,8 @@ fn lightning(t: f32, l: Look) -> vec4f {
 fn sky(rd: vec3f, l: Look, ctx: Ctx) -> vec3f {
     if (l.night > 0.5) {
         var c = sky_night(rd) * 1.2;
+        // the glow of a distant town low on the horizon
+        c += vec3f(0.02, 0.011, 0.005) * exp(-max(rd.y, 0.0) * 40.0) * exp(-sq((rd.x + 0.55) * 2.2));
         c += star_field(rd, 0.6, ctx) * 0.6 * smoothstep(0.02, 0.12, rd.y);
         return c;
     }
@@ -300,26 +427,52 @@ fn wheat(p: vec3f, rd: vec3f, t_hit: f32, pxa: f32, l: Look, ctx: Ctx, shade_k: 
     return alb * (l.sun_c * dif * shade_k * sheen * 0.8 + l.amb * 0.9);
 }
 
+// a cloud-to-ground channel, jagged, drawn in screen space between the
+// projected ends of the stroke; returns its brightness at p
+fn bolt(p: vec2f, cam: Cam, fl: Flash, ctx: Ctx) -> f32 {
+    let top = cam_project(cam, vec3f(fl.pos.x, BASE - 50.0, fl.pos.z));
+    let bot = cam_project(cam, vec3f(fl.pos.x + 900.0 * (fract(fl.seed * 0.173) - 0.5), 0.0, fl.pos.z + 600.0));
+    if (top.z <= 0.0 || bot.z <= 0.0) { return 0.0; }
+    let s = (p.y - bot.y) / max(top.y - bot.y, 1e-4);
+    if (s < -0.05 || s > 1.02) { return 0.0; }
+    let sc = saturate(s);
+    let span = top.y - bot.y;
+    var x = mix(bot.x, top.x, sc);
+    x += span * (0.16 * noise_grad2(vec2f(sc * 5.0, fl.seed)) + 0.07 * noise_grad2(vec2f(sc * 13.0, fl.seed + 3.0)) + 0.03 * noise_grad2(vec2f(sc * 31.0, fl.seed + 7.0)));
+    let dx = abs(p.x - x);
+    let w = ctx.px * 0.7;
+    return exp(-dx * dx / (w * w)) + 0.25 * exp(-dx / (ctx.px * 5.0));
+}
+
 fn scene(p: vec2f, ctx: Ctx) -> vec3f {
     let l = look(ctx.theme);
     let ro = vec3f(0.0, 1.8, 0.0);
-    let cam = cam_look_at(ro, ro + vec3f(0.06, 0.14, -1.0), 0.0, 58.0);
+    let cam = cam_look_at(ro, ro + vec3f(0.05, 0.2, -1.0), 0.0, 58.0);
     let rd = cam_ray(cam, p);
     let pxa = ctx.px / cam.zoom;
-    var flash = lightning(ctx.t, l);
+    var fl = lightning(ctx.t, l);
     // by day a flash is a faint pulse inside the sunlit cloud
-    flash.w *= mix(0.2, 1.0, l.night);
+    fl.w *= mix(0.25, 1.0, l.night);
+    // the colour of the humid air toward the horizon
+    let air = air_col(normalize(vec3f(rd.x, max(rd.y, 0.0) * 0.5 + 0.03, rd.z)), l);
     var col: vec3f;
     var tg = -1.0;
     if (rd.y < 0.0) { tg = (0.9 - ro.y) / rd.y; }
     if (tg > 0.0) {
         let hp = ro + rd * tg;
-        // the storm's shadow reaches the far fields
-        let under = sstep(-6000.0, -13000.0, hp.z);
-        col = wheat(hp, rd, tg, pxa, l, ctx, 1.0 - 0.8 * under);
-        col += vec3f(0.5, 0.55, 0.7) * flash.w * 0.04 * under;
-        let hz = air_col(normalize(vec3f(rd.x, 0.01, rd.z)), l);
-        col = mix(col, hz * mix(vec3f(1.0), l.tint * 0.8, under * 0.6), 1.0 - exp(-tg * 0.00012));
+        // the far fields lie in the shadow of the storm and its anvil
+        var occ = 0.0;
+        if (tg > 2000.0) {
+            for (var j = 1; j < 4; j++) {
+                let fj = f32(j);
+                occ += saturate(0.5 - storm_lo(hp + l.sun * (fj * 4000.0)) / 2500.0);
+            }
+        }
+        let shade = exp(-occ * 1.5);
+        col = wheat(hp, rd, tg, pxa, l, ctx, shade);
+        // a flash lights the whole field for an instant
+        col += col_hex(0xc8b68au) * vec3f(0.5, 0.55, 0.7) * fl.w * 0.06 / (1.0 + tg / 6000.0);
+        col = mix(col, air * mix(vec3f(1.0), l.tint * 0.7, (1.0 - shade) * 0.6), 1.0 - exp(-tg * 0.00012));
     } else {
         col = sky(rd, l, ctx);
         // the air beneath the anvil lies in its shadow
@@ -327,14 +480,18 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
         let under_anvil = smoothstep(-0.9, -0.4, az) * sstep(0.55, 0.2, az) * sstep(0.5, 0.15, rd.y);
         col *= 1.0 - 0.45 * under_anvil * (1.0 - l.night);
     }
-    // storm and rain in front of the sky and the far fields
+    // the storm in front of the sky and the far fields, and the rain in
+    // front of whatever of the storm lies behind it
     let tmax = select(1e7, tg, tg > 0.0);
-    let rs = precip_shaft(ro, rd, l, ctx.t, flash, tmax);
-    col = col * rs.w + rs.rgb;
-    let st = storm_march(ro, rd, l, ctx.t, flash, steps(64.0, ctx));
-    // aerial perspective over 18 km of humid air
-    let air = air_col(normalize(vec3f(rd.x, 0.05, rd.z)), l);
-    col = col * st.w + mix(st.rgb, air * (1.0 - st.w), 0.16);
+    let st = storm_march(ro, rd, l, ctx.t, fl, ctx.jitter, steps(60.0, ctx));
+    // aerial perspective over twenty kilometres of humid air
+    col = col * st.tr + mix(st.c, air * (1.0 - st.tr), 0.2);
+    let rs = precip_shaft(ro, rd, l, ctx.t, fl, min(tmax, st.t + 800.0));
+    col = col * rs.w + mix(rs.rgb, air * (1.0 - rs.w), 0.15);
+    // a cloud-to-ground stroke under the base
+    if (fl.w > 0.02 && fl.cg > 0.5) {
+        col += vec3f(0.85, 0.85, 1.0) * bolt(p, cam, fl, ctx) * fl.w * 8.0 * rs.w;
+    }
     // the farm, silhouetted or sunlit
     if (rd.z < -0.01) {
         let tf = (FARM_Z - ro.z) / rd.z;
@@ -346,6 +503,7 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
                 var fc = col_hex(0x2a3320u) * (l.sun_c * 0.25 + l.amb * 0.5);
                 if (f.y > 0.5) { fc = col_hex(0xc8c0b0u) * (l.sun_c * 0.45 + l.amb * 0.6); }
                 if (f.y > 1.5) { fc = col_hex(0x5a3a30u) * (l.sun_c * 0.35 + l.amb * 0.5); }
+                fc += vec3f(0.3, 0.32, 0.4) * fl.w * 0.05;
                 fc = mix(fc, air, 1.0 - exp(-tf * 0.00012));
                 // a lit window at night
                 if (l.night > 0.5 && f.y > 0.5 && f.y < 1.5 && abs(fp.x + 194.0) < 1.0 && abs(fp.y - 2.6) < 0.7) {
@@ -370,7 +528,7 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
                 fcov = max(fcov, saturate(0.5 - (abs(q.y - wy) - 0.006) / w) * 0.8);
             }
             if (fcov > 0.0) {
-                let fcol = col_hex(0x4a4036u) * (l.sun_c * 0.35 + l.amb * 0.6) + vec3f(0.5, 0.55, 0.7) * flash.w * 0.02;
+                let fcol = col_hex(0x4a4036u) * (l.sun_c * 0.35 + l.amb * 0.6) + vec3f(0.5, 0.55, 0.7) * fl.w * 0.02;
                 col = mix(col, fcol, fcov);
             }
         }
