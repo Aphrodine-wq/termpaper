@@ -85,6 +85,8 @@ fn crops_stitch_into_the_full_frame() {
     let mut g = Gpu::new(1, 1, 1).expect("Vulkan GPU");
     let size = (160, 72);
     for spec in shader::SHADER_SCENES {
+        // named as it goes: a driver that dies mid-run says where
+        eprintln!("crops: {}", spec.name);
         let full = render(&mut g, spec, &desc(size, (0, 0), size, 0, 30_000));
         let left = render(&mut g, spec, &desc(size, (0, 0), (80, 72), 0, 30_000));
         let right = render(&mut g, spec, &desc(size, (80, 0), (80, 72), 0, 30_000));
