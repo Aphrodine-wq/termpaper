@@ -14,12 +14,30 @@
 // under a haint-blue beadboard ceiling; a lantern on the left post draws the
 // moths. In the storm, water sheets off the eave and lightning flickers far
 // off; once it has passed, fireflies rise out of the wet grass.
+//
+// Past the frame the porch goes on: Boston ferns in hanging baskets, the next
+// post with a second lantern, and a porch swing on its chains under the
+// beadboard, over the painted floor.
 
 const HOR: f32 = 0.0;          // horizon (base of the tree line)
 const POST: f32 = 1.24;        // post spacing
 const RAIL: f32 = -0.17;       // top of the railing
 const DECK: f32 = -0.4;        // porch floor line at the railing
 const LAMP: vec2f = vec2f(-0.62, 0.14);
+const LAMP2: vec2f = vec2f(1.93, 0.14);    // second lantern, right of the next post (cage centre)
+const SWING: vec2f = vec2f(2.47, -0.3);    // porch swing: seat centre
+const FERN_X: f32 = 1.25;                  // hanging ferns at +-FERN_X
+
+// The entry point continues past the frame's edge as a cylinder, which suits
+// a 3D camera; this porch is painted flat, so undo it and keep the desk's own
+// scale there (posts stay evenly spaced on a portrait monitor beside the
+// row). Identity inside the frame.
+fn flat_p(p: vec2f, ctx: Ctx) -> vec2f {
+    let hx = ctx.half.x;
+    let a = abs(p.x);
+    if (a <= hx) { return p; }
+    return vec2f(sign(p.x) * (hx + (atan(a) - atan(hx)) * (1.0 + hx * hx)), p.y);
+}
 
 struct Look {
     mode: u32,        // 0 storm, 1 fireflies (after the storm), 2 night
@@ -59,12 +77,139 @@ fn lightning(t: f32) -> vec2f {
     return vec2f(f, step(lt, 0.3));
 }
 
-// light from the porch lantern at a pseudo-3D point
+// light from the porch lanterns at a pseudo-3D point
 fn lantern(pos: vec3f, n: vec3f, l: Look) -> vec3f {
     let lp = vec3f(LAMP.x + 0.03, LAMP.y, -0.12);
     let d = lp - pos;
     let dist2 = dot(d, d);
-    return col_kelvin(2500.0) * l.lamp * (max(dot(n, d * inverseSqrt(dist2)), 0.0) * 0.03 / (dist2 + 0.01) + 0.01 / (1.0 + dist2 * 4.0));
+    var e = max(dot(n, d * inverseSqrt(dist2)), 0.0) * 0.03 / (dist2 + 0.01) + 0.01 / (1.0 + dist2 * 4.0);
+    // the second lantern, past the frame; its post shades everything left of
+    // it, so none of its light reaches back into the frame
+    let d2 = vec3f(LAMP2.x, LAMP2.y, -0.12) - pos;
+    let dist22 = dot(d2, d2);
+    let ld2 = d2 * inverseSqrt(dist22);
+    // (and its cap throws the ceiling above it into soft shadow)
+    let shade = exp(-sq(max(LAMP2.x - 0.3 - pos.x, 0.0)) * 8.0) * (1.0 - 0.6 * smoothstep(0.3, 0.8, -ld2.y));
+    e += (max(dot(n, ld2), 0.0) * 0.03 / (dist22 + 0.01) + 0.012 / (1.0 + dist22 * 3.0)) * shade;
+    return col_kelvin(2500.0) * l.lamp * e;
+}
+
+// a lantern on a post: cage centre c, arm reaching toward the post on side s;
+// glow_k scales its wide halo
+fn draw_lantern(p: vec2f, col_in: vec3f, c: vec2f, s: f32, moths: i32, glow_k: f32, l: Look, t: f32, ctx: Ctx) -> vec3f {
+    var col = col_in;
+    let q = p - c;
+    let cage = sdf2_round_box(q, vec2f(0.026, 0.045), 0.006);
+    let cap = sdf2_box(q - vec2f(0.0, 0.055), vec2f(0.032, 0.008));
+    let arm = sdf2_box(p - vec2f(c.x + s * 0.025, c.y + 0.03), vec2f(0.02, 0.004));
+    let frame = min(min(abs(cage) - 0.004, cap), min(arm, max(abs(q.x) - 0.003, abs(q.y) - 0.045)));
+    let glass = smoothstep(0.002, -0.002, cage);
+    col = mix(col, col_kelvin(2400.0) * l.lamp * (2.2 + 1.0 * exp(-dot(q, q) * 900.0)), glass);
+    col = mix(col, vec3f(0.01), aa_fill(frame, ctx));
+    // glow in the damp air
+    let gd = length(q);
+    col += col_kelvin(2500.0) * l.lamp * (0.12 * exp(-gd * 18.0) + 0.04 * exp(-gd * 5.0) * glow_k) * (1.0 + l.haze);
+    // moths circling it
+    for (var k = 0; k < 5; k++) {
+        if (k >= moths) { break; }
+        let fk = f32(k);
+        let h = hash_cell2(vec2i(k, 1), 0x3074u);
+        let sp = 1.5 + 1.5 * h.x;
+        let a = t * sp + h.y * TAU;
+        let r = 0.05 + 0.03 * sin(t * (0.7 + h.z) + fk);
+        let mp = vec2f(cos(a) * r * 1.3, sin(a * 1.3) * r * 0.8 + 0.01 * sin(t * 3.0 + fk));
+        let md = length(q - mp);
+        let mr = max(ctx.px * 0.7, 0.003);
+        col += vec3f(0.9, 0.85, 0.7) * l.lamp * 0.5 * exp(-sq(md / mr));
+    }
+    return col;
+}
+
+// Boston fern spilling out of a hanging basket, centred at x = fx.
+// Returns (colour, coverage).
+fn fern(p: vec2f, fx: f32, l: Look, ctx: Ctx) -> vec4f {
+    let q = p - vec2f(fx, 0.17);
+    var c = vec3f(0.0);
+    var a = 0.0;
+    // three chains from a hook under the header
+    let hook = vec2f(0.0, 0.345 - 0.17);
+    let ch = min(min(sdf2_segment(q, hook, vec2f(-0.05, 0.03)), sdf2_segment(q, hook, vec2f(0.05, 0.03))), sdf2_segment(q, hook, vec2f(0.0, 0.035)));
+    let cha = aa_fill(ch - 0.0015, ctx) * 0.8;
+    c = mix(c, vec3f(0.05) + lantern(vec3f(p, -0.1), vec3f(0.0, 0.0, -1.0), l) * 0.5, cha);
+    a = max(a, cha);
+    // fronds: a lobed mound over the rim, the long outer ones arching down
+    // past it on both sides
+    let ang = atan2(q.x, q.y - 0.02);
+    let lobes = 0.014 * sin(ang * 7.0 + fx * 3.0) + 0.008 * noise_value2(vec2f(ang * 12.0, fx * 5.0));
+    let mound = length((q - vec2f(0.0, 0.035)) * vec2f(0.85, 1.4)) - (0.085 + lobes);
+    let hang = abs(q.x) - 0.1 + 0.25 * max(0.02 - q.y, 0.0);
+    let droop = max(max(hang - 0.035 - 0.012 * sin(q.y * 90.0 + fx), -hang - 0.02), max(q.y - 0.05, -q.y - 0.06 - 0.03 * noise_value2(vec2f(q.x * 30.0, fx))));
+    let fronds = min(mound, droop);
+    let fa = aa_fill(fronds, ctx);
+    if (fa > 0.0) {
+        let leaf = 0.75 + 0.25 * noise_value2(q * vec2f(140.0, 60.0) + fx);
+        let n = normalize(vec3f(q.x * 5.0, clamp(q.y * 6.0, -0.4, 0.8) + 0.3, -1.0));
+        var fc = col_hex(0x5a9a44u) * 0.8 * leaf * (lantern(vec3f(p, -0.1), n, l) * 3.0 + l.sky_low * 0.25 + vec3f(0.003, 0.004, 0.003));
+        fc *= 0.65 + 0.35 * smoothstep(-0.025, 0.0, fronds);   // darker where the fronds are thick
+        // the yard's light catches the frond tips from behind
+        fc += (l.sky_low * 0.12 + vec3f(0.002, 0.004, 0.002)) * smoothstep(-0.01, 0.0, fronds);
+        c = mix(c, fc, fa);
+        a = max(a, fa);
+    }
+    // the basket's rim under the fronds
+    let rim = sdf2_round_box(q - vec2f(0.0, 0.035), vec2f(0.075, 0.008), 0.004);
+    let ra = aa_fill(rim, ctx) * step(0.0, mound + 0.02);
+    c = mix(c, col_hex(0x3a2c1cu) * 0.4 * (lantern(vec3f(p, -0.1), vec3f(0.0, 0.3, -1.0), l) + l.sky_low * 0.05), ra);
+    a = max(a, ra);
+    return vec4f(c, a);
+}
+
+// the porch swing, painted white, a ticking-striped cushion, on chains.
+// Returns (colour, coverage).
+fn swing(p: vec2f, l: Look, ctx: Ctx) -> vec4f {
+    let q = p - SWING;
+    var c = vec3f(0.0);
+    var a = 0.0;
+    // chains up to hooks in the ceiling (which is low over the swing: it hangs
+    // near us)
+    let cx = abs(q.x) - 0.27;
+    let chain = max(abs(cx) - 0.003, max(-(q.y - 0.07), q.y - 1.06));
+    let cha = aa_fill(chain, ctx);
+    if (cha > 0.0) {
+        let link = 0.7 + 0.3 * step(0.5, fract(q.y * 90.0));
+        c = (vec3f(0.03) + lantern(vec3f(p, -0.2), vec3f(-0.4, 0.0, -1.0), l) * 0.8) * link;
+        a = cha;
+    }
+    // back rest (slats), arms, seat, the seat's front apron
+    let back = sdf2_box(q - vec2f(0.0, 0.12), vec2f(0.25, 0.1));
+    let slats = step(0.45, fract(q.x / 0.036)) * step(abs(q.y - 0.12), 0.085);
+    let arms = min(sdf2_box(q - vec2f(-0.255, 0.07), vec2f(0.02, 0.012)), sdf2_box(q - vec2f(0.255, 0.07), vec2f(0.02, 0.012)));
+    let armp = min(sdf2_box(q - vec2f(-0.255, 0.035), vec2f(0.008, 0.035)), sdf2_box(q - vec2f(0.255, 0.035), vec2f(0.008, 0.035)));
+    let seat = sdf2_box(q - vec2f(0.0, -0.005), vec2f(0.26, 0.022));
+    let wood = min(min(back, arms), min(armp, seat));
+    let wa = aa_fill(wood, ctx) * select(1.0, 0.25, back < 0.0 && slats > 0.5 && seat > 0.0 && arms > 0.0 && armp > 0.0);
+    if (wa > 0.0) {
+        let n = normalize(vec3f(-0.5, select(0.1, 0.5, seat < 0.0 && q.y > 0.0), -1.0));
+        var wc = vec3f(0.78, 0.76, 0.72) * (lantern(vec3f(p, -0.25), n, l) * 1.1 + l.sky_low * 0.12 + vec3f(0.004));
+        // the top rail of the back is a little proud and catches more light
+        wc *= 1.0 + 0.3 * step(0.2, q.y);
+        c = mix(c, wc, wa);
+        a = max(a, wa);
+    }
+    // cushion: blue ticking on the seat, a pillow in the corner
+    let cush = sdf2_round_box(q - vec2f(0.0, 0.03), vec2f(0.235, 0.018), 0.012);
+    let pil = sdf2_round_box(rot2(-0.2) * (q - vec2f(-0.17, 0.085)), vec2f(0.05, 0.045), 0.025);
+    let cu = min(cush, pil);
+    let cua = aa_fill(cu, ctx);
+    if (cua > 0.0) {
+        var cc = mix(col_hex(0xd8d4c8u), col_hex(0x3a5a8au), step(0.6, fract(q.x * 45.0)));
+        if (pil < cush) { cc = mix(col_hex(0xc8a060u), col_hex(0x8a3a2au), step(0.5, fract((q.x + q.y) * 30.0))); }
+        let n = normalize(vec3f(0.0, 0.6, -1.0));
+        let lit = cc * 0.6 * (lantern(vec3f(p, -0.26), n, l) * 1.1 + l.sky_low * 0.1 + vec3f(0.003)) * (0.75 + 0.25 * smoothstep(-0.015, 0.0, cu));
+        c = mix(c, lit, cua);
+        a = max(a, cua);
+    }
+    return vec4f(c, a);
 }
 
 // ------------------------------------------------------------------ the yard
@@ -197,7 +342,8 @@ fn chair_d(q0: vec2f, a: f32) -> f32 {
     return d;
 }
 
-fn scene(p: vec2f, ctx: Ctx) -> vec3f {
+fn scene(pw: vec2f, ctx: Ctx) -> vec3f {
+    let p = flat_p(pw, ctx);
     let l = look(ctx.theme);
     let t = ctx.t;
     let aa = ctx.px;
@@ -240,6 +386,10 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
         var fc = col_hex(0x6a7074u) * 0.5 * (1.0 - 0.4 * seam) * (lantern(vec3f(p.x, DECK, -0.1 - (z - 0.3) * 0.3), vec3f(0.0, 1.0, 0.0), l) * 1.3 + l.sky_low * 0.05);
         // damp boards near the screen catch the sky
         fc += l.sky_low * 0.06 * smoothstep(DECK - 0.05, DECK, p.y) * select(0.5, 1.0, l.mode == 0u);
+        // past the frame the second lantern pools warm light on the boards
+        fc += col_hex(0x6a7074u) * 0.5 * col_kelvin(2500.0) * l.lamp * 0.14 * exp(-sq((p.x - LAMP2.x - 0.25) / 0.6)) * smoothstep(-1.3, -0.42, p.y) * (1.0 - 0.3 * seam);
+        // the swing's shadow on the boards under it
+        fc *= 1.0 - 0.55 * exp(-sq((p.x - SWING.x) / 0.26) - sq((p.y - SWING.y + 0.2) / 0.05));
         col = fc;
     }
     // ---- header beam and the haint-blue beadboard ceiling
@@ -251,7 +401,7 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
             let z = 0.1 / max(p.y - 0.36, 0.01);
             let wx = p.x * z;
             let bead = smoothstep(0.03, 0.0, abs(fract(wx / 0.06) - 0.5) - 0.46) * saturate(1.0 - aa * z * 25.0);
-            col = col_hex(0x9ccfd0u) * 0.5 * (1.0 - 0.3 * bead) * (lantern(vec3f(p.x, 0.45, -0.1 - z * 0.2), vec3f(0.0, -1.0, 0.0), l) * 0.8 + l.sky_low * 0.25 + vec3f(0.004, 0.008, 0.01));
+            col = col_hex(0x9ccfd0u) * 0.5 * (1.0 - 0.3 * bead) * (lantern(vec3f(p.x, 0.45, -0.1 - z * 0.2), vec3f(0.0, -1.0, 0.0), l) * 0.8 + l.sky_low * 0.25 + vec3f(0.004, 0.008, 0.01) * (1.0 + 1.5 * smoothstep(1.1, 1.8, abs(p.x))));
         }
     }
     // ---- posts: square, painted white, repeated along the porch
@@ -271,31 +421,21 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
         col = mix(col, pc, aa_fill(pd2, ctx));
     }
 
-    // ---- the lantern on the left post
-    {
-        let q = p - LAMP - vec2f(0.045, 0.0);
-        let cage = sdf2_round_box(q, vec2f(0.026, 0.045), 0.006);
-        let cap = sdf2_box(q - vec2f(0.0, 0.055), vec2f(0.032, 0.008));
-        let arm = sdf2_box(p - vec2f(LAMP.x + 0.02, LAMP.y + 0.03), vec2f(0.02, 0.004));
-        let frame = min(min(abs(cage) - 0.004, cap), min(arm, max(abs(q.x) - 0.003, abs(q.y) - 0.045)));
-        let glass = smoothstep(0.002, -0.002, cage);
-        col = mix(col, col_kelvin(2400.0) * l.lamp * (2.2 + 1.0 * exp(-dot(q, q) * 900.0)), glass);
-        col = mix(col, vec3f(0.01), aa_fill(frame, ctx));
-        // glow in the damp air
-        let gd = length(q);
-        col += col_kelvin(2500.0) * l.lamp * (0.12 * exp(-gd * 18.0) + 0.04 * exp(-gd * 5.0)) * (1.0 + l.haze);
-        // moths circling it
-        for (var k = 0; k < 5; k++) {
-            let fk = f32(k);
-            let h = hash_cell2(vec2i(k, 1), 0x3074u);
-            let sp = 1.5 + 1.5 * h.x;
-            let a = t * sp + h.y * TAU;
-            let r = 0.05 + 0.03 * sin(t * (0.7 + h.z) + fk);
-            let mp = vec2f(cos(a) * r * 1.3, sin(a * 1.3) * r * 0.8 + 0.01 * sin(t * 3.0 + fk));
-            let md = length(q - mp);
-            let mr = max(aa * 0.7, 0.003);
-            col += vec3f(0.9, 0.85, 0.7) * l.lamp * 0.5 * exp(-sq(md / mr));
-        }
+    // ---- the lantern on the left post (and, past the frame, the next one)
+    col = draw_lantern(p, col, LAMP + vec2f(0.045, 0.0), -1.0, 5, 1.0, l, t, ctx);
+    if (p.x > 0.95) {
+        // (its halo fades in past the frame's edge rather than stopping at a line)
+        col = draw_lantern(p, col, LAMP2, -1.0, 3, sstep(0.95, 1.45, p.x), l, t + 17.0, ctx);
+    }
+
+    // ---- past the frame: hanging ferns, the porch swing
+    if (abs(abs(p.x) - FERN_X) < 0.16 && p.y > -0.05 && p.y < 0.36) {
+        let fr = fern(p, sign(p.x) * FERN_X, l, ctx);
+        col = mix(col, fr.rgb, fr.a);
+    }
+    if (abs(p.x - SWING.x) < 0.3 && p.y > SWING.y - 0.04 && p.y < SWING.y + 1.07) {
+        let sw = swing(p, l, ctx);
+        col = mix(col, sw.rgb, sw.a);
     }
 
     // ---- the rocking chair, right foreground, rocking slowly

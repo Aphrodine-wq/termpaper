@@ -15,14 +15,39 @@
 // the viewer) and are lit by up to three lights: the banker's lamp, the
 // candle, and the window (moonlight, a dawn shaft full of dust, or storm
 // light with rare lightning).
+//
+// Past the frame the room goes on: the desk ends and more bays of books run
+// down to a panelled plinth and a Persian carpet; a second arched window
+// between a standing lamp and a wall sconce (the far side's own warm light,
+// windowed so it never reaches back into the frame), a globe on its stand; a
+// coffered ceiling above the cornice. Far left, a twin sconce.
 
 const WIN_C: vec2f = vec2f(0.0, 0.14);
 const WIN_H: vec2f = vec2f(0.125, 0.25);    // straight part half size; arch on top
+const WIN2_C: vec2f = vec2f(2.24, 0.14);    // second window, beyond the frame
 const SHELF_H: f32 = 0.13;                  // shelf pitch
 const DESK_BACK: f32 = -0.25;
 const DESK_FRONT: f32 = -0.46;
+const DESK_R: f32 = 1.15;                   // right end of the desk's front edge
 const LAMP: vec2f = vec2f(-0.46, -0.1);     // shade centre
 const CANDLE: vec2f = vec2f(0.43, -0.2);    // wick
+const FLAMP: vec2f = vec2f(1.84, 0.08);     // standing lamp: shade centre
+const SCONCE: vec2f = vec2f(2.55, 0.24);    // wall sconce on the upright right of it: shade centre
+const SCONCE_L: vec2f = vec2f(-1.53, 0.24); // and its twin far left
+const GLOBE: vec2f = vec2f(2.63, -0.42);    // globe centre
+const FLOOR_Y: f32 = -0.6;                  // the shelves meet the floor
+const CORN_TOP: f32 = 0.56;                 // the cornice meets the ceiling
+
+// The entry point continues past the frame's edge as a cylinder, which suits
+// a 3D camera; this room is painted flat, so undo it and keep the desk's own
+// scale there (a window keeps its shape on a portrait monitor beside the
+// row). Identity inside the frame.
+fn flat_p(p: vec2f, ctx: Ctx) -> vec2f {
+    let hx = ctx.half.x;
+    let a = abs(p.x);
+    if (a <= hx) { return p; }
+    return vec2f(sign(p.x) * (hx + (atan(a) - atan(hx)) * (1.0 + hx * hx)), p.y);
+}
 
 struct Look {
     mode: u32,        // 0 candle, 1 dawn, 2 storm
@@ -84,25 +109,56 @@ fn room_light(pos: vec3f, n: vec3f, l: Look, t: f32, flash: f32) -> vec3f {
         let ld = d * inverseSqrt(dist2);
         e += col_kelvin(1850.0) * l.candle * fl * (max(dot(n, ld), 0.0) * 0.03 / (dist2 + 0.006) + 0.04 / (1.0 + dist2 * 5.0));
     }
-    // window: soft light from the back wall
+    // standing lamp beyond the frame: the shade glows and throws light
+    // down and (less) up
+    if (l.lamp > 0.0) {
+        let lp = vec3f(FLAMP.x, FLAMP.y - 0.02, -0.16);
+        let d = lp - pos;
+        let dist2 = dot(d, d);
+        let ld = d * inverseSqrt(dist2);
+        let down = 0.45 + 0.55 * smoothstep(-0.3, 0.3, ld.y);
+        // (windowed so it fades out before reaching the frame)
+        let toward = exp(-sq(max(FLAMP.x - 0.4 - pos.x, 0.0)) * 10.0);
+        e += col_kelvin(2800.0) * l.lamp * (max(dot(n, ld), 0.0) * 0.08 * down / (dist2 + 0.02) + 0.08 / (1.0 + dist2 * 3.0)) * exp(-dist2 * 1.2) * toward;
+        // the sconce: smaller, higher, on the far side of the window
+        let sp = vec3f(SCONCE.x, SCONCE.y - 0.02, -0.08);
+        let sd = sp - pos;
+        let sdist2 = dot(sd, sd);
+        let sl = sd * inverseSqrt(sdist2);
+        let sdown = 0.5 + 0.5 * smoothstep(-0.3, 0.3, sl.y);
+        e += col_kelvin(2600.0) * l.lamp * (max(dot(n, sl), 0.0) * 0.045 * sdown / (sdist2 + 0.015) + 0.05 / (1.0 + sdist2 * 3.0)) * exp(-sdist2 * 1.0) * toward;
+        // the twin far left, fading out toward the frame the same way
+        let lpl = vec3f(SCONCE_L.x, SCONCE_L.y - 0.02, -0.08);
+        let dl = lpl - pos;
+        let ldist2 = dot(dl, dl);
+        let ll = dl * inverseSqrt(ldist2);
+        let ldown = 0.5 + 0.5 * smoothstep(-0.3, 0.3, ll.y);
+        let toward_l = exp(-sq(max(pos.x - SCONCE_L.x - 0.25, 0.0)) * 30.0);
+        e += col_kelvin(2600.0) * l.lamp * (max(dot(n, ll), 0.0) * 0.045 * ldown / (ldist2 + 0.015) + 0.05 / (1.0 + ldist2 * 3.0)) * exp(-ldist2 * 1.0) * toward_l;
+    }
+    // windows: soft light from the back wall
     let wd = vec3f(WIN_C, 0.05) - pos;
     let wdist2 = dot(wd, wd);
     e += l.win_c * (0.25 * max(dot(n, normalize(wd)), 0.0) / (1.0 + wdist2 * 4.0) + 0.12 / (1.0 + wdist2 * 3.0));
+    let wd2 = vec3f(WIN2_C, 0.05) - pos;
+    let wdist22 = dot(wd2, wd2);
+    e += l.win_c * (0.25 * max(dot(n, normalize(wd2)), 0.0) / (1.0 + wdist22 * 4.0) + 0.12 / (1.0 + wdist22 * 3.0)) * exp(-wdist22 * 0.8)
+         * exp(-sq(max(WIN2_C.x - 0.75 - pos.x, 0.0)) * 6.0);
     e += col_hex(0xdce8ffu) * flash * 1.2;
     return e;
 }
 
 // ------------------------------------------------------------------ window
-fn win_d(p: vec2f) -> f32 {
-    let q = p - WIN_C;
+fn win_d(p: vec2f, c: vec2f) -> f32 {
+    let q = p - c;
     let rect = sdf2_box(q, WIN_H);
     let arch = length(q - vec2f(0.0, WIN_H.y)) - WIN_H.x;
     return select(rect, min(rect, arch), q.y > 0.0);
 }
 
 // leaded panes: 1 on the lead lines
-fn leads(p: vec2f, aa: f32) -> f32 {
-    let q = (p - WIN_C) * vec2f(1.0, 1.0);
+fn leads(p: vec2f, c: vec2f, aa: f32) -> f32 {
+    let q = p - c;
     // diamond lattice
     let a = (q.x + q.y) / 0.05;
     let b = (q.x - q.y) / 0.05;
@@ -116,8 +172,8 @@ fn leads(p: vec2f, aa: f32) -> f32 {
     return m;
 }
 
-fn outside(p: vec2f, l: Look, t: f32, flash: f32) -> vec3f {
-    let q = p - WIN_C;
+fn outside(p: vec2f, wc: vec2f, l: Look, t: f32, flash: f32) -> vec3f {
+    let q = p - wc;
     var c = mix(l.sky_low, l.sky_top, smoothstep(-0.2, 0.35, q.y));
     // rooftops and a spire across the quad
     let roof = -0.14 + 0.03 * step(0.5, fract(p.x * 9.0 + 0.3)) + 0.12 * saturate(1.0 - abs(p.x - 0.06) / 0.015) * step(abs(p.x - 0.06), 0.015);
@@ -257,8 +313,141 @@ fn candle_flame(p: vec2f, t: f32) -> vec4f {
     return vec4f(c, smoothstep(0.003, -0.002, d));
 }
 
+// ------------------------------------------------------------------ beyond the frame
+// Coffered ceiling in perspective, above the cornice.
+fn ceiling(p: vec2f, l: Look, t: f32, flash: f32, aa: f32) -> vec3f {
+    let z = CORN_TOP * 0.3 / max(p.y, 0.01);        // 0.3 at the wall, smaller toward us
+    let wx = p.x * z;
+    // deep beams parallel to the wall, light ribs between them: coffers.
+    // (Far from the centre the ribs run nearly flat, so they stay quiet.)
+    let cu = vec2f(wx / 0.1, (0.3 - z) / 0.045);
+    let f = abs(fract(cu) - 0.5);
+    let lod = saturate(1.0 - aa * z * 18.0);
+    let beam = sstep(0.33, 0.38, f.y);
+    let rib = sstep(0.4, 0.44, f.x) * (1.0 - beam) * lod;
+    let mould = sstep(0.25, 0.29, f.y) * (1.0 - beam);
+    var alb = col_hex(0x5a3a24u) * 0.45;
+    alb = mix(alb, col_hex(0x3a2414u) * 0.55, beam);
+    alb = mix(alb, col_hex(0x4a2e1au) * 0.5, rib * 0.6);
+    alb = mix(alb, col_hex(0xb89040u) * 0.4, mould * 0.45 * lod);
+    // beam soffits face down; the moulding faces tilt toward the room
+    let side = sign(fract(cu.y) - 0.5);
+    let n = normalize(vec3f(0.0, -1.0, -0.8 * mould * side));
+    let pos = vec3f(p.x, CORN_TOP + 0.02, -(0.3 - z) * 2.0);
+    return alb * room_light(pos, n, l, t, flash) * 1.6;
+}
+
+// The floor beyond the desk: parquet, and a Persian carpet on it.
+fn floor_c(p: vec2f, l: Look, t: f32, flash: f32, aa: f32) -> vec3f {
+    let z = -FLOOR_Y * 0.3 / max(-p.y, 0.01);       // 0.3 at the wall
+    let wx = p.x * z;
+    let lod = saturate(1.0 - aa * z * 25.0);
+    // oak parquet in a herringbone of short boards
+    let b = vec2f(wx / 0.05 + floor((0.3 - z) / 0.025) * 0.5, (0.3 - z) / 0.025);
+    let hb = hash_cell2(vec2i(floor(b)), 0x0a4u);
+    var alb = mix(col_hex(0x5a3a20u), col_hex(0x74502cu), hb.x) * 0.45;
+    alb *= 1.0 - 0.35 * lod * max(sstep(0.44, 0.5, abs(fract(b.x) - 0.5)), sstep(0.42, 0.5, abs(fract(b.y) - 0.5)));
+    // carpet: deep red field, a navy border with gold lines, a lattice of lozenges
+    let cq = vec2f(wx - 0.02, z - 0.19);
+    let cd = sdf2_box(cq, vec2f(0.62, 0.085));
+    if (cd < 0.0) {
+        let bd = -cd;                                        // distance in from the edge
+        var cc = col_hex(0x8a2620u);
+        let lz = abs(fract(cq.x / 0.07) - 0.5) + abs(fract(cq.y / 0.05) - 0.5);
+        cc = mix(cc, col_hex(0x3a1830u), sstep(0.05, 0.02, abs(lz - 0.5)) * 0.6 * lod);
+        cc = mix(cc, col_hex(0xb08040u), sstep(0.1, 0.06, lz) * 0.5 * lod);
+        cc = mix(cc, col_hex(0x5a1410u), 0.3 * sstep(0.3, 0.1, lz));
+        let border = sstep(0.016, 0.014, bd);
+        cc = mix(cc, col_hex(0x1c2440u), border);
+        cc = mix(cc, col_hex(0xc8a060u), (sstep(0.004, 0.002, abs(bd - 0.004)) + sstep(0.003, 0.0015, abs(bd - 0.0165))) * lod);
+        // pile: a soft sheen, fringe at the ends
+        alb = cc * 0.5 * (0.9 + 0.1 * noise_value2(vec2f(wx * 200.0, z * 400.0)));
+    }
+    let pos = vec3f(p.x, FLOOR_Y - 0.02, -(0.3 - z) * 3.0);
+    var c = alb * room_light(pos, vec3f(0.0, 1.0, 0.0), l, t, flash);
+    // a dark skirting line where the floor meets the plinth
+    c *= 0.4 + 0.6 * sstep(FLOOR_Y, FLOOR_Y - 0.02, p.y);
+    return c;
+}
+
+// the standing lamp: fabric drum shade, brass column, round foot. (colour, coverage)
+fn floor_lamp(p: vec2f, l: Look, t: f32, flash: f32, ctx: Ctx) -> vec4f {
+    let q = p - FLAMP;
+    // shade: a truncated cone, wider at the bottom
+    let hw = mix(0.075, 0.055, saturate((q.y + 0.055) / 0.11));
+    let shade = max(abs(q.x) - hw, abs(q.y) - 0.055);
+    let column = sdf2_box(p - vec2f(FLAMP.x, (FLAMP.y - 0.055 + FLOOR_Y - 0.07) * 0.5), vec2f(0.006, (FLAMP.y - 0.055 - FLOOR_Y + 0.07) * 0.5));
+    let foot = sdf2_round_box(p - vec2f(FLAMP.x, FLOOR_Y - 0.075), vec2f(0.05, 0.01), 0.006);
+    let brass = min(column, foot);
+    var c = vec3f(0.0);
+    var a = 0.0;
+    let ba = aa_fill(brass, ctx);
+    if (ba > 0.0) {
+        let bn = normalize(vec3f(clamp((p.x - FLAMP.x) / 0.006, -1.0, 1.0) * 0.8, 0.2, -1.0));
+        c = col_hex(0xb8903cu) * 0.5 * room_light(vec3f(p, -0.16), bn, l, t, flash);
+        a = ba;
+    }
+    let sa = aa_fill(shade, ctx);
+    if (sa > 0.0) {
+        // parchment glowing from within, brighter toward the rims, seams
+        let across = q.x / hw;
+        let down = saturate((0.055 - q.y) / 0.11);
+        var sc = col_hex(0xffc47au) * l.lamp * (0.07 + 0.1 * (1.0 - across * across)) * (0.7 + 0.6 * down);
+        sc += col_hex(0xe8d4a8u) * 0.3 * room_light(vec3f(p, -0.2), normalize(vec3f(across * 0.7, 0.0, -1.0)), l, t, flash);
+        sc *= 0.9 + 0.1 * sstep(0.02, 0.0, abs(fract(across * 2.5) - 0.5) - 0.45);
+        let rim = sstep(0.008, 0.0, 0.055 - abs(q.y));
+        sc = mix(sc, col_hex(0xb07a3au) * (0.03 + l.lamp * 0.3), rim);
+        c = mix(c, sc, sa);
+        a = max(a, sa);
+    }
+    return vec4f(c, a);
+}
+
+// a terrestrial globe on a turned wooden stand, a brass meridian ring
+fn globe(p: vec2f, l: Look, t: f32, flash: f32, ctx: Ctx) -> vec4f {
+    let q = p - GLOBE;
+    let r = 0.07;
+    let sph = length(q) - r;
+    let ring = abs(length(q * vec2f(1.0, 0.97)) - r - 0.01) - 0.004;
+    let stand = min(min(sdf2_box(p - vec2f(GLOBE.x, GLOBE.y - 0.13), vec2f(0.008, 0.055)),
+                        sdf2_round_box(p - vec2f(GLOBE.x, GLOBE.y - 0.09), vec2f(0.03, 0.008), 0.004)),
+                    min(sdf2_segment(p, vec2f(GLOBE.x, GLOBE.y - 0.18), vec2f(GLOBE.x - 0.06, FLOOR_Y - 0.13)) - 0.006,
+                        sdf2_segment(p, vec2f(GLOBE.x, GLOBE.y - 0.18), vec2f(GLOBE.x + 0.06, FLOOR_Y - 0.13)) - 0.006));
+    var c = vec3f(0.0);
+    var a = 0.0;
+    let sa = aa_fill(stand, ctx);
+    if (sa > 0.0) {
+        c = col_hex(0x4a2a16u) * 0.5 * room_light(vec3f(p, -0.2), normalize(vec3f(0.2, 0.3, -1.0)), l, t, flash);
+        a = sa;
+    }
+    let ga = aa_fill(sph, ctx);
+    if (ga > 0.0) {
+        let u = q / r;
+        let nz = sqrt(saturate(1.0 - dot(u, u)));
+        let n = normalize(vec3f(u.x, u.y, -nz));
+        // antique map: parchment land on sea-green, tilted axis
+        let lon = atan2(u.x, nz) + 0.6;
+        let lat = u.y;
+        let land = sstep(0.52, 0.56, noise_fbm2(vec2f(lon * 2.2, lat * 3.0) + vec2f(3.0, 1.0), 3));
+        var alb = mix(col_hex(0x4a6a58u), col_hex(0xc8b080u), land) * 0.5;
+        alb *= 0.85 + 0.15 * sstep(0.02, 0.0, abs(fract(lat * 4.0) - 0.5) - 0.46);
+        var gc = alb * room_light(vec3f(p, -0.2 - nz * 0.05), n, l, t, flash);
+        // varnish: a warm highlight from the lamp side
+        gc += col_kelvin(2800.0) * l.lamp * 0.05 * pow(saturate(dot(n, normalize(vec3f(-0.6, 0.5, -0.6)))), 12.0);
+        c = mix(c, gc, ga);
+        a = max(a, ga);
+    }
+    let ra = aa_fill(ring, ctx) * select(1.0, 0.0, q.y < -r * 0.9);
+    if (ra > 0.0) {
+        c = mix(c, col_hex(0xb8903cu) * 0.55 * room_light(vec3f(p, -0.22), normalize(vec3f(sign(q.x) * 0.6, 0.3, -1.0)), l, t, flash), ra);
+        a = max(a, ra);
+    }
+    return vec4f(c, a);
+}
+
 // ------------------------------------------------------------------ scene
-fn scene(p: vec2f, ctx: Ctx) -> vec3f {
+fn scene(pw: vec2f, ctx: Ctx) -> vec3f {
+    let p = flat_p(pw, ctx);
     let l = look(ctx.theme);
     let t = ctx.t;
     let aa = ctx.px;
@@ -273,20 +462,33 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
         let v = (p.y - 0.44) / 0.1;
         let bn = normalize(vec3f(0.0, -0.6 + 0.4 * sin(v * 9.0), -1.0));
         col = col_hex(0x3a2414u) * 0.45 * room_light(vec3f(p, -0.03), bn, l, t, flash) * (0.85 + 0.15 * sin(p.x * 120.0) * step(0.3, fract(v * 3.0)));
+        if (p.y > CORN_TOP) { col = ceiling(p, l, t, flash, aa); }
     }
-    let wd = win_d(p);
+    if (p.y < -0.5) {
+        // panelled plinth under the lowest shelf, then the floor
+        let bx = (fract((p.x + 0.17) / 0.34) - 0.5) * 0.34;
+        let pd = sdf2_box(vec2f(bx, p.y - (FLOOR_Y - 0.5) * 0.5), vec2f(0.13, (-0.5 - FLOOR_Y) * 0.5 - 0.02));
+        // raised panels: a bevel catches the light along their top edges
+        let bevel = sstep(0.007, 0.0, abs(pd));
+        let pn = normalize(vec3f(0.0, bevel * sign(p.y - (FLOOR_Y - 0.5) * 0.5) * 0.8, -1.0));
+        col = col_hex(0x3a2414u) * (0.45 + 0.1 * sstep(0.0, -0.004, pd)) * room_light(vec3f(p, -0.02), pn, l, t, flash) * (0.9 + 0.1 * noise_value2(p * vec2f(60.0, 8.0)));
+        if (p.y < FLOOR_Y) { col = floor_c(p, l, t, flash, aa); }
+    }
+    let second = p.x > 1.12;
+    let wc = select(WIN_C, WIN2_C, second);
+    let wd = win_d(p, wc);
     if (wd < 0.03) {
         // stone surround
         let st = col_hex(0x8a8074u) * 0.4 * room_light(vec3f(p, -0.01), vec3f(0.0, 0.0, -1.0), l, t, flash);
         col = mix(col, st, aa_fill(wd - 0.03, ctx));
     }
     if (wd < 0.0) {
-        var o = outside(p, l, t, flash);
+        var o = outside(p, wc, l, t, flash);
         if (l.mode == 2u) {
             let rg = rain_glass(p * 2.0, t, ctx);
-            o = outside(p + rg.xy * 0.3, l, t, flash) * (1.0 + rg.z * 0.5);
+            o = outside(p + rg.xy * 0.3, wc, l, t, flash) * (1.0 + rg.z * 0.5);
         }
-        let ld = leads(p, aa);
+        let ld = leads(p, wc, aa);
         o = mix(o, col_hex(0x1a1612u) * 0.2 * (l.amb * 10.0 + l.win_c * 0.3), ld);
         col = mix(col, o, aa_fill(wd, ctx));
     }
@@ -303,23 +505,68 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
         }
     }
 
-    // ---- dawn: a shaft of light full of dust
+    // ---- beyond the frame: the standing lamp and the globe
+    if (abs(p.x - FLAMP.x) < 0.09 && p.y < FLAMP.y + 0.06 && p.y > FLOOR_Y - 0.09) {
+        let fl = floor_lamp(p, l, t, flash, ctx);
+        col = mix(col, fl.rgb, fl.a);
+    }
+    let sc_c = select(SCONCE_L, SCONCE, p.x > 0.0);
+    if (abs(p.x - sc_c.x) < 0.06 && abs(p.y - sc_c.y + 0.03) < 0.07) {
+        let q = (p - sc_c) * vec2f(sign(p.x), 1.0);    // the left one is a mirror image
+        let hw = mix(0.042, 0.03, saturate((q.y + 0.025) / 0.05));
+        let shade = max(abs(q.x) - hw, abs(q.y) - 0.025);
+        let plate = sdf2_round_box(q - vec2f(0.0, -0.075), vec2f(0.011, 0.025), 0.005);
+        let arm = abs(length((q - vec2f(0.03, -0.055)) * vec2f(1.0, 1.4)) - 0.03) - 0.003;
+        let brass = min(plate, max(arm, max(q.x - 0.03, -q.y - 0.075)));
+        let ba = aa_fill(min(brass, sdf2_box(q - vec2f(0.0, -0.035), vec2f(0.003, 0.012))), ctx);
+        col = mix(col, col_hex(0xb8903cu) * 0.55 * room_light(vec3f(p, -0.05), normalize(vec3f(0.3, 0.3, -1.0)), l, t, flash) + col_kelvin(2600.0) * l.lamp * 0.03 * sstep(-0.02, -0.04, q.y), ba);
+        let sa = aa_fill(shade, ctx);
+        let across = q.x / hw;
+        var sc = col_hex(0xffc47au) * l.lamp * (0.06 + 0.08 * (1.0 - across * across)) * (0.7 + 0.6 * saturate((0.025 - q.y) / 0.05));
+        sc += col_hex(0xe8d4a8u) * 0.3 * room_light(vec3f(p, -0.1), normalize(vec3f(across * 0.7, 0.0, -1.0)), l, t, flash);
+        sc = mix(sc, col_hex(0xb07a3au) * (0.03 + l.lamp * 0.3), sstep(0.006, 0.0, 0.025 - abs(q.y)));
+        col = mix(col, sc, sa);
+    }
+    if (abs(p.x - GLOBE.x) < 0.1 && p.y < GLOBE.y + 0.09 && p.y > FLOOR_Y - 0.15) {
+        let gl = globe(p, l, t, flash, ctx);
+        col = mix(col, gl.rgb, gl.a);
+    }
+    if (l.lamp > 0.0 && p.x > 0.95) {
+        // the lamp's glow in the air (faded out before the frame), the cone
+        // of light under its shade
+        let g = length((p - FLAMP) * vec2f(1.0, 1.4));
+        col += col_kelvin(2800.0) * l.lamp * (0.04 * exp(-g * 14.0) + 0.012 * exp(-g * 3.5)) * sstep(0.95, 1.3, p.x);
+        let below = FLAMP.y - 0.055 - p.y;
+        let cone = exp(-sq((p.x - FLAMP.x) / (0.07 + 0.35 * max(below, 0.0)))) * sstep(0.0, 0.02, below) * exp(-max(below, 0.0) * 2.5);
+        col += col_kelvin(2800.0) * l.lamp * 0.012 * cone;
+        let gs = length((p - SCONCE) * vec2f(1.0, 1.3));
+        col += col_kelvin(2600.0) * l.lamp * (0.03 * exp(-gs * 18.0) + 0.008 * exp(-gs * 4.0));
+    }
+    if (l.lamp > 0.0 && p.x < -0.95) {
+        let gs = length((p - SCONCE_L) * vec2f(1.0, 1.3));
+        col += col_kelvin(2600.0) * l.lamp * (0.03 * exp(-gs * 18.0) + 0.008 * exp(-gs * 4.0)) * sstep(-0.95, -1.2, p.x);
+    }
+
+    // ---- dawn: a shaft of light full of dust (from whichever window is near)
     var shaft = 0.0;
     if (l.shaft > 0.0) {
         let dir = normalize(vec2f(0.42, -0.6));
+        let sc = select(WIN_C, WIN2_C, p.x > 1.5);
         for (var i = 0; i < 10; i++) {
             let s = (f32(i) + 0.5) * 0.055;
             let q = p - dir * s;
-            shaft += aa_fill_w(win_d(q), 0.03) * (1.0 - leads(q, 0.01) * 0.7) * exp(-s * 1.5);
+            shaft += aa_fill_w(win_d(q, sc), 0.03) * (1.0 - leads(q, sc, 0.01) * 0.7) * exp(-s * 1.5);
         }
         shaft /= 10.0;
-        col += l.win_c * shaft * 0.16 * smoothstep(-0.02, 0.05, win_d(p));
+        col += l.win_c * shaft * 0.16 * smoothstep(-0.02, 0.05, win_d(p, sc));
     }
 
-    // ---- the desk
-    if (p.y < DESK_BACK) {
+    // ---- the desk (its right end lies beyond the frame)
+    let dv = (p.y - DESK_FRONT) / (DESK_BACK - DESK_FRONT);
+    let desk_x = DESK_R / mix(1.0, 1.25, saturate(dv));
+    if (p.y < DESK_BACK && abs(p.x) < desk_x + aa) {
         // top surface in perspective: z from far (back edge) to near
-        let v = (p.y - DESK_FRONT) / (DESK_BACK - DESK_FRONT);
+        let v = dv;
         let pz = mix(-0.95, -0.35, v);
         let pos = vec3f(p.x, -0.3, pz);
         let dn = vec3f(0.0, 1.0, 0.0);
@@ -337,7 +584,8 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
         dc += col_kelvin(1850.0) * l.candle * 0.06 * exp(-sq((p.x - CANDLE.x) / 0.02) - sq((p.y + 0.3) / 0.05));
         // dawn patch on the desk
         dc += l.win_c * shaft * 0.5 * alb * 4.0;
-        col = dc;
+        // the end of the top catches the light along its edge
+        dc += col_kelvin(2700.0) * 0.004 * sstep(0.012, 0.0, desk_x - abs(p.x)) * l.lamp;
         // front edge of the desk: moulding and apron
         if (p.y < DESK_FRONT) {
             let fy = (DESK_FRONT - p.y);
@@ -347,7 +595,11 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
             // brass drawer pull
             let pull = length((p - vec2f(0.0, DESK_FRONT - 0.03)) * vec2f(0.5, 1.0)) - 0.008;
             ac = mix(ac, col_hex(0xb8903cu) * 0.6 * room_light(vec3f(p, -0.3), vec3f(0.0, 0.3, -1.0), l, t, flash), aa_fill(pull, ctx));
-            col = ac;
+            // the corner post at the desk's end
+            ac *= 1.0 + 0.5 * sstep(0.02, 0.0, abs(abs(p.x) - DESK_R + 0.02) - 0.01) * sstep(0.3, 0.0, fy);
+            col = mix(col, ac, aa_fill(abs(p.x) - DESK_R, ctx));
+        } else {
+            col = mix(col, dc, aa_fill(abs(p.x) - desk_x, ctx));
         }
     }
 
@@ -450,8 +702,9 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
             let mote = smoothstep(r, r * 0.3, d) * (0.4 + 0.6 * h.z) * (0.06 / r);
             let lampzone = exp(-sq((p.x - LAMP.x) / 0.16) - sq((p.y + 0.18) / 0.12)) * l.lamp;
             let candlezone = exp(-sq((p.x - CANDLE.x) / 0.1) - sq((p.y - CANDLE.y - 0.05) / 0.1)) * l.candle;
-            col += (l.win_c * shaft * 2.0 + col_kelvin(2700.0) * lampzone * 1.4 + col_kelvin(1900.0) * candlezone * 0.8) * mote
-                   * smoothstep(DESK_BACK - 0.01, DESK_BACK + 0.03, p.y);
+            let floorzone = exp(-sq((p.x - FLAMP.x) / 0.18) - sq((p.y - FLAMP.y + 0.2) / 0.2)) * l.lamp;
+            col += (l.win_c * shaft * 2.0 + col_kelvin(2700.0) * (lampzone * 1.4 + floorzone) + col_kelvin(1900.0) * candlezone * 0.8) * mote
+                   * max(smoothstep(DESK_BACK - 0.01, DESK_BACK + 0.03, p.y), step(DESK_R, abs(p.x)));
         }
     }
     return col * exp2(l.exposure);

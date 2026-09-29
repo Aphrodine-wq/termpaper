@@ -11,16 +11,40 @@
 
 // A log cabin at night. The room is drawn in screen space but every surface
 // carries a pseudo-3D position (x, y on screen, z toward the viewer) and a
-// normal, lit by one point light: the fire. Its flicker is weighted by
-// distance, so the hearth breathes while the far walls hold steady (a whole
-// room flickering would repaint every terminal cell every frame).
+// normal, lit by the fire. Its flicker is weighted by distance, so the hearth
+// breathes while the far walls hold steady (a whole room flickering would
+// repaint every terminal cell every frame).
+//
+// Past the frame the room goes on: coats and snowshoes on a peg rail, then a
+// second window with an oil lantern on its sill (a steady second light, so
+// the far wall never falls to black), a blanket chest under it, joists across
+// the ceiling above and the floorboards below. Far left, a shelf with a small
+// oil lamp, crocks and a skillet.
 
 const FIRE: vec2f = vec2f(0.12, -0.215);       // base of the flames
 const OPEN_C: vec2f = vec2f(0.12, -0.16);      // firebox opening centre
 const OPEN_H: vec2f = vec2f(0.19, 0.14);       // opening half size
 const FLOOR_Y: f32 = -0.36;
+const CEIL_Y: f32 = 0.51;                      // wall meets ceiling
+const VP: vec2f = vec2f(0.1, 0.05);            // vanishing point of floor and ceiling
 const WIN_C: vec2f = vec2f(-0.6, 0.1);
 const WIN_H: vec2f = vec2f(0.17, 0.2);
+const WIN2_C: vec2f = vec2f(2.24, 0.1);        // the second window, beyond the frame
+const LANT: vec2f = vec2f(2.1, -0.08);         // lantern flame, on that window's sill
+const PEG_Y: f32 = 0.235;                      // peg rail right of the armchair
+const OIL: vec2f = vec2f(-1.5, 0.215);         // oil lamp flame, on the far-left shelf
+const SHELF_Y: f32 = 0.16;                     // top of that shelf
+
+// The entry point continues past the frame's edge as a cylinder, which suits
+// a 3D camera; this room is painted flat, so undo it and keep the desk's own
+// scale there (a window stays square on a portrait monitor beside the row).
+// Identity inside the frame.
+fn flat_p(p: vec2f, ctx: Ctx) -> vec2f {
+    let hx = ctx.half.x;
+    let a = abs(p.x);
+    if (a <= hx) { return p; }
+    return vec2f(sign(p.x) * (hx + (atan(a) - atan(hx)) * (1.0 + hx * hx)), p.y);
+}
 
 struct Look {
     mode: u32,        // 0 snow, 1 rain, 2 autumn
@@ -72,6 +96,95 @@ fn hearth_lit(pos: vec3f, n: vec3f, l: Look, flick: f32) -> vec3f {
     return hearth_c() * k * (direct + bounce);
 }
 
+// the oil lantern: steady (a wick behind glass barely moves), warm, small
+fn lant_c() -> vec3f { return vec3f(1.0, 0.64, 0.32); }
+
+fn lantern_lit(pos: vec3f, n: vec3f, l: Look) -> vec3f {
+    let d = vec3f(LANT, -0.1) - pos;
+    let dist2 = dot(d, d);
+    let ld = d * inverseSqrt(dist2);
+    // the cap throws a soft shadow upward
+    let up = 1.0 - 0.5 * smoothstep(0.2, 0.9, -ld.y);
+    // (windowed so it fades out before reaching the frame)
+    return lant_c() * l.fire * (max(dot(n, ld), 0.0) * 0.04 * up / (dist2 + 0.015) + 0.032 / (1.0 + dist2 * 4.0)) * exp(-dist2 * 0.9);
+}
+
+// the small oil lamp far left: a short reach, and none of it toward the
+// frame (so the approved composition is untouched)
+fn oil_lit(pos: vec3f, n: vec3f, l: Look) -> vec3f {
+    let d = vec3f(OIL, -0.06) - pos;
+    let dist2 = dot(d, d);
+    let ld = d * inverseSqrt(dist2);
+    let reach = exp(-dist2 * 5.0) * exp(-sq(max(pos.x - OIL.x - 0.35, 0.0)) * 25.0);
+    return lant_c() * l.fire * (max(dot(n, ld), 0.0) * 0.03 / (dist2 + 0.012) + 0.025 / (1.0 + dist2 * 4.0)) * reach;
+}
+
+// Everything away from the hearth: the fire (with its distance-weighted
+// flicker), the lanterns, and a warm floor of bounce light that fades slowly
+// with distance so the far corners stay readable, never black.
+fn room_lit(pos: vec3f, n: vec3f, l: Look, flick: f32) -> vec3f {
+    let dx = abs(pos.x - FIRE.x);
+    let far = hearth_c() * l.fire * 0.016 * smoothstep(0.92, 1.6, abs(pos.x)) / (1.0 + 0.15 * dx * dx + 0.6 * sq(pos.y - FIRE.y));
+    return hearth_lit(pos, n, l, flick) + lantern_lit(pos, n, l) + oil_lit(pos, n, l) + far;
+}
+
+// Far left: a plank shelf on brackets with a small oil lamp and two
+// stoneware crocks, a cast-iron skillet hung on a nail below.
+fn shelf_left(p: vec2f, col_in: vec3f, l: Look, flick: f32, ctx: Ctx) -> vec3f {
+    var col = col_in;
+    // skillet on its nail
+    let sk = p - vec2f(-1.36, -0.07);
+    let pan = min(sdf2_circle(sk, 0.062), sdf2_round_box(sk - vec2f(0.0, 0.095), vec2f(0.011, 0.045), 0.006));
+    let pa = aa_fill(pan, ctx);
+    if (pa > 0.0) {
+        let rim = smoothstep(-0.012, -0.004, sdf2_circle(sk, 0.062)) * step(sk.y, 0.06);
+        let n = normalize(vec3f(sk.x * 5.0, sk.y * 5.0, -1.0));
+        let pc = vec3f(0.012) * (room_lit(vec3f(p, -0.03), n, l, flick) + l.amb) + lant_c() * l.fire * 0.01 * rim * smoothstep(-0.1, 0.05, sk.y);
+        col = mix(col, pc, pa);
+    }
+    // the shelf board and its two brackets
+    let board = sdf2_box(p - vec2f(-1.4, SHELF_Y - 0.012), vec2f(0.24, 0.012));
+    let brk = min(sdf2_segment(p, vec2f(-1.58, SHELF_Y - 0.02), vec2f(-1.58, SHELF_Y - 0.1)), sdf2_segment(p, vec2f(-1.22, SHELF_Y - 0.02), vec2f(-1.22, SHELF_Y - 0.1))) - 0.009;
+    let ba = aa_fill(min(board, brk), ctx);
+    if (ba > 0.0) {
+        let top = smoothstep(SHELF_Y - 0.006, SHELF_Y, p.y);
+        let n = normalize(vec3f(0.0, mix(-0.4, 1.0, top), -1.0));
+        let bc = col_hex(0x5a3c22u) * 0.5 * (0.85 + 0.2 * noise_value2(vec2f(p.x * 30.0, p.y * 200.0))) * (room_lit(vec3f(p, -0.05), n, l, flick) + l.amb);
+        col = mix(col, bc, ba);
+    }
+    // two crocks: cream stoneware with brown-glazed shoulders
+    for (var k = 0; k < 2; k++) {
+        let fk = f32(k);
+        let c = vec2f(-1.34 + fk * 0.075, SHELF_Y + 0.045 - fk * 0.012);
+        let hs = 0.045 - fk * 0.012;
+        let q = p - c;
+        let body = sdf2_round_box(q, vec2f(0.026 - fk * 0.004, hs), 0.018);
+        let neck = sdf2_box(q - vec2f(0.0, hs + 0.006), vec2f(0.01, 0.008));
+        let ca = aa_fill(min(body, neck), ctx);
+        if (ca > 0.0) {
+            var alb = mix(col_hex(0xc8b890u), col_hex(0x6a3a1cu), smoothstep(hs * 0.35, hs * 0.5, q.y)) * 0.5;
+            let n = normalize(vec3f(q.x / 0.026 * 0.8, 0.2, -1.0));
+            col = mix(col, alb * (room_lit(vec3f(p, -0.08), n, l, flick) + l.amb), ca);
+        }
+    }
+    // the oil lamp: glass font, a tall chimney, the flame inside
+    let q = p - OIL;
+    let font = sdf2_round_box(q - vec2f(0.0, -0.035), vec2f(0.022, 0.016), 0.012);
+    let foot = sdf2_box(q - vec2f(0.0, -0.052), vec2f(0.016, 0.004));
+    let chim = sdf2_round_box(q - vec2f(0.0, 0.012), vec2f(0.011 + 0.005 * exp(-sq(q.y / 0.012)), 0.034), 0.006);
+    let fa = aa_fill(min(font, foot), ctx);
+    if (fa > 0.0) {
+        col = mix(col, col_hex(0x8a6a3au) * 0.4 * (room_lit(vec3f(p, -0.08), vec3f(0.0, 0.3, -1.0), l, flick) + l.amb) + lant_c() * l.fire * 0.03, fa);
+    }
+    let cha = aa_fill(chim, ctx);
+    if (cha > 0.0) {
+        let fq = q * vec2f(1.0, 0.5);
+        let fl = exp(-dot(fq, fq) / 0.00005);
+        col = mix(col, col * 0.6 + lant_c() * l.fire * (0.18 + 1.5 * fl), cha);
+    }
+    return col;
+}
+
 // ------------------------------------------------------------------ materials
 // cellular stones: (F1, F2, cell id hash) at p
 fn stones(p: vec2f) -> vec3f {
@@ -119,8 +232,8 @@ fn log_wall(p: vec2f) -> vec3f {
 }
 
 // ------------------------------------------------------------------ outside
-fn outside(p: vec2f, l: Look, ctx: Ctx) -> vec3f {
-    let q = p - WIN_C;
+fn outside(p: vec2f, wc: vec2f, l: Look, ctx: Ctx) -> vec3f {
+    let q = p - wc;
     var c = mix(l.sky_low, l.sky_top, smoothstep(-0.05, 0.2, q.y));
     if (l.mode == 0u) {
         // moonlit clearing: firs at two distances on bright snow
@@ -172,8 +285,180 @@ fn outside(p: vec2f, l: Look, ctx: Ctx) -> vec3f {
     return c;
 }
 
+// ------------------------------------------------------------------ beyond the frame
+// Board ceiling on round joists, in perspective: only a portrait monitor (or
+// one standing beside the row) looks up far enough to see it.
+fn ceiling(p: vec2f, l: Look, flick: f32, aa: f32) -> vec3f {
+    let z = (CEIL_Y - VP.y) * 0.29 / max(p.y - VP.y, 0.01);   // 0.29 at the wall, smaller toward us
+    let wx = (p.x - VP.x) * z;
+    let bi = floor(wx / 0.11);
+    let bf = fract(wx / 0.11);
+    let hb = hash_f(u32(bi + 700.0));
+    let lod = saturate(1.0 - aa * z * 25.0);
+    let seam = smoothstep(0.05, 0.0, min(bf, 1.0 - bf)) * lod;
+    var alb = mix(col_hex(0x6a4a30u), col_hex(0x80603eu), hb) * 0.4 * (0.85 + 0.2 * noise_value2(vec2f(wx * 20.0, z * 4.0)));
+    alb *= 1.0 - 0.55 * seam;
+    var n = vec3f(0.0, -1.0, 0.0);
+    // joists across the room every 0.045 of depth, hanging below the boards
+    let jz = (0.29 - z) / 0.045;
+    let u = fract(jz) - 0.5;
+    let jw = 0.17;
+    let beam = smoothstep(jw + 0.03, jw, abs(u)) * step(0.5, jz);
+    if (beam > 0.0) {
+        let ja = col_hex(0x5a3a22u) * 0.45 * (0.85 + 0.2 * noise_value2(vec2f(p.x * 10.0, jz * 30.0))) * (0.7 + 0.3 * (1.0 - sq(u / jw)));
+        alb = mix(alb, ja, beam);
+        n = normalize(mix(n, vec3f(0.0, -1.0, -u / jw * 1.4), beam));
+    } else {
+        // the boards just behind each joist sit in its shadow
+        alb *= 0.6 + 0.4 * smoothstep(0.0, 0.25, u + 0.5 - jw) * step(0.5, jz) + 0.4 * step(jz, 0.5);
+    }
+    let pos = vec3f(p.x, CEIL_Y + 0.02, -(0.29 - z) * 0.8);
+    return alb * (room_lit(pos, n, l, flick) * 2.5 + l.amb);
+}
+
+// Pegs right of the armchair: a buffalo-check coat, a striped scarf, a pair
+// of snowshoes. Returns (colour, coverage).
+fn pegs(p: vec2f, l: Look, flick: f32, ctx: Ctx) -> vec4f {
+    let aa = ctx.px;
+    var c = vec3f(0.0);
+    var a = 0.0;
+    // the rail and its three pegs
+    let rail = sdf2_box(p - vec2f(1.34, PEG_Y), vec2f(0.28, 0.014));
+    let ra = aa_fill(rail, ctx);
+    if (ra > 0.0) {
+        let rn = normalize(vec3f(0.0, (p.y - PEG_Y) / 0.014 * 0.8, -1.0));
+        c = col_hex(0x4a2e18u) * 0.45 * room_lit(vec3f(p, -0.01), rn, l, flick);
+        a = ra;
+    }
+    // coat: shoulders, a long body flaring to the hem, folds down its length
+    let cq = p - vec2f(1.15, 0.0);
+    let hw = mix(0.082, 0.064, saturate((cq.y + 0.25) / 0.4));
+    let body = max(abs(cq.x) - hw, max(cq.y - 0.16, -cq.y - 0.27));
+    let coat = min(op_smin(body, sdf2_round_box(cq - vec2f(0.0, 0.17), vec2f(0.07, 0.05), 0.04), 0.03),
+                   sdf2_circle(cq - vec2f(0.0, 0.215), 0.022));
+    let ca = aa_fill(coat, ctx);
+    if (ca > 0.0) {
+        let chk = step(0.5, fract((p.x - 1.15) * 15.0 + 0.25)) + step(0.5, fract(p.y * 15.0));
+        var alb = mix(col_hex(0xb8301cu), col_hex(0x1a0e0au), chk * 0.42) * 0.6;
+        let fold = (0.8 + 0.2 * sin(cq.x * 70.0 + 1.5) * smoothstep(0.12, -0.1, cq.y))
+                 * (1.0 - 0.6 * smoothstep(0.008, 0.0, abs(abs(cq.x) - 0.045)) * step(cq.y, 0.13) * step(-0.06, cq.y));
+        let cn = normalize(vec3f(cq.x / hw * 0.8, 0.25, -1.0));
+        let edge = smoothstep(0.0, -0.02, coat);
+        let lit = alb * fold * (0.55 + 0.45 * edge) * (room_lit(vec3f(p, -0.06), cn, l, flick) + l.amb);
+        c = mix(c, lit, ca);
+        a = max(a, ca);
+    }
+    // scarf: two tails hanging from the middle peg, green bands on cream
+    let sq_ = p - vec2f(1.345, 0.0);
+    let tails = min(sdf2_round_box(sq_ - vec2f(-0.022, 0.07), vec2f(0.016, 0.16), 0.006),
+                    sdf2_round_box(sq_ - vec2f(0.02, 0.1), vec2f(0.016, 0.13), 0.006));
+    let sa = aa_fill(tails, ctx);
+    if (sa > 0.0) {
+        let band = step(0.5, fract(p.y * 16.0));
+        var alb = mix(col_hex(0xd0c4a4u), col_hex(0x3a7a5au), band) * 0.5;
+        alb *= 0.8 + 0.2 * step(0.5, fract(p.x * 120.0));
+        let lit = alb * (room_lit(vec3f(p, -0.04), vec3f(0.0, 0.2, -1.0), l, flick) + l.amb);
+        c = mix(c, lit, sa);
+        a = max(a, sa);
+    }
+    // snowshoes: two bent-ash teardrops laced with rawhide, hung by a strap
+    for (var k = 0; k < 2; k++) {
+        let fk = f32(k);
+        let o = vec2f(1.515 + fk * 0.045, 0.02 - fk * 0.012);
+        let q = rot2(0.1 - fk * 0.2) * (p - o);
+        let e = length(q / vec2f(0.058, 0.15)) - 1.0;
+        let tail = sdf2_segment(q, vec2f(0.0, -0.14), vec2f(0.0, -0.24)) - 0.006;
+        let outer = min(e * 0.058, tail);
+        let ea = aa_fill(outer, ctx);
+        if (ea > 0.0) {
+            let rim = aa_fill(abs(e * 0.058) - 0.006, ctx);
+            let lace = max(smoothstep(0.2, 0.0, abs(fract((q.x + q.y) * 34.0) - 0.5) - 0.3),
+                           smoothstep(0.2, 0.0, abs(fract((q.x - q.y) * 34.0) - 0.5) - 0.3));
+            // the wall shows through the open lacing
+            var alb = mix(col_hex(0xc8b088u) * 0.4, col_hex(0xb08850u) * 0.55, max(rim, step(0.0, e)));
+            let lit = alb * (room_lit(vec3f(p, -0.05), vec3f(0.0, 0.1, -1.0), l, flick) + l.amb);
+            let cov = ea * max(max(rim, step(0.0, e)), lace * 0.85 * saturate(1.5 - aa * 60.0));
+            c = mix(c, lit, cov);
+            a = max(a, cov);
+        }
+    }
+    // the strap over the peg
+    let strap = sdf2_segment(p, vec2f(1.52, PEG_Y), vec2f(1.535, 0.16)) - 0.004;
+    let sta = aa_fill(strap, ctx);
+    c = mix(c, col_hex(0x2a1a10u) * 0.3 * (room_lit(vec3f(p, -0.03), vec3f(0.0, 0.0, -1.0), l, flick) + l.amb), sta);
+    a = max(a, sta);
+    // peg knobs in front of everything
+    let knob = min(min(sdf2_circle(p - vec2f(1.15, PEG_Y), 0.012), sdf2_circle(p - vec2f(1.345, PEG_Y), 0.012)), sdf2_circle(p - vec2f(1.525, PEG_Y), 0.012));
+    let ka = aa_fill(knob, ctx);
+    c = mix(c, col_hex(0x5a3a20u) * 0.5 * (room_lit(vec3f(p, -0.03), normalize(vec3f(0.0, 0.5, -1.0)), l, flick) + l.amb), ka);
+    a = max(a, ka);
+    return vec4f(c, a);
+}
+
+// The sill, the lantern standing on it, the blanket chest below.
+fn window2_props(p: vec2f, col_in: vec3f, l: Look, flick: f32, ctx: Ctx) -> vec3f {
+    let aa = ctx.px;
+    var col = col_in;
+    // sill: a thick plank with a lit top face
+    let sy = WIN2_C.y - WIN_H.y - 0.035;
+    let sd = sdf2_box(p - vec2f(WIN2_C.x, sy - 0.012), vec2f(0.24, 0.016));
+    if (sd < aa) {
+        let top = smoothstep(sy - 0.004, sy + 0.002, p.y);
+        let n = normalize(vec3f(0.0, mix(-0.3, 1.2, top), -1.0));
+        let sc = col_hex(0x5a3c22u) * 0.5 * (0.85 + 0.2 * noise_value2(vec2f(p.x * 30.0, p.y * 200.0))) * (room_lit(vec3f(p, -0.06), n, l, flick) + l.amb);
+        col = mix(col, sc, aa_fill(sd, ctx));
+    }
+    // blanket chest on the floor, iron straps, a folded quilt on the lid
+    let chest = sdf2_round_box(p - vec2f(WIN2_C.x + 0.02, -0.325), vec2f(0.22, 0.075), 0.01);
+    if (chest < aa) {
+        let lid = smoothstep(-0.26, -0.257, p.y);
+        let n = normalize(vec3f(0.0, mix(0.35, 1.0, lid), -1.0));
+        let plank = 0.85 + 0.15 * step(0.5, fract((p.y + 0.3) / 0.045));
+        var alb = col_hex(0x7a4828u) * 0.55 * plank * (0.85 + 0.2 * noise_value2(vec2f(p.x * 25.0, p.y * 90.0)));
+        let strap = step(abs(abs(p.x - WIN2_C.x - 0.02) - 0.13), 0.012);
+        alb = mix(alb, vec3f(0.02), strap);
+        var cc = alb * (room_lit(vec3f(p, -0.12), n, l, flick) + l.amb);
+        cc += lant_c() * l.fire * 0.01 * strap * smoothstep(-0.3, -0.2, p.y);   // iron catches the lantern
+        // shadow at the foot where it meets the floor
+        cc *= 0.55 + 0.45 * smoothstep(-0.4, -0.36, p.y);
+        col = mix(col, cc, aa_fill(chest, ctx));
+    }
+    let quilt = sdf2_round_box(p - vec2f(WIN2_C.x + 0.08, -0.232), vec2f(0.12, 0.024), 0.01);
+    if (quilt < aa) {
+        let cell = vec2i(floor(vec2f(p.x * 22.0, (p.y + 0.256) * 60.0)));
+        let hq = hash_cell2(cell, 0x9017u);
+        var qc = col_hex(0xb8ac90u);
+        if (hq.x < 0.3) { qc = col_hex(0x8a2a1eu); } else if (hq.x < 0.5) { qc = col_hex(0x2a4a6au); } else if (hq.x < 0.62) { qc = col_hex(0xb07a2au); }
+        let fold = 0.75 + 0.25 * smoothstep(-0.256, -0.216, p.y);
+        let lit = qc * 0.4 * fold * (room_lit(vec3f(p, -0.14), normalize(vec3f(0.0, 0.6, -1.0)), l, flick) + l.amb);
+        col = mix(col, lit, aa_fill(quilt, ctx));
+    }
+    // the lantern: tin base and cap, a glass chimney, a wire bail
+    let q = p - LANT;
+    let glass = sdf2_round_box(q - vec2f(0.0, 0.0), vec2f(0.026, 0.036), 0.014);
+    let base = sdf2_round_box(q - vec2f(0.0, -0.043), vec2f(0.034, 0.01), 0.004);
+    let cap = min(sdf2_round_box(q - vec2f(0.0, 0.043), vec2f(0.03, 0.008), 0.004), sdf2_box(q - vec2f(0.0, 0.056), vec2f(0.012, 0.008)));
+    let bail = abs(length((q - vec2f(0.0, 0.05)) * vec2f(1.0, 1.2)) - 0.04) - 0.0025;
+    let tin = min(min(base, cap), max(bail, -(q.y - 0.05)));
+    let gm = aa_fill(glass, ctx);
+    if (gm > 0.0) {
+        // the flame and the glass glowing around it
+        let fq = (q - vec2f(0.0, -0.012)) * vec2f(1.0, 0.55);
+        let fl = exp(-dot(fq, fq) / 0.00012);
+        let gc = lant_c() * l.fire * (0.35 + 1.6 * fl + 0.25 * exp(-dot(q, q) / 0.0012));
+        col = mix(col, gc, gm);
+    }
+    let tm = aa_fill(tin, ctx);
+    if (tm > 0.0) {
+        let tc = col_hex(0x3a3a38u) * 0.3 * (room_lit(vec3f(p, -0.12), normalize(vec3f(0.0, 0.3, -1.0)), l, flick) + l.amb) + lant_c() * l.fire * 0.012 * smoothstep(0.05, 0.02, abs(q.y));
+        col = mix(col, tc, tm);
+    }
+    return col;
+}
+
 // ------------------------------------------------------------------ scene
-fn scene(p: vec2f, ctx: Ctx) -> vec3f {
+fn scene(pw: vec2f, ctx: Ctx) -> vec3f {
+    let p = flat_p(pw, ctx);
     let l = look(ctx.theme);
     let t = ctx.t;
     let flick = (fire_light(t * 0.7) - 0.95) * 1.4;
@@ -192,14 +477,20 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
         var alb = mix(col_hex(0x7a5634u), col_hex(0x9c7448u), lw.z) * 0.45 * grain;
         alb = mix(alb, col_hex(0xb0a080u) * 0.35, lw.y);
         let pos = vec3f(p, 0.02);
-        col = alb * (hearth_lit(pos, n, l, flick) + l.amb * (1.0 + ny * 0.5) + l.fill * smoothstep(0.1, -0.7, p.x) * 0.6);
+        // window light: from the first window over the left wall, from the
+        // second over the far wall
+        let fill = smoothstep(0.1, -0.7, p.x) + 0.8 * exp(-abs(p.x - WIN2_C.x) * 2.5) * smoothstep(1.0, 1.6, p.x);
+        col = alb * (room_lit(pos, n, l, flick) + l.amb * (1.0 + ny * 0.5) + l.fill * fill * 0.6);
         // ceiling beam
         if (p.y > 0.43) {
             let bv = saturate((p.y - 0.43) / 0.08);
             let bn = normalize(vec3f(0.0, -1.0 + bv, -1.0));
-            let ba = col_hex(0x3a2616u) * 0.4 * (0.85 + 0.2 * noise_value2(vec2f(p.x * 12.0, p.y * 60.0)));
-            col = ba * (hearth_lit(vec3f(p, -0.05), bn, l, flick) * 0.8 + l.amb);
-            if (p.y > 0.51) { col = col_hex(0x2a1c10u) * 0.3 * (hearth_lit(vec3f(p, 0.0), vec3f(0.0, -1.0, 0.0), l, flick) * 0.5 + l.amb); }
+            // beyond the frame, where the ceiling shows above it, the beam
+            // turns its lit underside to the lantern
+            let far_k = smoothstep(1.0, 1.9, abs(p.x));
+            let ba = mix(col_hex(0x3a2616u) * 0.4, col_hex(0x5a3a22u) * 0.45, far_k) * (0.85 + 0.2 * noise_value2(vec2f(p.x * 12.0, p.y * 60.0)));
+            col = ba * (room_lit(vec3f(p, -0.05), bn, l, flick) * (0.8 + 1.7 * far_k * (1.0 - bv)) + l.amb);
+            if (p.y > CEIL_Y) { col = ceiling(p, l, flick, aa); }
         }
     }
     if (breast && p.y < 0.43) {
@@ -218,28 +509,36 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
         col *= 0.75 + 0.25 * smoothstep(0.0, 0.02, min(p.x + 0.28, 0.52 - p.x));
     }
 
-    // ---- window with its view out
-    let wq = p - WIN_C;
+    // ---- windows with their view out (the second one lies beyond the frame)
+    let second = p.x > 0.9;
+    let wc = select(WIN_C, WIN2_C, second);
+    let wq = p - wc;
     let wd = sdf2_box(wq, WIN_H);
     if (wd < 0.035) {
         // plank trim around the window, lit a little by the fire
-        let trim = col_hex(0x5a3c22u) * 0.45 * (hearth_lit(vec3f(p, -0.02), vec3f(0.3, 0.0, -1.0), l, flick) + l.amb + l.fill * 0.8);
+        let trim = col_hex(0x5a3c22u) * 0.45 * (room_lit(vec3f(p, -0.02), vec3f(0.3, 0.0, -1.0), l, flick) + l.amb + l.fill * 0.8);
         col = mix(col, trim, aa_fill(wd - 0.035, ctx));
     }
     if (wd < 0.0) {
-        var o = outside(p, l, ctx);
+        var o = outside(p, wc, l, ctx);
         if (l.mode == 1u) {
             let rg = rain_glass(p * 1.4, t, ctx);
-            o = outside(p + rg.xy * 0.6, l, ctx) * (1.0 + rg.z * 0.4);
+            o = outside(p + rg.xy * 0.6, wc, l, ctx) * (1.0 + rg.z * 0.4);
         }
-        // the glass holds a faint reflection of the fire
-        let rf = exp(-sq((p.x - (WIN_C.x + 0.07)) / 0.035) - sq((p.y - (WIN_C.y - 0.12)) / 0.04));
-        o += hearth_c() * rf * 0.05 * l.fire * (1.0 + flick * 0.5);
+        // the glass holds a faint reflection of the fire; the second, of
+        // the lantern standing in front of it
+        if (second) {
+            let rl = exp(-sq((p.x - LANT.x - 0.015) / 0.05) - sq((p.y - LANT.y - 0.03) / 0.07));
+            o += lant_c() * rl * 0.06 * l.fire;
+        } else {
+            let rf = exp(-sq((p.x - (WIN_C.x + 0.07)) / 0.035) - sq((p.y - (WIN_C.y - 0.12)) / 0.04));
+            o += hearth_c() * rf * 0.05 * l.fire * (1.0 + flick * 0.5);
+        }
         // muntins: 2 x 3 panes
         let mx = abs(fract((wq.x + WIN_H.x) / (WIN_H.x * 2.0 / 2.0)) - 0.5);
         let my = abs(fract((wq.y + WIN_H.y) / (WIN_H.y * 2.0 / 3.0)) - 0.5);
         let mun = max(1.0 - smoothstep(0.018, 0.03, mx * WIN_H.x * 2.0 / 2.0 * 2.0 * 0.5), 1.0 - smoothstep(0.012, 0.02, my * WIN_H.y * 2.0 / 3.0 * 2.0 * 0.5));
-        let munc = col_hex(0x4a3220u) * 0.4 * (l.amb * 2.0 + l.fill * 1.5 + hearth_lit(vec3f(p, -0.01), vec3f(0.3, 0.0, -1.0), l, flick) * 0.6);
+        let munc = col_hex(0x4a3220u) * 0.4 * (l.amb * 2.0 + l.fill * 1.5 + room_lit(vec3f(p, -0.01), vec3f(0.3, 0.0, -1.0), l, flick) * 0.6);
         o = mix(o, munc, mun);
         // snow banked in the pane corners
         if (l.mode == 0u) {
@@ -250,6 +549,17 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
             o = mix(o, col_hex(0xd8e4f4u) * 0.35, smoothstep(0.02, -0.02, py - bank) * (1.0 - mun) * bottom_row);
         }
         col = mix(col, o, aa_fill(wd, ctx));
+    }
+
+    // ---- far left: the shelf, the oil lamp, the skillet
+    if (p.x < -1.05 && p.x > -1.7 && p.y > -0.16 && p.y < 0.28) {
+        col = shelf_left(p, col, l, flick, ctx);
+    }
+
+    // ---- coats and snowshoes on the peg rail
+    if (p.x > 0.98 && p.x < 1.7 && abs(p.y - 0.0) < 0.3) {
+        let pg = pegs(p, l, flick, ctx);
+        col = mix(col, pg.rgb, pg.a);
     }
 
     // ---- mantel beam and what stands on it
@@ -397,25 +707,39 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
         var fa = mix(col_hex(0x7a4e2cu), col_hex(0x9a6a3cu), hp) * 0.45 * (0.85 + 0.2 * noise_value2(vec2f(wx * 3.0, z * 0.6)));
         fa *= 1.0 - 0.5 * seam;
         let fpos = vec3f(p.x, FLOOR_Y, -(z - 0.3) * 0.25);
-        var fc = fa * (hearth_lit(fpos, vec3f(0.0, 1.0, 0.0), l, flick) * 1.4 + l.amb + l.fill * 0.5 * smoothstep(0.0, -0.8, p.x));
+        var fc = fa * (room_lit(fpos, vec3f(0.0, 1.0, 0.0), l, flick) * 1.4 + l.amb + l.fill * 0.5 * smoothstep(0.0, -0.8, p.x));
         // glossy floor catches the firelight
         fc += hearth_c() * 0.02 * l.fire * exp(-sq((p.x - FIRE.x) / 0.12)) * smoothstep(FLOOR_Y - 0.12, FLOOR_Y, p.y) * (1.0 + flick * 0.5);
         // the rug: concentric braided rings
         let rq = vec2f(wx - 0.02, (z - 0.55) * 0.9);
         let rd = length(rq / vec2f(0.95, 0.42));
         if (rd < 1.0) {
-            let ring = fract(rd * 7.0);
-            let band = u32(floor(rd * 7.0));
+            // seven broad rings, then (only seen close up, from a portrait
+            // monitor) a border of narrow braids in the same colours
+            let rb = select(rd * 7.0, 6.0 + (rd - 6.0 / 7.0) * 70.0, rd > 6.0 / 7.0);
+            let ring = fract(rb);
+            let band = u32(floor(rb));
             var rc = col_hex(0x7a3a2au);
             if (band % 4u == 1u) { rc = col_hex(0x9a8058u); }
             if (band % 4u == 2u) { rc = col_hex(0x3a4450u); }
             if (band % 4u == 3u) { rc = col_hex(0xb8ac90u); }
+            if (band >= 6u) { rc = mix(rc, col_hex(0x8a5a40u), 0.65); }
             let braid = 0.85 + 0.15 * sin(atan2(rq.y, rq.x) * 60.0 + ring * 6.0) * saturate(1.0 - aa * z * 20.0);
-            let rugc = mix(rc, vec3f(col_luma(rc)), 0.25) * 0.4 * braid * (hearth_lit(fpos, vec3f(0.0, 1.0, 0.0), l, flick) * 1.4 + l.amb);
-            fc = mix(fc, rugc, smoothstep(1.0, 0.97, rd));
+            let rugc = mix(rc, vec3f(col_luma(rc)), 0.25) * 0.4 * braid * (room_lit(fpos, vec3f(0.0, 1.0, 0.0), l, flick) * 1.4 + l.amb);
+            fc = mix(fc, rugc, smoothstep(1.0, 1.0 - clamp(aa * 20.0 * z * z + 0.002, 0.003, 0.03), rd));
         }
         col = fc;
     }
+
+    // ---- the far wall's sill, lantern and chest
+    if (abs(p.x - WIN2_C.x) < 0.3 && p.y < 0.0 && p.y > -0.42) {
+        col = window2_props(p, col, l, flick, ctx);
+    }
+    // halo in the air around the lantern and the oil lamp
+    let lg = length(p - LANT);
+    col += lant_c() * l.fire * (0.05 * exp(-lg * 30.0) + 0.012 * exp(-lg * 6.0));
+    let og = length((p - OIL) * vec2f(1.0, 0.8));
+    col += lant_c() * l.fire * (0.035 * exp(-og * 32.0) + 0.006 * exp(-og * 7.0)) * exp(-sq(max(p.x - OIL.x - 0.3, 0.0)) * 25.0);
 
     // ---- leather armchair, right foreground, rim-lit by the fire
     let ch = min(sdf2_round_box(p - vec2f(0.78, -0.2), vec2f(0.2, 0.3), 0.12), sdf2_round_box(p - vec2f(0.6, -0.36), vec2f(0.07, 0.16), 0.06));
