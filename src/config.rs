@@ -2,9 +2,11 @@
 //! Read on startup; the settings menu writes changes back atomically
 //! (temp file + rename). Unknown keys warn, never fail.
 
+use crate::engine::Renderer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -41,10 +43,12 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub renderer: Option<crate::engine::Renderer>,
+    pub renderer: Option<Renderer>,
     /// GPU milliseconds per frame a Studio scene may spend (default 3)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu_budget_ms: Option<f32>,
     /// fps cap while a Studio scene is showing (default 60)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub shader_fps: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pad: Option<i32>,
@@ -65,6 +69,15 @@ pub struct Config {
     /// local canvas and hides this window's geometry from peers
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wall: Option<bool>,
+    /// which scenes `cycle` rotates through: all, category or favorites
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cycle_scope: Option<String>,
+    /// scenes starred in the menu browser (`f`), in the order starred
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub favorites: Vec<String>,
+    /// scenes last switched to from the menu, newest first
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recents: Vec<String>,
     /// per-scene remembered theme
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub themes: HashMap<String, String>,
@@ -82,13 +95,166 @@ pub const DEFAULT_FADE: f32 = 0.25;
 pub const DEFAULT_CLOCK: bool = true;
 pub const DEFAULT_LINK: bool = true;
 pub const DEFAULT_GROUP: &str = "default";
+pub const DEFAULT_SCENE: &str = "rain";
 
-/// Reset stored config to defaults, keeping custom keybinds and the active scene.
+/// Which scenes the auto-cycle rotates through.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum CycleScope {
+    #[default]
+    All,
+    /// the current scene's browser category
+    Category,
+    Favorites,
+}
+
+impl CycleScope {
+    pub const ALL: [CycleScope; 3] = [CycleScope::All, CycleScope::Category, CycleScope::Favorites];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            CycleScope::All => "all",
+            CycleScope::Category => "category",
+            CycleScope::Favorites => "favorites",
+        }
+    }
+
+    /// Lenient: an unknown value falls back to `All` rather than failing the
+    /// whole config file.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "category" => CycleScope::Category,
+            "favorites" | "favourites" => CycleScope::Favorites,
+            _ => CycleScope::All,
+        }
+    }
+}
+
+/// Reset stored config to defaults, keeping custom keybinds, the active
+/// scene, and the user's favourites and recents (content, not settings).
 pub fn reset_stored_defaults(cfg: &mut Config, scene: &str) {
     let keys = std::mem::take(&mut cfg.keys);
+    let favorites = std::mem::take(&mut cfg.favorites);
+    let recents = std::mem::take(&mut cfg.recents);
     *cfg = Config::default();
     cfg.keys = keys;
+    cfg.favorites = favorites;
+    cfg.recents = recents;
     cfg.scene = Some(scene.to_string());
+}
+
+/// Round to two decimals, so repeated ±0.15 steps store `1.45`, not
+/// `1.4499998`.
+pub fn round2(v: f32) -> f32 {
+    (v * 100.0).round() / 100.0
+}
+
+/// The live settings worth remembering, in their runtime types. [`store`]
+/// turns this into config entries.
+pub struct Live<'a> {
+    pub scene: &'a str,
+    pub theme: Option<&'a str>,
+    pub pixels: &'a str,
+    /// platform default pixel mode (macOS differs); not stored when equal
+    pub default_pixels: &'a str,
+    pub detail: &'a str,
+    pub default_detail: &'a str,
+    pub filters: &'a [String],
+    pub text_scale: Option<u32>,
+    pub fps: u32,
+    pub speed: f32,
+    pub smooth: f32,
+    pub dim: f32,
+    pub fade: f32,
+    pub clock: bool,
+    pub cycle: Option<f64>,
+    pub cycle_scope: CycleScope,
+    pub hue_shift: f32,
+    pub saturation: f32,
+    pub contrast: f32,
+    pub renderer: Renderer,
+    pub link: bool,
+    pub group: &'a str,
+    pub wall: bool,
+}
+
+/// Merge live settings into `cfg`, keeping only values that differ from the
+/// built-in defaults (a default removes the entry) and rounding floats to two
+/// decimals. Keybinds, favourites, recents and other scenes' themes are left
+/// as they are.
+pub fn store(cfg: &mut Config, live: &Live) {
+    fn keep<T: PartialEq>(v: T, default: T) -> Option<T> {
+        (v != default).then_some(v)
+    }
+    cfg.scene = keep(live.scene, DEFAULT_SCENE).map(str::to_string);
+    cfg.pixels = keep(live.pixels, live.default_pixels).map(str::to_string);
+    cfg.detail = keep(live.detail, live.default_detail).map(str::to_string);
+    cfg.filters = live.filters.to_vec();
+    cfg.text_scale = live.text_scale;
+    cfg.fps = keep(live.fps, DEFAULT_FPS);
+    cfg.speed = keep(round2(live.speed), DEFAULT_SPEED);
+    cfg.smooth = keep(round2(live.smooth), DEFAULT_SMOOTH);
+    cfg.dim = keep(round2(live.dim), DEFAULT_DIM);
+    cfg.fade = keep(round2(live.fade), DEFAULT_FADE);
+    cfg.clock = keep(live.clock, DEFAULT_CLOCK);
+    cfg.cycle = live.cycle.map(|c| (c * 100.0).round() / 100.0);
+    cfg.cycle_scope = keep(live.cycle_scope, CycleScope::All).map(|s| s.name().to_string());
+    cfg.hue_shift = (live.hue_shift >= 0.5).then(|| round2(live.hue_shift));
+    cfg.saturation = keep(round2(live.saturation), 1.0);
+    cfg.contrast = keep(round2(live.contrast), 1.0);
+    // `renderer` supersedes the legacy `gpu` switch it was derived from
+    cfg.renderer = keep(live.renderer, Renderer::Auto);
+    cfg.gpu = None;
+    cfg.link = keep(live.link, DEFAULT_LINK);
+    cfg.group = keep(live.group, DEFAULT_GROUP).map(str::to_string);
+    cfg.wall = keep(live.wall, true);
+    if let Some(t) = live.theme {
+        // a scene's first theme is its default — but with a global `theme`
+        // set, an explicit per-scene entry still matters
+        let default = crate::scene::themes(live.scene).first().copied();
+        if cfg.theme.is_none() && default == Some(t) {
+            cfg.themes.remove(live.scene);
+        } else {
+            cfg.themes.insert(live.scene.to_string(), t.to_string());
+        }
+    }
+}
+
+/// Coalesces config writes: a change marks the config dirty and it is
+/// written once the window has passed, so holding an arrow key in the menu
+/// writes at most twice a second instead of once per press.
+#[derive(Default)]
+pub struct SaveTimer {
+    dirty_since: Option<Instant>,
+}
+
+impl SaveTimer {
+    pub const WINDOW: Duration = Duration::from_millis(500);
+
+    pub fn mark(&mut self, now: Instant) {
+        self.dirty_since.get_or_insert(now);
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty_since.is_some()
+    }
+
+    /// True once the window since the first unsaved change has passed;
+    /// clears the mark.
+    pub fn due(&mut self, now: Instant) -> bool {
+        match self.dirty_since {
+            Some(t) if now.saturating_duration_since(t) >= Self::WINDOW => {
+                self.dirty_since = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Write now regardless of the window (menu closed, quitting): true if
+    /// anything was pending; clears the mark.
+    pub fn take(&mut self) -> bool {
+        self.dirty_since.take().is_some()
+    }
 }
 
 pub fn config_path() -> Option<PathBuf> {
@@ -314,6 +480,8 @@ mod tests {
         };
         cfg.keys.insert("quit".into(), "x".into());
         cfg.themes.insert("fire".into(), "inferno".into());
+        cfg.favorites = vec!["koi".into()];
+        cfg.recents = vec!["fire".into()];
         reset_stored_defaults(&mut cfg, "rain");
         assert_eq!(cfg.scene.as_deref(), Some("rain"));
         assert_eq!(cfg.fps, None);
@@ -322,6 +490,159 @@ mod tests {
         assert_eq!(cfg.group, None);
         assert!(cfg.themes.is_empty());
         assert_eq!(cfg.keys.get("quit").map(|s| s.as_str()), Some("x"));
+        // favourites and recents are the user's content, not settings
+        assert_eq!(cfg.favorites, vec!["koi"]);
+        assert_eq!(cfg.recents, vec!["fire"]);
+    }
+
+    /// Everything at its built-in default.
+    fn live_defaults() -> Live<'static> {
+        Live {
+            scene: DEFAULT_SCENE,
+            theme: None,
+            pixels: "half",
+            default_pixels: "half",
+            detail: "medium",
+            default_detail: "medium",
+            filters: &[],
+            text_scale: None,
+            fps: DEFAULT_FPS,
+            speed: DEFAULT_SPEED,
+            smooth: DEFAULT_SMOOTH,
+            dim: DEFAULT_DIM,
+            fade: DEFAULT_FADE,
+            clock: DEFAULT_CLOCK,
+            cycle: None,
+            cycle_scope: CycleScope::All,
+            hue_shift: 0.0,
+            saturation: 1.0,
+            contrast: 1.0,
+            renderer: Renderer::Auto,
+            link: DEFAULT_LINK,
+            group: DEFAULT_GROUP,
+            wall: true,
+        }
+    }
+
+    #[test]
+    fn store_writes_no_defaults() {
+        // a config full of stale values: storing defaults must clear them all
+        let mut cfg = Config {
+            fps: Some(60),
+            speed: Some(2.0),
+            dim: Some(0.5),
+            clock: Some(false),
+            gpu: Some(true),
+            renderer: Some(Renderer::Cpu),
+            group: Some("art".into()),
+            cycle_scope: Some("favorites".into()),
+            ..Default::default()
+        };
+        cfg.keys.insert("quit".into(), "x".into());
+        store(&mut cfg, &live_defaults());
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        // only the keybind table survives
+        assert_eq!(
+            text.trim(),
+            "[keys]\nquit = \"x\"",
+            "defaults leaked into:\n{text}"
+        );
+    }
+
+    #[test]
+    fn store_rounds_floats_to_two_decimals() {
+        let mut cfg = Config::default();
+        // float noise from repeated steps: 1.0 + 3 * 0.15 in f32
+        let contrast = 1.0f32 + 0.15 + 0.15 + 0.15;
+        assert_ne!(contrast, 1.45, "precondition: the sum carries noise");
+        let live = Live {
+            contrast,
+            saturation: 0.7000001,
+            dim: 0.70000005,
+            fade: 0.35000002,
+            hue_shift: 43.199997,
+            speed: 1.2500001,
+            ..live_defaults()
+        };
+        store(&mut cfg, &live);
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        for want in [
+            "contrast = 1.45",
+            "saturation = 0.7",
+            "dim = 0.7",
+            "fade = 0.35",
+            "hue_shift = 43.2",
+            "speed = 1.25",
+        ] {
+            assert!(
+                text.lines().any(|l| l == want),
+                "missing `{want}` in:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn store_theme_default_removes_entry() {
+        let mut cfg = Config::default();
+        cfg.themes.insert("fire".into(), "inferno".into());
+        // fire's first theme is its default: stored as no entry
+        store(
+            &mut cfg,
+            &Live {
+                scene: "fire",
+                theme: Some("classic"),
+                ..live_defaults()
+            },
+        );
+        assert!(!cfg.themes.contains_key("fire"));
+        store(
+            &mut cfg,
+            &Live {
+                scene: "fire",
+                theme: Some("frost"),
+                ..live_defaults()
+            },
+        );
+        assert_eq!(cfg.themes.get("fire").map(String::as_str), Some("frost"));
+        assert_eq!(cfg.scene.as_deref(), Some("fire"));
+    }
+
+    #[test]
+    fn favorites_recents_and_scope_round_trip() {
+        let cfg = Config {
+            favorites: vec!["bigsur".into(), "koi".into()],
+            recents: vec!["fire".into(), "rain".into()],
+            cycle_scope: Some("favorites".into()),
+            ..Default::default()
+        };
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.favorites, vec!["bigsur", "koi"]);
+        assert_eq!(back.recents, vec!["fire", "rain"]);
+        assert_eq!(
+            back.cycle_scope.as_deref().map(CycleScope::parse),
+            Some(CycleScope::Favorites)
+        );
+        // absent lists load as empty, and an old config still parses
+        let old: Config = toml::from_str("fps = 60\n").unwrap();
+        assert!(old.favorites.is_empty() && old.recents.is_empty());
+        assert_eq!(CycleScope::parse("nonsense"), CycleScope::All);
+    }
+
+    #[test]
+    fn save_timer_coalesces_writes() {
+        let t0 = Instant::now();
+        let mut s = SaveTimer::default();
+        assert!(!s.due(t0), "nothing marked, nothing due");
+        s.mark(t0);
+        // later marks inside the window do not push the write back
+        s.mark(t0 + Duration::from_millis(300));
+        assert!(!s.due(t0 + Duration::from_millis(400)));
+        assert!(s.due(t0 + Duration::from_millis(500)));
+        assert!(!s.is_dirty(), "due clears the mark");
+        s.mark(t0 + Duration::from_millis(600));
+        assert!(s.take(), "take flushes immediately");
+        assert!(!s.take());
     }
 
     #[test]
