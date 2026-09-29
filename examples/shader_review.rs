@@ -143,6 +143,7 @@ fn render_at(
         mirror: false,
         kaleido: false,
         exposure: 0.0,
+        params: [shader::PARAM_NEUTRAL; 4],
     });
     g.render_shader_pixels(name, composed, &u)
 }
@@ -181,6 +182,7 @@ fn render_desk(g: &mut Gpu, name: &str, composed: &shader::Composed, themes: usi
                 mirror: false,
                 kaleido: false,
                 exposure: 0.0,
+                params: [shader::PARAM_NEUTRAL; 4],
             });
             match g.render_shader_pixels(name, composed, &u) {
                 Ok(p) => {

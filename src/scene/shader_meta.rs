@@ -9,6 +9,7 @@
 //! //! tags: ocean, cliffs, fog, sunset
 //! //! desc: Pacific swells breaking under the Big Sur cliffs as marine fog rolls in
 //! //! themes: sunset, fog, noon, moonlight
+//! //! params: swell, fog          # optional: up to four Tune sliders
 //! //! uses: camera, sky, water, fog
 //! //! cost: heavy
 //! //! fallback: ocean
@@ -44,13 +45,16 @@ pub const MODULES: &[(&str, &[&str])] = &[
     ("light", &["hash"]),
     ("fire", &["noise"]),
     ("l2d", &["noise"]),
+    ("glyph", &["hash"]),
+    ("game", &["hash"]),
 ];
 
 /// Always composed, whatever a scene lists.
 pub const ALWAYS: &[&str] = &["core", "hash", "color", "tonemap", "dither"];
 
 /// Scene categories, in browser order.
-pub const CATEGORIES: &[&str] = &["coast", "wilds", "weather", "city", "cozy", "space"];
+pub const CATEGORIES: &[&str] =
+    &["coast", "wilds", "weather", "city", "cozy", "space", "aerial", "stage", "games", "retro", "abstract"];
 
 pub const COSTS: &[&str] = &["light", "medium", "heavy"];
 
@@ -59,6 +63,9 @@ pub const TONEMAPS: &[&str] = &["agx", "punchy", "aces", "neutral"];
 
 pub const MAX_DESC: usize = 90;
 pub const MAX_TITLE: usize = 32;
+/// Tune sliders a scene may declare, and how long each label may be.
+pub const MAX_PARAMS: usize = 4;
+pub const MAX_PARAM: usize = 14;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Meta {
@@ -68,6 +75,8 @@ pub struct Meta {
     pub tags: Vec<String>,
     pub desc: String,
     pub themes: Vec<String>,
+    /// Tune slider labels, 0 to 4.
+    pub params: Vec<String>,
     /// Resolved: every module the scene needs (always-on modules included),
     /// dependencies added, in `MODULES` order.
     pub uses: Vec<&'static str>,
@@ -158,7 +167,7 @@ pub fn parse(text: &str, stem: &str) -> Result<Meta, (usize, String)> {
     let need = |k: &str| get(k).ok_or((1usize, format!("missing required header '{k}'")));
 
     const KNOWN: &[&str] = &[
-        "name", "title", "category", "tags", "desc", "themes", "uses", "cost", "tonemap",
+        "name", "title", "category", "tags", "desc", "themes", "params", "uses", "cost", "tonemap",
         "exposure", "ss", "fallback", "credits",
     ];
     if let Some((l, k, _)) = fields.iter().find(|(_, k, _)| !KNOWN.contains(&k.as_str())) {
@@ -197,6 +206,20 @@ pub fn parse(text: &str, stem: &str) -> Result<Meta, (usize, String)> {
         }
     }
     let (_, fallback) = need("fallback")?;
+    let params = get("params").map(|(_, v)| list(&v)).unwrap_or_default();
+    if let Some((l, _)) = get("params") {
+        if params.len() > MAX_PARAMS {
+            return Err((l, format!("params lists more than {MAX_PARAMS} sliders")));
+        }
+        for (i, p) in params.iter().enumerate() {
+            if p.chars().count() > MAX_PARAM {
+                return Err((l, format!("param '{p}' is longer than {MAX_PARAM} characters")));
+            }
+            if params[..i].contains(p) {
+                return Err((l, format!("param '{p}' is listed twice")));
+            }
+        }
+    }
     let tags = get("tags").map(|(_, v)| list(&v)).unwrap_or_default();
     let uses_raw = get("uses").map(|(_, v)| list(&v)).unwrap_or_default();
     let uses = resolve_uses(&uses_raw).map_err(|e| (get("uses").map(|u| u.0).unwrap_or(1), e))?;
@@ -233,6 +256,7 @@ pub fn parse(text: &str, stem: &str) -> Result<Meta, (usize, String)> {
         tags,
         desc,
         themes,
+        params,
         uses,
         cost,
         tonemap,
@@ -266,6 +290,16 @@ mod tests {
         assert_eq!(m.cost, "medium");
         // raymarch pulls in sdf; always-on modules come first
         assert_eq!(m.uses, vec!["core", "hash", "color", "tonemap", "dither", "sdf", "raymarch"]);
+    }
+
+    #[test]
+    fn params_are_optional_and_bounded() {
+        assert!(parse(GOOD, "demo").unwrap().params.is_empty());
+        let with = format!("//! params: swell, fog\n{GOOD}");
+        assert_eq!(parse(&with, "demo").unwrap().params, vec!["swell", "fog"]);
+        assert!(parse(&format!("//! params: a, b, c, d, e\n{GOOD}"), "demo").is_err(), "five is too many");
+        assert!(parse(&format!("//! params: a, a\n{GOOD}"), "demo").is_err(), "a label twice");
+        assert!(parse(&format!("//! params: averyveryverylonglabel\n{GOOD}"), "demo").is_err());
     }
 
     #[test]

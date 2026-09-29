@@ -27,6 +27,8 @@ pub const CLASSIC_GROUPS: &[&str] = &[
 pub enum Shelf {
     Favorites,
     Recent,
+    /// a handful of scenes picked at random when the menu opens
+    Surprise,
     Category(Category),
     /// a Classic sub-group ("nature", "water", …), nested under Classic
     Group(&'static str),
@@ -37,6 +39,7 @@ impl Shelf {
         match self {
             Shelf::Favorites => "★ Favorites",
             Shelf::Recent => "◷ Recent",
+            Shelf::Surprise => "✦ Surprise",
             Shelf::Category(c) => c.label(),
             Shelf::Group(g) => g,
         }
@@ -58,11 +61,14 @@ fn classic() -> impl Iterator<Item = Entry> {
     scene::entries().filter(|e| e.category() == Category::Classic)
 }
 
-/// Every shelf, in order: Favorites, Recent, then each category that has
-/// scenes — Classic followed by its sub-groups. Empty categories are left
-/// out until scenes land in them.
+/// How many scenes the Surprise shelf offers.
+pub const SURPRISE: usize = 8;
+
+/// Every shelf, in order: Favorites, Recent, Surprise, then each category
+/// that has scenes — Classic followed by its sub-groups. Empty categories
+/// are left out until scenes land in them.
 pub fn shelves() -> Vec<Shelf> {
-    let mut v = vec![Shelf::Favorites, Shelf::Recent];
+    let mut v = vec![Shelf::Favorites, Shelf::Recent, Shelf::Surprise];
     for c in Category::ALL {
         if !scene::entries().any(|e| e.category() == c) {
             continue;
@@ -83,12 +89,15 @@ pub fn shelves() -> Vec<Shelf> {
 }
 
 /// Scenes on a shelf, in display order. Favourites and recents keep their
-/// stored order and skip names that no longer exist.
+/// stored order and skip names that no longer exist. The Surprise shelf's
+/// scenes live in the [`Browser`] (see [`Browser::scenes_on`]): here it is
+/// empty.
 pub fn shelf_scenes(shelf: Shelf, ctx: &MenuCtx) -> Vec<Entry> {
     let named = |names: &[String]| names.iter().filter_map(|n| scene::lookup(n)).collect();
     match shelf {
         Shelf::Favorites => named(&ctx.favorites),
         Shelf::Recent => named(&ctx.recents),
+        Shelf::Surprise => Vec::new(),
         Shelf::Category(Category::Classic) => {
             let mut v: Vec<Entry> = classic().collect();
             v.sort_by_key(|e| group_rank(e.group()));
@@ -153,6 +162,8 @@ pub struct Browser {
     pub query: String,
     /// the search box has the keyboard
     pub searching: bool,
+    /// the Surprise shelf: scene names picked when the menu opened
+    pub surprise: Vec<&'static str>,
 }
 
 impl Default for Browser {
@@ -169,6 +180,33 @@ impl Browser {
             row: 0,
             query: String::new(),
             searching: false,
+            surprise: Vec::new(),
+        }
+    }
+
+    /// Roll a fresh Surprise shelf: [`SURPRISE`] distinct scenes, at random.
+    pub fn reroll_surprise(&mut self) {
+        let n = scene::entries().count();
+        self.reroll_surprise_with(|k| rand::random_range(0..k.max(1)), n);
+    }
+
+    /// `reroll_surprise` with the picks injected (tests): `pick(k)` returns
+    /// an index below `k`.
+    pub fn reroll_surprise_with(&mut self, mut pick: impl FnMut(usize) -> usize, total: usize) {
+        let mut pool: Vec<&'static str> = scene::all_names();
+        pool.truncate(total);
+        self.surprise.clear();
+        while self.surprise.len() < SURPRISE && !pool.is_empty() {
+            let i = pick(pool.len()).min(pool.len() - 1);
+            self.surprise.push(pool.swap_remove(i));
+        }
+    }
+
+    /// Scenes on a shelf, the Surprise shelf included.
+    pub fn scenes_on(&self, shelf: Shelf, ctx: &MenuCtx) -> Vec<Entry> {
+        match shelf {
+            Shelf::Surprise => self.surprise.iter().filter_map(|n| scene::lookup(n)).collect(),
+            _ => shelf_scenes(shelf, ctx),
         }
     }
 
@@ -188,7 +226,7 @@ impl Browser {
         if self.filtering() {
             search(&self.query)
         } else {
-            shelf_scenes(self.current_shelf(), ctx)
+            self.scenes_on(self.current_shelf(), ctx)
         }
     }
 
@@ -291,9 +329,23 @@ pub fn cycle_next(
         return current;
     }
     let category = |name: &str| scene::lookup(name).map(|e| e.category());
+    if scope == CycleScope::Surprise {
+        // a category first, so every kind of scene gets its turn, then a
+        // scene in it (never the one showing)
+        let cats: Vec<scene::Category> = scene::Category::ALL
+            .into_iter()
+            .filter(|c| (0..n).any(|i| i != current && category(names[i]) == Some(*c)))
+            .collect();
+        if cats.is_empty() {
+            return current;
+        }
+        let cat = cats[(pick % cats.len() as u64) as usize];
+        let in_cat: Vec<usize> = (1..n).map(|step| (current + step) % n).filter(|&i| category(names[i]) == Some(cat)).collect();
+        return in_cat[((pick / cats.len() as u64) % in_cat.len() as u64) as usize];
+    }
     let here = category(names[current]);
     let in_scope = |name: &str| match scope {
-        CycleScope::All | CycleScope::Variants => true,
+        CycleScope::All | CycleScope::Variants | CycleScope::Surprise => true,
         CycleScope::Category => category(name) == here,
         CycleScope::Favorites => favorites.iter().any(|f| f == name),
         CycleScope::Studio => scene::lookup(name).is_some_and(|e| e.needs_gpu()),

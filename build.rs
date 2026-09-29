@@ -88,7 +88,7 @@ fn main() {
         writeln!(
             out,
             "    ShaderSpec {{ name: {}, title: {}, category: Category::{cat}, tags: {}, desc: {}, \
-             themes: {}, uses: &[{}], cost: Cost::{cost}, tonemap: {}, exposure: {:?}, \
+             themes: {}, params: {}, uses: &[{}], cost: Cost::{cost}, tonemap: {}, exposure: {:?}, \
              ss_manual: {}, fallback: {}, credits: {}, source: include_str!({}), \
              path: {} }},",
             q(&m.name),
@@ -96,6 +96,7 @@ fn main() {
             list(&m.tags),
             q(&m.desc),
             list(&m.themes),
+            list(&m.params),
             m.uses.iter().map(|u| q(u)).collect::<Vec<_>>().join(", "),
             m.tonemap_mode(),
             m.exposure,

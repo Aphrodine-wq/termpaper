@@ -267,16 +267,19 @@ pub enum CycleScope {
     Classic,
     /// the scene stays; its variants take turns
     Variants,
+    /// a random category, then a random scene in it
+    Surprise,
 }
 
 impl CycleScope {
-    pub const ALL: [CycleScope; 6] = [
+    pub const ALL: [CycleScope; 7] = [
         CycleScope::All,
         CycleScope::Category,
         CycleScope::Favorites,
         CycleScope::Studio,
         CycleScope::Classic,
         CycleScope::Variants,
+        CycleScope::Surprise,
     ];
 
     pub fn name(self) -> &'static str {
@@ -287,6 +290,7 @@ impl CycleScope {
             CycleScope::Studio => "studio",
             CycleScope::Classic => "classic",
             CycleScope::Variants => "variants",
+            CycleScope::Surprise => "surprise",
         }
     }
 
@@ -299,6 +303,7 @@ impl CycleScope {
             "studio" => CycleScope::Studio,
             "classic" => CycleScope::Classic,
             "variants" => CycleScope::Variants,
+            "surprise" => CycleScope::Surprise,
             _ => CycleScope::All,
         }
     }
@@ -501,6 +506,7 @@ pub const ACTIONS: &[&str] = &[
     "fps_down",
     "speed_up",
     "speed_down",
+    "random",
 ];
 
 pub fn default_key(action: &str) -> &'static str {
@@ -518,6 +524,7 @@ pub fn default_key(action: &str) -> &'static str {
         "fps_down" => "[",
         "speed_up" => ".",
         "speed_down" => ",",
+        "random" => "r",
         _ => "",
     }
 }

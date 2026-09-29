@@ -32,6 +32,7 @@ fn desc(size: (usize, usize), win: (usize, usize), window: (usize, usize), theme
         mirror: false,
         kaleido: false,
         exposure: 0.0,
+        params: [shader::PARAM_NEUTRAL; 4],
     }
 }
 
@@ -286,6 +287,7 @@ fn the_worker_delivers_cells_for_a_studio_scene() {
             budget_ms: DEFAULT_GPU_BUDGET_MS,
             prefetch: None,
             hysteresis: 3,
+            params: [shader::PARAM_NEUTRAL; 4],
         };
         if let Some(frame) = worker.submit(req) {
             let cells = frame.cells.expect("GPU cells");

@@ -75,7 +75,7 @@ fn metadata_is_consistent_with_the_classic_registry() {
 const RESERVED_PREFIXES: &[&str] = &[
     "hash_", "noise_", "col_", "tm_", "dither_", "cam_", "sdf_", "sdf2_", "op_", "rm_", "sky_",
     "star_", "cloud_", "vol_", "fog_", "water_", "wet_", "rain_", "snow_", "bokeh_", "light_",
-    "fire_", "l2d_", "entry_",
+    "fire_", "l2d_", "glyph_", "game_", "entry_",
 ];
 
 #[test]

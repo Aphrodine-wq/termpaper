@@ -142,7 +142,8 @@ struct Args {
 enum Command {
     /// List scenes by category and exit
     List {
-        /// Only this category: coast, wilds, weather, city, cozy, space or classic
+        /// Only this category: coast, wilds, weather, city, cozy, space,
+        /// aerial, stage, games, retro, abstract or classic
         #[arg(long)]
         category: Option<String>,
         /// Every scene as JSON: name, title, category, description,
@@ -178,6 +179,12 @@ enum Command {
     Theme {
         #[command(subcommand)]
         action: ThemeCmd,
+    },
+    /// Open a scene picked at random (the other flags still apply)
+    Random {
+        /// Only from this category (see `termpaper list`)
+        #[arg(long)]
+        category: Option<String>,
     },
 }
 
@@ -773,6 +780,19 @@ fn gallery_unpublish(_: &str, _: &str) -> Result<String, String> {
 }
 
 /// `termpaper list --json`: the catalog the website and other tools read.
+/// `termpaper random`: a scene at random, from one category if asked.
+fn random_scene(category: Option<&str>) -> String {
+    let only = category.map(|s| {
+        scene::Category::parse(&s.to_lowercase()).unwrap_or_else(|| {
+            let slugs: Vec<_> = scene::Category::ALL.iter().map(|c| c.slug()).collect();
+            eprintln!("termpaper: unknown category '{s}'. Categories: {}", slugs.join(", "));
+            std::process::exit(2);
+        })
+    });
+    let pool: Vec<&'static str> = scene::entries().filter(|e| only.is_none_or(|c| e.category() == c)).map(|e| e.name()).collect();
+    pool[rand::random_range(0..pool.len().max(1)).min(pool.len().saturating_sub(1))].to_string()
+}
+
 fn print_list_json(category: Option<&str>) {
     use std::io::Write;
     let only = category.and_then(|s| scene::Category::parse(&s.to_lowercase()));
@@ -787,6 +807,7 @@ fn print_list_json(category: Option<&str>) {
                 "description": e.desc(),
                 "variants": e.themes(),
                 "tags": e.tags(),
+                "params": e.params(),
                 "studio": e.needs_gpu(),
                 "fallback": scene::shader::find(e.name()).map(|s| s.fallback),
             })
@@ -900,6 +921,10 @@ fn main() -> std::io::Result<()> {
             let n = termpaper::launch::wall_down()?;
             println!("closed {n} wall terminal(s)");
             return Ok(());
+        }
+        Some(Command::Random { ref category }) => {
+            // picked here; the rest of the launch is the usual one
+            args.scene = Some(random_scene(category.as_deref()));
         }
         Some(Command::Wall { action: WallCmd::Up { dry_run, font, monitor, extra } }) => {
             let Some(mons) = termpaper::hypr::monitors() else {
@@ -3256,7 +3281,7 @@ fn run(
                 // a styled transition shapes the dim across the wall; a plain
                 // fade (and every style at rest) is a uniform one
                 let mask = termpaper::transition::Mask::new(
-                    settings.playback.transition,
+                    settings.playback.transition.resolve(transition.pick()),
                     fade,
                     transition.pending().is_none(),
                     size.0 as u32,
@@ -3296,6 +3321,7 @@ fn run(
                     } else {
                         0
                     },
+                    params: [scene::shader::PARAM_NEUTRAL; 4],
                 };
                 if let Some(frame) = worker.submit(request) {
                     lead.on_frame(frame.elapsed_ms, slot);
@@ -3707,6 +3733,9 @@ fn run(
                         switch_to(base + 1);
                     } else if km.matches("prev", key.code) {
                         switch_to(base + names.len() - 1);
+                    } else if km.matches("random", key.code) && names.len() > 1 {
+                        // any scene but the one a pending switch lands on
+                        switch_to(base + 1 + rand::random_range(0..names.len() - 1));
                     } else if km.matches("pause", key.code) {
                         // wall-wide: a retime anchor freezes (or resumes) the
                         // shared clock; the simulation itself is untouched
@@ -3823,6 +3852,14 @@ mod cli_tests {
         }
         assert!(matches!(parse(&["list", "--json"]).command, Some(Command::List { json: true, .. })));
         assert!(matches!(parse(&["instances"]).command, Some(Command::Instances)));
+        // the launch flags go before the subcommand: `termpaper --fps 30 random`
+        let a = parse(&["--fps", "30", "random", "--category", "space"]);
+        match a.command {
+            Some(Command::Random { category }) => assert_eq!(category.as_deref(), Some("space")),
+            _ => panic!("expected random"),
+        }
+        assert_eq!(a.fps, Some(30));
+        assert!(matches!(parse(&["random"]).command, Some(Command::Random { category: None })));
         match parse(&["switch", "fire", "--group", "art"]).command {
             Some(Command::Switch { scene, group, all }) => {
                 assert_eq!((scene.as_str(), group.as_deref(), all), ("fire", Some("art"), false));

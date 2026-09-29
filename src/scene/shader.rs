@@ -22,17 +22,27 @@ pub enum Category {
     City,
     Cozy,
     Space,
+    Aerial,
+    Stage,
+    Games,
+    Retro,
+    Abstract,
     Classic,
 }
 
 impl Category {
-    pub const ALL: [Category; 7] = [
+    pub const ALL: [Category; 12] = [
         Category::Coast,
         Category::Wilds,
         Category::Weather,
         Category::City,
         Category::Cozy,
         Category::Space,
+        Category::Aerial,
+        Category::Stage,
+        Category::Games,
+        Category::Retro,
+        Category::Abstract,
         Category::Classic,
     ];
 
@@ -45,6 +55,11 @@ impl Category {
             Category::City => "Cities & Streets",
             Category::Cozy => "Cozy & Interiors",
             Category::Space => "Space",
+            Category::Aerial => "Drone & Aerial",
+            Category::Stage => "Concerts & Nightlife",
+            Category::Games => "Video Games",
+            Category::Retro => "Retro & Memes",
+            Category::Abstract => "Abstract",
             Category::Classic => "Classic",
         }
     }
@@ -58,6 +73,11 @@ impl Category {
             Category::City => "city",
             Category::Cozy => "cozy",
             Category::Space => "space",
+            Category::Aerial => "aerial",
+            Category::Stage => "stage",
+            Category::Games => "games",
+            Category::Retro => "retro",
+            Category::Abstract => "abstract",
             Category::Classic => "classic",
         }
     }
@@ -89,6 +109,9 @@ pub struct ShaderSpec {
     pub desc: &'static str,
     /// Two to five themes; the first is the default.
     pub themes: &'static [&'static str],
+    /// Up to four tunable parameters (the Tune page), by label. Each reaches
+    /// the shader as `ctx.params[i]` in 0..1, 0.5 meaning "as designed".
+    pub params: &'static [&'static str],
     /// Resolved library modules in composition order.
     pub uses: &'static [&'static str],
     pub cost: Cost,
@@ -119,6 +142,9 @@ impl std::fmt::Debug for ShaderSpec {
         write!(f, "ShaderSpec({})", self.name)
     }
 }
+
+/// A Tune slider at rest: the scene as its author designed it.
+pub const PARAM_NEUTRAL: f32 = 0.5;
 
 /// Look a Studio scene up by name.
 pub fn find(name: &str) -> Option<&'static ShaderSpec> {

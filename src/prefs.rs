@@ -97,8 +97,25 @@ choice!(
         Wipe => "wipe", "wipe";
         Iris => "iris", "iris";
         Blinds => "blinds", "blinds";
+        /// a different style each switch (never itself at render time)
+        Random => "random", "random";
     }
 );
+
+impl TransitionStyle {
+    /// The styles `Random` chooses among.
+    pub const CONCRETE: &'static [TransitionStyle] =
+        &[TransitionStyle::Fade, TransitionStyle::Dissolve, TransitionStyle::Wipe, TransitionStyle::Iris, TransitionStyle::Blinds];
+
+    /// The style to draw: `Random` resolved by `pick` (the same number on
+    /// every pane of a wall gives the same style everywhere).
+    pub fn resolve(self, pick: u64) -> TransitionStyle {
+        match self {
+            TransitionStyle::Random => Self::CONCRETE[(pick % Self::CONCRETE.len() as u64) as usize],
+            s => s,
+        }
+    }
+}
 
 choice!(
     /// The scene a fresh start opens on.

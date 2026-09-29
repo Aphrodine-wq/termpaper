@@ -162,11 +162,11 @@ pub const LOOK: &[Setting] = &[
 pub const PLAYBACK: &[Setting] = &[
     row(S::Speed, "Speed", Choice, "Animation speed. Also , and . outside the menu."),
     row(S::Cycle, "Cycle", Choice, "Move on to another scene every so often; off stays put."),
-    row(S::CycleScope, "Cycle through", Choice, "Where Cycle picks from: every scene, this category, favourites, Studio or Classic scenes, or this scene's variants."),
+    row(S::CycleScope, "Cycle through", Choice, "Where Cycle picks from: every scene, this category, favourites, Studio or Classic scenes, this scene's variants, or a surprise from a different category each time."),
     row(S::Order, "Order", Choice, "Take them in list order, or shuffled."),
     row(S::TimeOfDay, "Follow the clock", Toggle, "Switch to the scene's dawn, day, dusk or night variant as the day goes on, where it has them."),
     row(S::OnLaunch, "On launch", Choice, "What termpaper opens on: the scene you left, a random favourite, or any scene."),
-    row(S::Transition, "Transition", Choice, "How one scene gives way to the next."),
+    row(S::Transition, "Transition", Choice, "How one scene gives way to the next; random picks a different one each time."),
     row(S::Fade, "Length", Slider, "How long a scene change takes."),
     row(S::ResetPlayback, "Reset this page", Action, "Speed, cycling and transitions back to how termpaper starts. u undoes it."),
 ];
@@ -647,6 +647,7 @@ pub fn value(id: SettingId, ctx: &MenuCtx) -> String {
             CycleScope::Studio => "Studio scenes".into(),
             CycleScope::Classic => "Classic scenes".into(),
             CycleScope::Variants => "this scene's variants".into(),
+            CycleScope::Surprise => "surprise me".into(),
         },
         S::Order => ctx.playback.order.label().into(),
         S::TimeOfDay => on_off(ctx.playback.time_of_day),

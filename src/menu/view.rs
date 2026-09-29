@@ -379,7 +379,7 @@ fn draw_shelves(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal) {
     let off = scroll_offset(sel, shelves.len(), area.height as usize);
     for (row, (i, &s)) in shelves.iter().enumerate().skip(off).take(area.height as usize).enumerate() {
         let y = area.y + row as u16;
-        let count = format!("{:>3}", browser::shelf_scenes(s, ctx).len());
+        let count = format!("{:>3}", m.browser.scenes_on(s, ctx).len());
         let label = if s.nested() {
             format!("  {}", s.label())
         } else {
@@ -387,6 +387,7 @@ fn draw_shelves(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal) {
         };
         let mut style = match s {
             Shelf::Favorites => fg(p.fav),
+            Shelf::Surprise => fg(p.live),
             Shelf::Group(_) => fg(p.muted),
             _ => fg(p.text),
         };
@@ -1300,6 +1301,7 @@ fn action_help(action: &str) -> &'static str {
         "fps_down" => "lower the FPS cap",
         "speed_up" => "faster",
         "speed_down" => "slower",
+        "random" => "a random scene",
         _ => "",
     }
 }

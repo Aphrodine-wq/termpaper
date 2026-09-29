@@ -239,6 +239,8 @@ pub struct Request {
     /// Studio scenes: cell hysteresis threshold in levels (0 = off). Cells
     /// whose colours move by no more re-send last frame's values.
     pub hysteresis: u8,
+    /// the scene's Tune sliders (`ctx.params`), 0..1 each
+    pub params: [f32; 4],
 }
 
 /// Studio scenes render this many extra pixels around the pane's window when
@@ -570,6 +572,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
                 mirror,
                 kaleido,
                 exposure: 0.0,
+                params: request.params,
             });
             let hash = frame_hash(&u, &request);
             // the scene pass mirrors itself (seamless on a wall); the post
@@ -823,6 +826,7 @@ mod tests {
             budget_ms: DEFAULT_GPU_BUDGET_MS,
             prefetch: None,
             hysteresis: 0,
+            params: [crate::scene::shader::PARAM_NEUTRAL; 4],
         }
     }
 

@@ -541,6 +541,7 @@ impl Menu {
         self.hover = None;
         self.browser.clear_search();
         self.browser.column = Column::Scenes;
+        self.browser.reroll_surprise();
         self.browser.reveal(ctx.scene_name, ctx);
     }
 

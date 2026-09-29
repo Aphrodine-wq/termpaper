@@ -157,6 +157,44 @@ fn shelves_cover_every_scene() {
     assert!(coast.iter().any(|e| e.name() == "bigsur"));
 }
 
+#[test]
+fn surprise_shelf_is_rerolled_when_the_menu_opens() {
+    let c = ctx();
+    assert_eq!(browser::shelves()[2], Shelf::Surprise);
+    let mut b = browser::Browser::new();
+    assert!(b.scenes_on(Shelf::Surprise, &c).is_empty(), "nothing until rolled");
+    // always the last of the pool: still eight distinct scenes
+    b.reroll_surprise_with(|k| k - 1, 20);
+    let picks = b.scenes_on(Shelf::Surprise, &c);
+    assert_eq!(picks.len(), browser::SURPRISE);
+    let mut names: Vec<&str> = picks.iter().map(|e| e.name()).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), browser::SURPRISE, "no scene twice");
+    // a tiny pool caps the shelf
+    b.reroll_surprise_with(|_| 0, 3);
+    assert_eq!(b.scenes_on(Shelf::Surprise, &c).len(), 3);
+    // opening the menu rolls it, and the plain shelf list leaves it empty
+    let mut m = Menu::new();
+    m.open(&c);
+    assert_eq!(m.browser.scenes_on(Shelf::Surprise, &c).len(), browser::SURPRISE);
+    assert!(browser::shelf_scenes(Shelf::Surprise, &c).is_empty());
+}
+
+#[test]
+fn surprise_cycle_moves_between_categories() {
+    let names = scene::all_names();
+    let cur = names.iter().position(|n| *n == "bigsur").unwrap();
+    let cat = |i: usize| scene::lookup(names[i]).unwrap().category();
+    let mut seen = std::collections::HashSet::new();
+    for pick in 0..40u64 {
+        let next = browser::cycle_next(&names, cur, CycleScope::Surprise, &[], CycleOrder::Shuffle, pick);
+        assert_ne!(next, cur, "never the scene showing");
+        seen.insert(cat(next));
+    }
+    assert!(seen.len() >= 3, "surprise ranges over categories, saw {seen:?}");
+}
+
 // ── search ──────────────────────────────────────────────────────────────
 
 #[test]
@@ -832,7 +870,7 @@ fn ordered_values_clamp_and_choices_wrap() {
     );
     assert_eq!(
         step(SettingId::CycleScope, &first, -1),
-        Some(Effect::SetCycleScope(CycleScope::Variants))
+        Some(Effect::SetCycleScope(CycleScope::Surprise))
     );
     // Group does nothing while Link is off
     let solo = MenuCtx {

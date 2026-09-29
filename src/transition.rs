@@ -46,9 +46,12 @@ impl Mask {
         if level >= 1.0 {
             return None;
         }
+        // callers resolve Random per switch (`Transition::pick`); should one
+        // slip through, dissolve is the least surprising shape
+        let style = style.resolve(1);
         let soft = match style {
             TransitionStyle::Fade => return None,
-            TransitionStyle::Dissolve => 0.12,
+            TransitionStyle::Dissolve | TransitionStyle::Random => 0.12,
             TransitionStyle::Wipe => 0.06,
             TransitionStyle::Iris => 0.05,
             TransitionStyle::Blinds => 0.2,
@@ -76,7 +79,7 @@ impl Mask {
     pub fn threshold(&self, x: i32, y: i32) -> f32 {
         let t = match self.style {
             TransitionStyle::Fade => 0.0,
-            TransitionStyle::Dissolve => (hash2(x as u32, y as u32) >> 8) as f32 * (1.0 / 16_777_216.0),
+            TransitionStyle::Dissolve | TransitionStyle::Random => (hash2(x as u32, y as u32) >> 8) as f32 * (1.0 / 16_777_216.0),
             TransitionStyle::Wipe => {
                 let u = (x as f32 + 0.5) * self.inv_span;
                 if self.arriving {
@@ -108,6 +111,7 @@ impl Mask {
             TransitionStyle::Wipe => 2,
             TransitionStyle::Iris => 3,
             TransitionStyle::Blinds => 4,
+            TransitionStyle::Random => 1,
         }
     }
 }
@@ -149,6 +153,10 @@ pub struct Transition {
     fading_in_since: Option<u64>,
     /// Epoch time of the last `tick_at`, for the local (dt) phases.
     last_ms: Option<u64>,
+    /// A number for the switch under way, the same on every pane that
+    /// scheduled it (its swap time), so a `random` transition style lands
+    /// on the same shape everywhere. Kept through the fade-in.
+    pick: u64,
 }
 
 impl Default for Transition {
@@ -167,7 +175,14 @@ impl Transition {
             sched: None,
             fading_in_since: None,
             last_ms: None,
+            pick: 0,
         }
+    }
+
+    /// The number that resolves a `random` transition style for the switch
+    /// under way (see [`TransitionStyle::resolve`]).
+    pub fn pick(&self) -> u64 {
+        self.pick
     }
 
     /// Fade duration in whole ms (the epoch clock's unit).
@@ -187,6 +202,7 @@ impl Transition {
         }
         self.pending = None;
         self.sched = Some(Scheduled { scene, swap_at_ms, swapped: false });
+        self.pick = hash2((swap_at_ms & 0xffff_ffff) as u32, (swap_at_ms >> 32) as u32) as u64;
     }
 
     /// Fade-in level `ms` after a swap (1 once complete).
@@ -260,6 +276,7 @@ impl Transition {
     /// queued requests just replace the pending target.
     pub fn request(&mut self, scene: usize) {
         self.pending = Some(scene);
+        self.pick = self.pick.wrapping_mul(6364136223846793005).wrapping_add(scene as u64 + 1442695040888963407);
         if self.phase == Phase::Steady {
             self.phase = Phase::Out;
             self.t = 0.0;

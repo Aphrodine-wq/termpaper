@@ -559,6 +559,13 @@ impl Entry {
             Entry::Shader(s) => s.tags,
         }
     }
+    /// Tune slider labels (Studio scenes that declare `params:`).
+    pub fn params(self) -> &'static [&'static str] {
+        match self {
+            Entry::Cpu(_) => &[],
+            Entry::Shader(s) => s.params,
+        }
+    }
     /// Sub-heading inside a category: Classic scenes are grouped by kind.
     pub fn group(self) -> &'static str {
         match self {
