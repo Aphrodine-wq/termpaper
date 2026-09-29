@@ -1,10 +1,28 @@
 //! Instance linking: file-based discovery and control between termpaper
-//! instances in different terminals. Registry dir holds one inst-<pid>.json
-//! per instance plus a shared control.json channel. Everything degrades
-//! silently to "disabled" when the filesystem says no.
+//! instances in different terminals. Everything degrades silently to
+//! "disabled" when the filesystem says no.
+//!
+//! A group's registry dir holds:
+//!
+//! - `inst-<pid>.json` — one per live instance: terminal size, window
+//!   geometry and the cell/padding facts the video wall needs.
+//! - `anchor.json` — the group's simulation anchor ([`Anchor`]): scene,
+//!   seed, start time, pause state and every setting that changes what the
+//!   simulation draws. It persists while any instance lives, so late joiners
+//!   adopt it at startup and nobody needs a heartbeat.
+//! - `settings.json` — the appearance settings ([`SettingsMsg`]): filters,
+//!   grading, dim, fade. Its own file, so it can never hide an anchor.
+//! - `control.json` (+ its `scene.json` copy) — the legacy single-message
+//!   channel. Still written as a mirror of every publish so older binaries
+//!   keep following; new binaries only read it for messages that lack the
+//!   `proto` marker, i.e. ones an older binary wrote.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Link protocol version written into every file. 2 = anchor.json,
+/// settings.json and the wall's cell/padding facts in inst files.
+pub const PROTO: u32 = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ControlKind {
@@ -12,15 +30,12 @@ pub enum ControlKind {
     Settings,
 }
 
-/// A settings blob broadcast alongside scene switches.
-#[derive(Clone, Default)]
+/// Appearance settings broadcast to the group: everything that changes how
+/// a frame looks but not what the simulation draws. Sim-affecting settings
+/// (speed, detail, pixels, text scale, theme) travel in the [`Anchor`].
+#[derive(Clone, Debug, PartialEq)]
 pub struct SettingsMsg {
-    pub pixels: String,
-    pub detail: String,
     pub filters: Vec<String>,
-    pub theme: Option<String>,
-    pub text_scale: Option<u32>,
-    pub speed: f32,
     pub fps: u32,
     pub smooth: f32,
     pub dim: f32,
@@ -32,6 +47,23 @@ pub struct SettingsMsg {
     pub hue_shift: f32,
     pub saturation: f32,
     pub contrast: f32,
+}
+
+impl Default for SettingsMsg {
+    fn default() -> Self {
+        SettingsMsg {
+            filters: Vec::new(),
+            fps: 60,
+            smooth: 0.3,
+            dim: 1.0,
+            fade: 0.25,
+            clock: true,
+            quick: None,
+            hue_shift: 0.0,
+            saturation: 1.0,
+            contrast: 1.0,
+        }
+    }
 }
 
 pub struct Control {
@@ -47,15 +79,246 @@ pub struct Control {
     /// artwork sync: scene seed + start timestamp (ms)
     pub seed: u64,
     pub t0_ms: u64,
+    /// link protocol of the writer; 0 = an older binary (no marker)
+    pub proto: u32,
 }
 
 /// Total ordering for control messages: newer wins lexicographically,
 /// ties broken deterministically by pid.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Debug)]
 pub struct Stamp {
     pub epoch: u64,
     pub seq: u64,
     pub from_pid: u32,
+}
+
+impl Stamp {
+    fn encode(&self) -> String {
+        format!("{}-{}-{}", self.epoch, self.seq, self.from_pid)
+    }
+
+    fn decode(s: &str) -> Option<Stamp> {
+        let mut it = s.split('-');
+        let st = Stamp {
+            epoch: it.next()?.parse().ok()?,
+            seq: it.next()?.parse().ok()?,
+            from_pid: it.next()?.parse().ok()?,
+        };
+        it.next().is_none().then_some(st)
+    }
+}
+
+/// The group's simulation anchor: everything two panes must agree on to
+/// draw the identical simulation at the identical moment.
+///
+/// The *sim identity* is every field except `stamp`, `t0_ms`,
+/// `paused_at_ms` and `proto`. A new anchor with the same identity is a
+/// retime (pause, resume, resume from suspend): receivers keep their
+/// simulation and only move the clock. A different identity is a switch,
+/// scheduled for the epoch time `t0_ms` so every pane swaps together.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Anchor {
+    pub stamp: Stamp,
+    pub scene: String,
+    pub theme: Option<String>,
+    pub seed: u64,
+    /// epoch ms at which the scene's clock reads zero (and the switch to it
+    /// happens, for a scheduled switch)
+    pub t0_ms: u64,
+    /// epoch ms the wall was paused at; the scene clock is frozen there
+    pub paused_at_ms: Option<u64>,
+    pub speed: f32,
+    pub detail: String,
+    pub pixels: String,
+    pub text_scale: Option<u32>,
+    pub proto: u32,
+}
+
+/// How an incoming anchor relates to the one a pane is running (or about
+/// to run).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AnchorChange {
+    /// Same identity and timing: nothing to do.
+    Same,
+    /// Same identity, new clock: move t0/pause, keep the simulation.
+    Retime,
+    /// New identity: rebuild, at the anchor's t0.
+    Switch,
+}
+
+pub fn classify(current: &Anchor, incoming: &Anchor) -> AnchorChange {
+    if !current.same_sim(incoming) {
+        AnchorChange::Switch
+    } else if current.t0_ms != incoming.t0_ms || current.paused_at_ms != incoming.paused_at_ms {
+        AnchorChange::Retime
+    } else {
+        AnchorChange::Same
+    }
+}
+
+fn opt_str_json(v: &Option<String>) -> String {
+    match v {
+        Some(s) => format!("\"{}\"", esc(s)),
+        None => "null".into(),
+    }
+}
+
+fn opt_num_json<T: std::fmt::Display>(v: Option<T>) -> String {
+    match v {
+        Some(n) => n.to_string(),
+        None => "null".into(),
+    }
+}
+
+impl Anchor {
+    /// Same simulation: everything but the clock and the stamp.
+    pub fn same_sim(&self, o: &Anchor) -> bool {
+        self.scene == o.scene
+            && self.theme == o.theme
+            && self.seed == o.seed
+            && self.speed == o.speed
+            && self.detail == o.detail
+            && self.pixels == o.pixels
+            && self.text_scale == o.text_scale
+    }
+
+    /// Scene clock in ms at epoch time `now_ms` (frozen while paused, zero
+    /// before t0).
+    pub fn elapsed_at(&self, now_ms: u64) -> u64 {
+        self.paused_at_ms.unwrap_or(now_ms).saturating_sub(self.t0_ms)
+    }
+
+    pub fn paused(&self) -> bool {
+        self.paused_at_ms.is_some()
+    }
+
+    /// Freeze the clock at `now_ms` (no-op when already paused).
+    pub fn pause(&mut self, now_ms: u64) {
+        if self.paused_at_ms.is_none() {
+            self.paused_at_ms = Some(now_ms.max(self.t0_ms));
+        }
+    }
+
+    /// Unfreeze: t0 moves forward by the paused duration, so the clock
+    /// resumes exactly where it stopped.
+    pub fn resume(&mut self, now_ms: u64) {
+        if let Some(at) = self.paused_at_ms.take() {
+            self.t0_ms += now_ms.saturating_sub(at);
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"kind\":\"anchor\",\"proto\":{},\"epoch\":{},\"seq\":{},\"from_pid\":{},\"scene\":\"{}\",\"theme\":{},\"seed\":{},\"t0_ms\":{},\"paused_at_ms\":{},\"speed\":{},\"detail\":\"{}\",\"pixels\":\"{}\",\"text_scale\":{}}}",
+            self.proto,
+            self.stamp.epoch,
+            self.stamp.seq,
+            self.stamp.from_pid,
+            esc(&self.scene),
+            opt_str_json(&self.theme),
+            self.seed,
+            self.t0_ms,
+            opt_num_json(self.paused_at_ms),
+            self.speed,
+            esc(&self.detail),
+            esc(&self.pixels),
+            opt_num_json(self.text_scale),
+        )
+    }
+
+    pub fn parse(text: &str) -> Option<Anchor> {
+        if json_get(text, "kind") != Some("anchor") {
+            return None;
+        }
+        Some(Anchor {
+            stamp: Stamp {
+                epoch: json_get(text, "epoch")?.parse().ok()?,
+                seq: json_get(text, "seq")?.parse().ok()?,
+                from_pid: json_get(text, "from_pid")?.parse().ok()?,
+            },
+            scene: json_get(text, "scene")?.to_string(),
+            theme: json_get(text, "theme").map(|s| s.to_string()),
+            seed: json_get(text, "seed")?.parse().ok()?,
+            t0_ms: json_get(text, "t0_ms")?.parse().ok()?,
+            paused_at_ms: json_get(text, "paused_at_ms").and_then(|v| v.parse().ok()),
+            speed: json_get(text, "speed")?.parse().ok()?,
+            detail: json_get(text, "detail")?.to_string(),
+            pixels: json_get(text, "pixels")?.to_string(),
+            text_scale: json_get(text, "text_scale").and_then(|v| v.parse().ok()),
+            proto: json_get(text, "proto").and_then(|v| v.parse().ok()).unwrap_or(PROTO),
+        })
+    }
+
+    /// An older binary's scene message, as an anchor: it only carries the
+    /// scene, theme, seed and t0, so the sim settings come from `sim`.
+    pub fn from_legacy(c: &Control, sim: &Anchor) -> Anchor {
+        Anchor {
+            stamp: Stamp { epoch: c.epoch, seq: c.seq, from_pid: c.from_pid },
+            scene: c.scene.clone(),
+            theme: c.theme.clone(),
+            seed: c.seed,
+            t0_ms: c.t0_ms,
+            paused_at_ms: None,
+            proto: c.proto,
+            ..sim.clone()
+        }
+    }
+
+    /// The legacy `control.json` scene message mirroring this anchor.
+    fn legacy_json(&self) -> String {
+        format!(
+            "{{\"kind\":\"scene\",\"proto\":{},\"scene\":\"{}\",\"theme\":{},\"epoch\":{},\"seq\":{},\"from_pid\":{},\"seed\":{},\"t0_ms\":{}}}",
+            PROTO,
+            esc(&self.scene),
+            opt_str_json(&self.theme),
+            self.stamp.epoch,
+            self.stamp.seq,
+            self.stamp.from_pid,
+            self.seed,
+            self.t0_ms,
+        )
+    }
+}
+
+impl SettingsMsg {
+    fn fields_json(&self) -> String {
+        let filters = self
+            .filters
+            .iter()
+            .map(|f| format!("\"{}\"", esc(f)))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "\"filters\":[{}],\"fps\":{},\"smooth\":{},\"dim\":{},\"fade\":{},\"clock\":{},\"quick\":{},\"hue_shift\":{},\"saturation\":{},\"contrast\":{}",
+            filters,
+            self.fps,
+            self.smooth,
+            self.dim,
+            self.fade,
+            self.clock,
+            opt_str_json(&self.quick),
+            self.hue_shift,
+            self.saturation,
+            self.contrast,
+        )
+    }
+
+    fn parse_fields(text: &str) -> SettingsMsg {
+        let d = SettingsMsg::default();
+        let num = |k: &str, dflt: f32| json_get(text, k).and_then(|v| v.parse().ok()).unwrap_or(dflt);
+        SettingsMsg {
+            filters: parse_str_array(text, "filters"),
+            fps: json_get(text, "fps").and_then(|v| v.parse().ok()).unwrap_or(d.fps),
+            smooth: num("smooth", d.smooth),
+            dim: num("dim", d.dim),
+            fade: num("fade", d.fade),
+            clock: json_get(text, "clock").map(|v| v == "true").unwrap_or(d.clock),
+            quick: json_get(text, "quick").map(|s| s.to_string()),
+            hue_shift: num("hue_shift", d.hue_shift),
+            saturation: num("saturation", d.saturation),
+            contrast: num("contrast", d.contrast),
+        }
+    }
 }
 
 pub struct InstanceInfo {
@@ -69,9 +332,14 @@ pub struct InstanceInfo {
     /// terminal padding in px (x, y) — the cell grid is inset by this much
     /// inside the window geometry, so wall crops must account for it
     pub pad: (i32, i32),
-    /// running the group's shared (seed, t0) anchor — false after a local
-    /// `--cycle` switch; such a peer must not lead the heartbeat
+    /// running the group's shared anchor — false after a local `--cycle`
+    /// switch; such a peer must not lead the group
     pub synced: bool,
+    /// this pane cannot catch up with the anchor with this stamp in time
+    /// and asks the leader for a fresh one
+    pub reanchor: Option<Stamp>,
+    /// link protocol of the instance (0 = older binary)
+    pub proto: u32,
 }
 
 pub fn epoch_now_ms() -> u64 {
@@ -212,6 +480,16 @@ fn json_get<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     }
 }
 
+/// (inode, mtime) of a channel file at the last poll that read it — lets
+/// per-frame polling stop at a stat when nothing changed. `atomic_write`
+/// renames a fresh inode into place on every publish.
+type FileSig = (u64, SystemTime);
+
+fn file_sig(path: &Path) -> Option<FileSig> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((file_ino(&meta), meta.modified().ok()?))
+}
+
 /// The live instance's registry presence; Drop cleans up.
 pub struct Guard {
     dir: PathBuf,
@@ -225,9 +503,16 @@ pub struct Guard {
     geo: Option<(i32, i32, i32, i32)>,
     pad: (i32, i32),
     synced: bool,
-    /// (inode, mtime) of control.json at the last poll that read it —
-    /// lets per-frame polling stop at a stat when nothing changed
-    ctrl_seen: Option<(u64, SystemTime)>,
+    reanchor: Option<Stamp>,
+    ctrl_seen: Option<FileSig>,
+    anchor_seen: Option<FileSig>,
+    /// stamp of the anchor last published or returned by a poll
+    anchor_last: Option<Stamp>,
+    /// the group's latest anchor as far as this instance knows; fills the
+    /// legacy fields of settings mirrors for older binaries
+    anchor: Option<Anchor>,
+    settings_seen: Option<FileSig>,
+    settings_last: Option<Stamp>,
 }
 
 #[cfg(unix)]
@@ -242,22 +527,48 @@ fn file_ino(_m: &std::fs::Metadata) -> u64 {
 }
 
 impl Guard {
+    /// The legacy scene anchor (`scene.json`, else `control.json`) — what a
+    /// group run by older binaries has instead of `anchor.json`.
     pub fn latest_scene(&self) -> Option<Control> {
         let text = std::fs::read_to_string(self.dir.join("scene.json"))
             .or_else(|_| std::fs::read_to_string(self.dir.join("control.json"))).ok()?;
         parse_control(&text).filter(|c| c.kind == ControlKind::Scene)
     }
 
+    /// The group's current anchor, for a pane joining it: `anchor.json`, or
+    /// an older binary's scene message converted with `sim` supplying the
+    /// sim settings it lacks. Marks it seen, so polls only report newer ones.
+    pub fn latest_anchor(&mut self, sim: &Anchor) -> Option<Anchor> {
+        let path = self.dir.join("anchor.json");
+        let sig = file_sig(&path);
+        let found = std::fs::read_to_string(&path).ok().and_then(|t| Anchor::parse(&t));
+        if let Some(a) = found {
+            self.anchor_seen = sig;
+            self.anchor_last = Some(a.stamp);
+            self.anchor = Some(a.clone());
+            return Some(a);
+        }
+        let legacy = self.latest_scene().filter(|c| c.proto < PROTO)?;
+        let a = Anchor::from_legacy(&legacy, sim);
+        self.anchor = Some(a.clone());
+        Some(a)
+    }
+
     pub fn new(scene: &str, group: &str) -> Option<Self> {
         let group = sanitize_group(group);
         let dir = group_dir(&group)?;
+        Self::new_in(dir, scene, &group)
+    }
+
+    /// A guard in an explicit registry directory (tests, tools).
+    pub fn new_in(dir: PathBuf, scene: &str, group: &str) -> Option<Self> {
         std::fs::create_dir_all(&dir).ok()?;
         reap_stale(&dir);
         let pid = std::process::id();
         let g = Guard {
             dir,
             pid,
-            group,
+            group: sanitize_group(group),
             scene: scene.to_string(),
             started_at: epoch_now_ms() / 1000,
             seq: 0,
@@ -266,10 +577,20 @@ impl Guard {
             geo: None,
             pad: (0, 0),
             synced: true,
+            reanchor: None,
             ctrl_seen: None,
+            anchor_seen: None,
+            anchor_last: None,
+            anchor: None,
+            settings_seen: None,
+            settings_last: None,
         };
         g.write()?;
         Some(g)
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     fn path(&self) -> PathBuf {
@@ -281,11 +602,16 @@ impl Guard {
             Some((x, y, w, h)) => format!(",\"geo\":{{\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"),
             None => String::new(),
         };
+        let reanchor_json = match self.reanchor {
+            Some(s) => format!(",\"reanchor\":\"{}\"", s.encode()),
+            None => String::new(),
+        };
         atomic_write(
             &self.path(),
             &format!(
-                "{{\"pid\":{},\"scene\":\"{}\",\"group\":\"{}\",\"started_at_epoch_secs\":{},\"cols\":{},\"rows\":{},\"px\":{},\"py\":{},\"synced\":{},\"version\":\"{}\"{}}}",
+                "{{\"pid\":{},\"proto\":{},\"scene\":\"{}\",\"group\":\"{}\",\"started_at_epoch_secs\":{},\"cols\":{},\"rows\":{},\"px\":{},\"py\":{},\"synced\":{},\"version\":\"{}\"{}{}}}",
                 self.pid,
+                PROTO,
                 esc(&self.scene),
                 esc(&self.group),
                 self.started_at,
@@ -295,10 +621,20 @@ impl Guard {
                 self.pad.1,
                 self.synced,
                 env!("CARGO_PKG_VERSION"),
+                reanchor_json,
                 geo_json,
             ),
         )
         .ok()
+    }
+
+    /// Ask the group's leader for a fresh anchor because this pane cannot
+    /// catch up with the one stamped `stamp` (None withdraws the request).
+    pub fn set_reanchor(&mut self, stamp: Option<Stamp>) {
+        if self.reanchor != stamp {
+            self.reanchor = stamp;
+            let _ = self.write();
+        }
     }
 
     /// Record terminal padding in px (set once at startup from --pad/config).
@@ -333,15 +669,16 @@ impl Guard {
         }
     }
 
-    /// Check control.json for a message newer than `last` (and not ours).
+    /// Check control.json for a legacy message newer than `last` (and not
+    /// ours). Messages carrying the `proto` marker are mirrors of an anchor
+    /// or settings publish that arrive through their own files, so they are
+    /// skipped here: only older binaries speak through control.json.
     ///
     /// Cheap when idle: a stat per call, and the file is only read (and
-    /// parsed) when its (inode, mtime) differ from the last read —
-    /// atomic_write renames a fresh inode into place on every publish.
+    /// parsed) when its (inode, mtime) differ from the last read.
     pub fn poll_control(&mut self, last: Stamp) -> Option<Control> {
         let path = self.dir.join("control.json");
-        let meta = std::fs::metadata(&path).ok()?;
-        let sig = (file_ino(&meta), meta.modified().ok()?);
+        let sig = file_sig(&path)?;
         if self.ctrl_seen == Some(sig) {
             return None;
         }
@@ -349,6 +686,7 @@ impl Guard {
         let text = std::fs::read_to_string(path).ok()?;
         parse_control(&text).filter(|c| {
             c.from_pid != self.pid
+                && c.proto < PROTO
                 && Stamp {
                     epoch: c.epoch,
                     seq: c.seq,
@@ -357,72 +695,91 @@ impl Guard {
         })
     }
 
-    /// Publish a scene switch to all other instances, with artwork-sync
-    /// parameters: the scene's rng seed and its start timestamp.
-    pub fn publish(&mut self, scene: &str, theme: Option<&str>, seed: u64, t0_ms: u64) {
-        self.seq += 1;
-        let theme_json = match theme {
-            Some(t) => format!("\"{}\"", esc(t)),
-            None => "null".to_string(),
-        };
-        let _ = atomic_write(
-            &self.dir.join("control.json"),
-            &format!(
-                "{{\"kind\":\"scene\",\"scene\":\"{}\",\"theme\":{},\"epoch\":{},\"seq\":{},\"from_pid\":{},\"seed\":{},\"t0_ms\":{}}}",
-                esc(scene),
-                theme_json,
-                epoch_now_ms(),
-                self.seq,
-                self.pid,
-                seed,
-                t0_ms,
-            ),
-        );
+    /// Check anchor.json: returns the group's anchor when it changed since
+    /// the last poll and is not the one this instance published or already
+    /// applied. The file is the source of truth — last writer wins, so every
+    /// pane converges on its content even when two publishes race.
+    pub fn poll_anchor(&mut self) -> Option<Anchor> {
+        let path = self.dir.join("anchor.json");
+        let sig = file_sig(&path)?;
+        if self.anchor_seen == Some(sig) {
+            return None;
+        }
+        self.anchor_seen = Some(sig);
+        let a = Anchor::parse(&std::fs::read_to_string(path).ok()?)?;
+        if self.anchor_last == Some(a.stamp) {
+            return None;
+        }
+        self.anchor_last = Some(a.stamp);
+        self.anchor = Some(a.clone());
+        Some(a)
     }
 
-    /// Broadcast a settings blob to all other instances.
+    /// Publish an anchor to the group: stamps it, writes anchor.json, and
+    /// mirrors it as a legacy scene message for older binaries.
+    pub fn publish_anchor(&mut self, a: &mut Anchor) {
+        self.seq += 1;
+        a.stamp = Stamp { epoch: epoch_now_ms(), seq: self.seq, from_pid: self.pid };
+        a.proto = PROTO;
+        let _ = atomic_write(&self.dir.join("anchor.json"), &a.to_json());
+        self.anchor_last = Some(a.stamp);
+        self.anchor = Some(a.clone());
+        let _ = atomic_write(&self.dir.join("control.json"), &a.legacy_json());
+    }
+
+    /// Check settings.json for appearance settings another instance
+    /// published since the last poll.
+    pub fn poll_settings(&mut self) -> Option<SettingsMsg> {
+        let path = self.dir.join("settings.json");
+        let sig = file_sig(&path)?;
+        if self.settings_seen == Some(sig) {
+            return None;
+        }
+        self.settings_seen = Some(sig);
+        let text = std::fs::read_to_string(path).ok()?;
+        let stamp = Stamp {
+            epoch: json_get(&text, "epoch")?.parse().ok()?,
+            seq: json_get(&text, "seq")?.parse().ok()?,
+            from_pid: json_get(&text, "from_pid")?.parse().ok()?,
+        };
+        if stamp.from_pid == self.pid || self.settings_last == Some(stamp) {
+            return None;
+        }
+        self.settings_last = Some(stamp);
+        Some(SettingsMsg::parse_fields(&text))
+    }
+
+    /// Broadcast the appearance settings: settings.json, plus a legacy
+    /// control.json mirror whose sim fields come from the group's anchor so
+    /// older binaries don't reset them to defaults.
     pub fn publish_settings(&mut self, m: &SettingsMsg) {
         self.seq += 1;
-        let theme_json = match &m.theme {
-            Some(t) => format!("\"{}\"", esc(t)),
-            None => "null".to_string(),
-        };
-        let filters_json = m
-            .filters
-            .iter()
-            .map(|f| format!("\"{}\"", esc(f)))
-            .collect::<Vec<_>>()
-            .join(",");
-        let ts_json = match m.text_scale {
-            Some(t) => t.to_string(),
-            None => "null".to_string(),
-        };
-        let quick_json = match &m.quick {
-            Some(q) => format!("\"{}\"", esc(q)),
-            None => "null".to_string(),
+        let stamp = Stamp { epoch: epoch_now_ms(), seq: self.seq, from_pid: self.pid };
+        self.settings_last = Some(stamp);
+        let fields = m.fields_json();
+        let _ = atomic_write(
+            &self.dir.join("settings.json"),
+            &format!(
+                "{{\"kind\":\"settings\",\"proto\":{},\"epoch\":{},\"seq\":{},\"from_pid\":{},{}}}",
+                PROTO, stamp.epoch, stamp.seq, stamp.from_pid, fields
+            ),
+        );
+        let legacy = match &self.anchor {
+            Some(a) => format!(
+                "\"pixels\":\"{}\",\"detail\":\"{}\",\"theme\":{},\"text_scale\":{},\"speed\":{},",
+                esc(&a.pixels),
+                esc(&a.detail),
+                opt_str_json(&a.theme),
+                opt_num_json(a.text_scale),
+                a.speed
+            ),
+            None => String::new(),
         };
         let _ = atomic_write(
             &self.dir.join("control.json"),
             &format!(
-                "{{\"kind\":\"settings\",\"pixels\":\"{}\",\"detail\":\"{}\",\"filters\":[{}],\"theme\":{},\"text_scale\":{},\"speed\":{},\"fps\":{},\"smooth\":{},\"dim\":{},\"fade\":{},\"clock\":{},\"quick\":{},\"hue_shift\":{},\"saturation\":{},\"contrast\":{},\"epoch\":{},\"seq\":{},\"from_pid\":{},\"seed\":0,\"t0_ms\":0}}",
-                esc(&m.pixels),
-                esc(&m.detail),
-                filters_json,
-                theme_json,
-                ts_json,
-                m.speed,
-                m.fps,
-                m.smooth,
-                m.dim,
-                m.fade,
-                m.clock,
-                quick_json,
-                m.hue_shift,
-                m.saturation,
-                m.contrast,
-                epoch_now_ms(),
-                self.seq,
-                self.pid,
+                "{{\"kind\":\"settings\",\"proto\":{},{}{},\"epoch\":{},\"seq\":{},\"from_pid\":{},\"seed\":0,\"t0_ms\":0}}",
+                PROTO, legacy, fields, stamp.epoch, stamp.seq, stamp.from_pid
             ),
         );
     }
@@ -455,45 +812,10 @@ pub fn parse_control(text: &str) -> Option<Control> {
         Some("settings") => ControlKind::Settings,
         _ => ControlKind::Scene,
     };
-    let settings = if kind == ControlKind::Settings {
-        Some(SettingsMsg {
-            pixels: json_get(text, "pixels").unwrap_or("quad").to_string(),
-            detail: json_get(text, "detail").unwrap_or("medium").to_string(),
-            filters: parse_str_array(text, "filters"),
-            theme: json_get(text, "theme").map(|s| s.to_string()),
-            text_scale: json_get(text, "text_scale").and_then(|v| v.parse().ok()),
-            speed: json_get(text, "speed")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1.0),
-            fps: json_get(text, "fps")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(60),
-            smooth: json_get(text, "smooth")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0.3),
-            dim: json_get(text, "dim")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1.0),
-            fade: json_get(text, "fade")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0.25),
-            clock: json_get(text, "clock")
-                .map(|v| v == "true")
-                .unwrap_or(true),
-            quick: json_get(text, "quick").map(|s| s.to_string()),
-            hue_shift: json_get(text, "hue_shift")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0.0),
-            saturation: json_get(text, "saturation")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1.0),
-            contrast: json_get(text, "contrast")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1.0),
-        })
-    } else {
-        None
-    };
+    // an older binary's settings message also carries pixels/detail/speed/
+    // theme/text_scale; those are sim settings now and only travel in the
+    // anchor, so a legacy message contributes its appearance fields only
+    let settings = (kind == ControlKind::Settings).then(|| SettingsMsg::parse_fields(text));
     Some(Control {
         kind,
         settings,
@@ -510,6 +832,7 @@ pub fn parse_control(text: &str) -> Option<Control> {
         t0_ms: json_get(text, "t0_ms")
             .and_then(|v| v.parse().ok())
             .unwrap_or(0),
+        proto: json_get(text, "proto").and_then(|v| v.parse().ok()).unwrap_or(0),
     })
 }
 
@@ -544,6 +867,8 @@ pub fn parse_instance(text: &str) -> Option<InstanceInfo> {
         ),
         // older instance files predate the flag: treat them as anchored
         synced: json_get(text, "synced").map(|v| v != "false").unwrap_or(true),
+        reanchor: json_get(text, "reanchor").and_then(Stamp::decode),
+        proto: json_get(text, "proto").and_then(|v| v.parse().ok()).unwrap_or(0),
     })
 }
 
@@ -579,9 +904,20 @@ pub fn reap_stale(dir: &PathBuf) {
         }
     }
     // a control file with no living publisher and no live peers is a relic
-    // of a dead session; drop it so it can't confuse the next launch
+    // of a dead session; drop it so it can't confuse the next launch. The
+    // anchor and settings persist exactly as long as the group has a member.
     if !any_live_inst {
         let _ = std::fs::remove_file(dir.join("scene.json"));
+        for relic in ["anchor.json", "settings.json"] {
+            let path = dir.join(relic);
+            let publisher_dead = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|t| json_get(&t, "from_pid").and_then(|v| v.parse::<u32>().ok()))
+                .is_none_or(|pid| !pid_alive(pid));
+            if publisher_dead {
+                let _ = std::fs::remove_file(path);
+            }
+        }
         let ctrl = dir.join("control.json");
         if let Ok(text) = std::fs::read_to_string(&ctrl) {
             let publisher_dead = json_get(&text, "from_pid")
@@ -651,23 +987,35 @@ pub fn list_all_instances() -> Vec<InstanceInfo> {
     out
 }
 
-/// Publish a scene switch to one link group (the `--switch` remote).
-pub fn publish_remote(scene: &str, seed: u64, t0_ms: u64, group: &str) -> std::io::Result<()> {
+/// Publish a scene switch to one link group (the `--switch` remote): a new
+/// anchor for `scene`, keeping the group's current sim settings (or
+/// `defaults` when the group has no anchor yet), plus the legacy mirror.
+pub fn publish_remote(scene: &str, seed: u64, t0_ms: u64, group: &str, defaults: &Anchor) -> std::io::Result<()> {
     let Some(dir) = group_dir(group) else {
         return Ok(());
     };
-    std::fs::create_dir_all(&dir)?;
-    atomic_write(
-        &dir.join("control.json"),
-        &format!(
-            "{{\"scene\":\"{}\",\"theme\":null,\"epoch\":{},\"seq\":0,\"from_pid\":{},\"seed\":{},\"t0_ms\":{}}}",
-            esc(scene),
-            epoch_now_ms(),
-            std::process::id(),
-            seed,
-            t0_ms,
-        ),
-    )
+    publish_remote_in(&dir, scene, seed, t0_ms, defaults)
+}
+
+pub fn publish_remote_in(dir: &Path, scene: &str, seed: u64, t0_ms: u64, defaults: &Anchor) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let base = std::fs::read_to_string(dir.join("anchor.json"))
+        .ok()
+        .and_then(|t| Anchor::parse(&t))
+        .unwrap_or_else(|| defaults.clone());
+    let a = Anchor {
+        stamp: Stamp { epoch: epoch_now_ms(), seq: 0, from_pid: std::process::id() },
+        scene: scene.to_string(),
+        // the scene's own default theme: the remote knows no per-scene memory
+        theme: None,
+        seed,
+        t0_ms,
+        paused_at_ms: None,
+        proto: PROTO,
+        ..base
+    };
+    atomic_write(&dir.join("anchor.json"), &a.to_json())?;
+    atomic_write(&dir.join("control.json"), &a.legacy_json())
 }
 
 /// Names of all link groups (presets plus any on disk).
@@ -688,9 +1036,9 @@ pub fn all_group_names() -> Vec<String> {
     names
 }
 
-pub fn publish_remote_all_groups(scene: &str, seed: u64, t0_ms: u64) -> std::io::Result<()> {
+pub fn publish_remote_all_groups(scene: &str, seed: u64, t0_ms: u64, defaults: &Anchor) -> std::io::Result<()> {
     for g in all_group_names() {
-        publish_remote(scene, seed, t0_ms, &g)?;
+        publish_remote(scene, seed, t0_ms, &g, defaults)?;
     }
     Ok(())
 }
@@ -707,18 +1055,159 @@ mod tests {
     // env vars are process-global: serialize these tests
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    fn anchor(scene: &str, seed: u64, t0: u64) -> Anchor {
+        Anchor {
+            stamp: Stamp::default(),
+            scene: scene.into(),
+            theme: Some("mono".into()),
+            seed,
+            t0_ms: t0,
+            paused_at_ms: None,
+            speed: 1.5,
+            detail: "high".into(),
+            pixels: "braille".into(),
+            text_scale: Some(2),
+            proto: PROTO,
+        }
+    }
+
+    /// A private registry dir: link tests never touch $XDG_RUNTIME_DIR.
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("termpaper-link-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
-    fn settings_do_not_erase_the_scene_anchor() {
-        with_registry(|_| {
-            let mut guard = Guard::new("rain", "default").unwrap();
-            guard.publish("rain", Some("mono"), 123, 456);
-            guard.publish_settings(&SettingsMsg::default());
-            let anchor = guard.latest_scene().unwrap();
-            assert_eq!(anchor.scene, "rain");
-            assert_eq!(anchor.seed, 123);
-            assert_eq!(anchor.t0_ms, 456);
-            assert_eq!(anchor.theme.as_deref(), Some("mono"));
-        });
+    fn a_settings_publish_cannot_hide_an_anchor() {
+        let dir = temp_dir("hide");
+        let mut guard = Guard::new_in(dir.clone(), "rain", "default").unwrap();
+        let mut a = anchor("rain", 123, 456);
+        guard.publish_anchor(&mut a);
+        // settings published in the same frame, both ways round
+        guard.publish_settings(&SettingsMsg::default());
+        let mut peer = Guard::new_in(dir.clone(), "fire", "default").unwrap();
+        peer.pid = 1; // a different instance sharing the dir
+        let got = peer.latest_anchor(&anchor("x", 0, 0)).expect("anchor survives");
+        assert_eq!(got, a);
+        guard.publish_settings(&SettingsMsg { dim: 0.5, ..Default::default() });
+        guard.publish_anchor(&mut anchor("fire", 9, 10));
+        guard.publish_settings(&SettingsMsg { dim: 0.25, ..Default::default() });
+        let polled = peer.poll_anchor().expect("the newer anchor");
+        assert_eq!((polled.scene.as_str(), polled.seed), ("fire", 9));
+        assert_eq!(peer.poll_settings().map(|m| m.dim), Some(0.25));
+        assert!(peer.poll_anchor().is_none(), "an unchanged anchor is reported once");
+        // legacy readers still find the scene through scene.json
+        let legacy = guard.latest_scene().unwrap();
+        assert_eq!((legacy.scene.as_str(), legacy.seed, legacy.t0_ms), ("fire", 9, 10));
+        drop((peer, guard));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn anchor_round_trip() {
+        let mut a = anchor("lanterns", u64::MAX - 7, 1_700_000_000_123);
+        a.stamp = Stamp { epoch: 1_700_000_000_000, seq: 42, from_pid: 777 };
+        a.paused_at_ms = Some(1_700_000_004_000);
+        let back = Anchor::parse(&a.to_json()).expect("parses");
+        assert_eq!(back, a);
+        let mut plain = anchor("rain", 1, 2);
+        plain.theme = None;
+        plain.text_scale = None;
+        plain.speed = 0.1 + 0.2; // not a short decimal: must still survive exactly
+        assert_eq!(Anchor::parse(&plain.to_json()).unwrap(), plain);
+        assert!(Anchor::parse("{\"kind\":\"scene\",\"epoch\":1}").is_none());
+    }
+
+    #[test]
+    fn classify_retime_and_switch() {
+        let a = anchor("rain", 5, 1000);
+        let mut paused = a.clone();
+        paused.pause(4000);
+        assert_eq!(classify(&a, &a), AnchorChange::Same);
+        assert_eq!(classify(&a, &paused), AnchorChange::Retime);
+        let mut resumed = paused.clone();
+        resumed.resume(9000);
+        assert_eq!(resumed.t0_ms, 6000, "resume shifts t0 by the paused time");
+        assert_eq!(resumed.elapsed_at(9000), paused.elapsed_at(123_456), "the clock continues where it stopped");
+        assert_eq!(classify(&paused, &resumed), AnchorChange::Retime);
+        let changes: [fn(&mut Anchor); 7] = [
+            |x| x.speed = 2.0,
+            |x| x.detail = "low".into(),
+            |x| x.pixels = "half".into(),
+            |x| x.text_scale = None,
+            |x| x.theme = None,
+            |x| x.seed = 6,
+            |x| x.scene = "fire".into(),
+        ];
+        for change in changes {
+            let mut b = a.clone();
+            change(&mut b);
+            assert_eq!(classify(&a, &b), AnchorChange::Switch);
+        }
+    }
+
+    #[test]
+    fn remote_switch_keeps_the_group_sim_settings() {
+        let dir = temp_dir("remote");
+        let defaults = anchor("x", 0, 0);
+        publish_remote_in(&dir, "fire", 3, 4, &defaults).unwrap();
+        let first = Anchor::parse(&std::fs::read_to_string(dir.join("anchor.json")).unwrap()).unwrap();
+        assert_eq!((first.scene.as_str(), first.seed, first.speed), ("fire", 3, 1.5));
+        // a group anchor exists now: its settings win over the defaults
+        let mut g = Guard::new_in(dir.clone(), "fire", "default").unwrap();
+        let mut slow = anchor("fire", 3, 4);
+        slow.speed = 0.5;
+        g.publish_anchor(&mut slow);
+        publish_remote_in(&dir, "rain", 8, 9, &defaults).unwrap();
+        let mut peer = Guard::new_in(dir.clone(), "x", "default").unwrap();
+        peer.pid = 2;
+        let got = peer.latest_anchor(&defaults).unwrap();
+        assert_eq!((got.scene.as_str(), got.seed, got.t0_ms, got.speed), ("rain", 8, 9, 0.5));
+        drop((g, peer));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_scene_messages_become_anchors() {
+        let dir = temp_dir("legacy");
+        let mut g = Guard::new_in(dir.clone(), "rain", "default").unwrap();
+        // an older binary's message: no proto marker
+        std::fs::write(
+            dir.join("control.json"),
+            "{\"kind\":\"scene\",\"scene\":\"fire\",\"theme\":null,\"epoch\":100,\"seq\":1,\"from_pid\":12345,\"seed\":42,\"t0_ms\":90}",
+        )
+        .unwrap();
+        let sim = anchor("rain", 1, 1);
+        let a = g.latest_anchor(&sim).unwrap();
+        assert_eq!((a.scene.as_str(), a.seed, a.t0_ms), ("fire", 42, 90));
+        assert_eq!((a.speed, a.pixels.as_str()), (1.5, "braille"), "sim settings come from the local anchor");
+        let c = g.poll_control(Stamp::default()).expect("a legacy message is live");
+        assert_eq!(c.proto, 0);
+        // a mirror written by a new binary carries the marker and is skipped
+        g.pid = 777;
+        g.publish_anchor(&mut anchor("rain", 5, 6));
+        g.pid = std::process::id();
+        assert!(g.poll_control(Stamp::default()).is_none(), "mirrors are not legacy messages");
+        drop(g);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reanchor_requests_round_trip_through_the_inst_file() {
+        let dir = temp_dir("reanchor");
+        let mut g = Guard::new_in(dir.clone(), "rain", "default").unwrap();
+        let s = Stamp { epoch: 1_700_000_000_000, seq: 3, from_pid: 99 };
+        g.set_reanchor(Some(s));
+        let inst = dir.join(format!("inst-{}.json", g.pid));
+        let info = parse_instance(&std::fs::read_to_string(&inst).unwrap()).unwrap();
+        assert_eq!(info.reanchor, Some(s));
+        assert_eq!(info.proto, PROTO);
+        g.set_reanchor(None);
+        assert_eq!(parse_instance(&std::fs::read_to_string(&inst).unwrap()).unwrap().reanchor, None);
+        drop(g);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn with_registry<F: FnOnce(PathBuf)>(f: F) {
@@ -808,7 +1297,8 @@ mod tests {
             touch_control(&dir, msg);
             assert!(g.poll_control(launch).is_none(), "pre-launch message must be ignored");
             // own messages ignored
-            g.publish("rain", None, 1, 2);
+            let mut own = anchor("rain", 1, 2);
+            g.publish_anchor(&mut own);
             assert!(g.poll_control(Stamp::default()).is_none(), "own pid must be ignored");
         });
     }
@@ -900,12 +1390,7 @@ mod settings_sync_tests {
     fn settings_message_round_trip() {
         let _g = settings_sync_tests_lock();
         let m = SettingsMsg {
-            pixels: "braille".into(),
-            detail: "high".into(),
             filters: vec!["scanlines".into(), "vignette".into()],
-            theme: Some("amber".into()),
-            text_scale: Some(3),
-            speed: 1.5,
             fps: 48,
             smooth: 0.45,
             dim: 0.8,
@@ -916,35 +1401,20 @@ mod settings_sync_tests {
             saturation: 1.4,
             contrast: 1.2,
         };
-        // serialize the same way publish_settings does
-        let filters_json = m
-            .filters
-            .iter()
-            .map(|f| format!("\"{f}\""))
-            .collect::<Vec<_>>()
-            .join(",");
-        let text = format!(
-            "{{\"kind\":\"settings\",\"pixels\":\"{}\",\"detail\":\"{}\",\"filters\":[{}],\"theme\":\"amber\",\"text_scale\":3,\"speed\":1.5,\"fps\":48,\"smooth\":0.45,\"dim\":0.8,\"fade\":0.5,\"clock\":false,\"quick\":\"vignette\",\"hue_shift\":45,\"saturation\":1.4,\"contrast\":1.2,\"epoch\":7,\"seq\":2,\"from_pid\":5}}",
-            m.pixels, m.detail, filters_json
-        );
+        let text = format!("{{\"kind\":\"settings\",{},\"epoch\":7,\"seq\":2,\"from_pid\":5}}", m.fields_json());
         let c = parse_control(&text).unwrap();
         assert_eq!(c.kind, ControlKind::Settings);
-        let back = c.settings.unwrap();
-        assert_eq!(back.pixels, "braille");
-        assert_eq!(back.detail, "high");
-        assert_eq!(back.filters, vec!["scanlines", "vignette"]);
-        assert_eq!(back.theme.as_deref(), Some("amber"));
-        assert_eq!(back.text_scale, Some(3));
+        assert_eq!(c.settings.unwrap(), m);
+        // an older binary's settings message: only its appearance fields count
+        let old = parse_control(
+            "{\"kind\":\"settings\",\"pixels\":\"braille\",\"detail\":\"high\",\"filters\":[\"crt\"],\"theme\":\"amber\",\"text_scale\":3,\"speed\":1.5,\"fps\":48,\"smooth\":0.45,\"dim\":0.8,\"fade\":0.5,\"clock\":false,\"quick\":null,\"hue_shift\":45,\"saturation\":1.4,\"contrast\":1.2,\"epoch\":7,\"seq\":2,\"from_pid\":5}",
+        )
+        .unwrap();
+        assert_eq!(old.proto, 0);
+        let back = old.settings.unwrap();
+        assert_eq!(back.filters, vec!["crt"]);
         assert_eq!(back.fps, 48);
-        assert!((back.smooth - 0.45).abs() < 1e-6);
-        assert!((back.dim - 0.8).abs() < 1e-6);
-        assert!((back.fade - 0.5).abs() < 1e-6);
-        assert!(!back.clock);
-        assert_eq!(back.quick.as_deref(), Some("vignette"));
         assert!((back.hue_shift - 45.0).abs() < 1e-6);
-        assert!((back.saturation - 1.4).abs() < 1e-6);
-        assert!((back.contrast - 1.2).abs() < 1e-6);
-        assert!((back.speed - 1.5).abs() < 1e-6);
         // scene messages still parse with default kind
         let sc = parse_control(
             "{\"kind\":\"scene\",\"scene\":\"fire\",\"theme\":null,\"epoch\":1,\"seq\":1,\"from_pid\":2,\"seed\":9,\"t0_ms\":8}",
