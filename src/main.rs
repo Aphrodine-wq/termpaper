@@ -929,7 +929,7 @@ fn run(
         None
     };
 
-    // one registry snapshot shared by the heartbeat, wall layout, and menu.
+    // one registry snapshot shared by the leader duties, wall layout, and menu.
     // Scanning the registry means readdir + a /proc stat per entry + a file
     // read per peer — doing that every frame with the menu open was the
     // hottest path in the whole loop with many instances up.
@@ -962,9 +962,11 @@ fn run(
         // right away and then adopt the leader's (a retime: no rebuild).
         {
             let jump = clock.resync(now, termpaper::sync::epoch_now_ms_f64()) as i64;
-            if jump > SUSPEND_JUMP_MS && !st.target().paused() {
+            // (a clock stepped backwards is the mirror case: without the
+            // shift a Classic scene would hold still until it caught up)
+            if jump.abs() > SUSPEND_JUMP_MS && !st.target().paused() {
                 let mut a = st.target().clone();
-                a.t0_ms += jump as u64;
+                a.t0_ms = a.t0_ms.saturating_add_signed(jump);
                 if let (true, Some(g)) = (st.target_synced() && is_leader(&peers.list, true), guard.as_mut()) {
                     g.publish_anchor(&mut a);
                 }

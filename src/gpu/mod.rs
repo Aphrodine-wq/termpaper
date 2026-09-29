@@ -103,7 +103,7 @@ struct Params {
     /// wall W, H — position-dependent filters use wall coordinates
     virt: [u32; 4],
 }
-const _: () = assert!(std::mem::size_of::<Params>() % 16 == 0);
+const _: () = assert!(std::mem::size_of::<Params>().is_multiple_of(16));
 
 /// Where a pass writes, which decides whether the ping-pong flips after it.
 #[derive(Clone, Copy, PartialEq)]

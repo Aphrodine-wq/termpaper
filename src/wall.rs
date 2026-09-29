@@ -323,8 +323,8 @@ impl GeoWatcher {
                     // the scale only changes with the monitor (or a config
                     // reload): re-read it on a move and every ~20 s
                     let mon = found.and_then(|(_, _, m)| m);
-                    if mon.is_some() && (monitor.map(|(id, _)| id) != mon || ticks % 10 == 0) {
-                        let id = mon.unwrap();
+                    let stale = monitor.map(|(id, _)| id) != mon || ticks.is_multiple_of(10);
+                    if let Some(id) = mon.filter(|_| stale) {
                         let scale = hyprctl(&["monitors", "-j"]).and_then(|t| parse_monitor_scale(&t, id));
                         monitor = Some((id, scale));
                     }
