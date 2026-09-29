@@ -1457,11 +1457,11 @@ mod tests {
     /// on filesystems with coarse timestamps.
     fn touch_control(dir: &PathBuf, msg: &str) {
         let path = dir.join("control.json");
-        let before = std::fs::metadata(&path).ok().map(|m| (file_ino(&m), m.modified().ok()));
+        let before = file_sig(&path);
         for _ in 0..1000 {
             let _ = std::fs::remove_file(&path);
             std::fs::write(&path, msg).unwrap();
-            let now = std::fs::metadata(&path).ok().map(|m| (file_ino(&m), m.modified().ok()));
+            let now = file_sig(&path);
             if now != before {
                 return;
             }

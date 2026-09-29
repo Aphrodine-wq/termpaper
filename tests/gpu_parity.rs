@@ -112,6 +112,7 @@ fn looks() -> Vec<(String, Look, i32)> {
     // brightening table) comes out as up to ceil(gain) steps, which is the
     // same slack `color_grade`'s own HSV tests allow.
     let amplified = |(n, l, _): (String, Look, i32)| (n, l, 2);
+    let chained = |(n, l, _): (String, Look, i32)| (n, l, 3);
     v.push(amplified(with("grade hue+sat+contrast", &|l| {
         l.grade.hue = 45.0;
         l.grade.saturation = 1.6;
@@ -148,9 +149,13 @@ fn looks() -> Vec<(String, Look, i32)> {
         l.palette.colors = p.clone();
         l.palette.dither = true;
     }));
-    // everything at once, in pipeline order
+    // everything at once, in pipeline order. Each stage above is within a
+    // step on its own; chained, a step from bloom rides through saturation
+    // (1.2x), exposure (1.23x) and the palette map, so a stray pixel can
+    // land three away. Software rasterizers (lavapipe, WARP) show exactly
+    // that on 0.3% of pixels.
     let p = pal;
-    v.push(amplified(with("full stack", &move |l| {
+    v.push(chained(with("full stack", &move |l| {
         l.effects.stack = vec!["bloom".into(), "vignette".into()];
         l.grade.saturation = 1.2;
         l.grade.exposure = 0.3;
