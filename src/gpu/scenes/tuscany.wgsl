@@ -313,7 +313,7 @@ fn field_col(p: vec3f, n: vec3f, t: f32, rd: vec3f, l: Look, ctx: Ctx) -> vec3f 
     alb *= 1.0 + 0.16 * wv * crop * (1.0 - saturate(t / 2500.0)) * noise_value2(p.xz * 0.006 - vec2f(ctx.t * 0.02, 0.0));
     let dif = saturate(dot(n, l.sun));
     var sh = 1.0;
-    if (dif > 0.0 && t < 5000.0) { sh = shadow(p + n * 0.3, l.sun); }
+    if (dif > 0.0 && t < 5000.0) { sh = shadow(p + n * (0.3 + t * ctx.px * 1.5), l.sun); }
     sh *= drift_shade(p, l, ctx.t);
     return alb * (l.sun_c * dif * sh * 1.1 + l.amb * (0.6 + 0.4 * n.y));
 }
@@ -346,7 +346,7 @@ fn shade(p: vec3f, rd: vec3f, t: f32, mat: f32, l: Look, ctx: Ctx) -> vec3f {
     }
     let dif = saturate(dot(n, l.sun));
     var sh = 1.0;
-    if (dif > 0.0) { sh = shadow(p + n * 0.3, l.sun); }
+    if (dif > 0.0) { sh = shadow(p + n * (0.3 + t * ctx.px * 1.5), l.sun); }
     return alb * (l.sun_c * dif * sh * 1.1 + l.amb * (0.6 + 0.4 * n.y));
 }
 

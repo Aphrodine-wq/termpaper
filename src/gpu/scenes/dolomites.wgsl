@@ -38,7 +38,7 @@ fn look(theme: u32) -> Look {
     if (l.night > 0.5) {
         // moonless: starlight and airglow only
         l.sun_c = vec3f(0.0);
-        l.amb = vec3f(0.008, 0.011, 0.02);
+        l.amb = vec3f(0.012, 0.016, 0.03);
     } else {
         l.sun_c = sky_sun_light(l.sun);
         l.amb = sky_ambient(l.sun);
@@ -109,7 +109,7 @@ fn tower(p: vec3f, t: vec4f, tall: f32, k: f32, lod: i32) -> f32 {
     let qx = q.xz - vec2f(12.0 * snoise(vec2f(q.y * 0.003, k)), 0.0);
     var pd = sdf2_round_box(qx, half, min(half.x, half.y) * 0.4);
     // vertical cracks and chimneys
-    pd += 8.0 * snoise(vec2f((q.x - q.z * 0.5) * 0.02 + k, q.y * 0.0022));
+    pd += 4.5 * snoise(vec2f((q.x - q.z * 0.5) * 0.035 + k, q.y * 0.002));
     if (lod > 1) {
         pd += 2.5 * snoise(vec2f((q.x - q.z * 0.5) * 0.07 + k, q.y * 0.008));
     }
@@ -249,7 +249,7 @@ fn sky(rd: vec3f, l: Look, ctx: Ctx, full: bool) -> vec3f {
             // the summer Milky Way arching up from behind the wall
             let pole = normalize(vec3f(0.92, 0.2, 0.33));
             let core = normalize(vec3f(-0.3, 0.12, -0.95));
-            c += star_milky_way(sr, pole, core, ctx) * 1.8 * smoothstep(0.0, 0.2, rd.y);
+            c += star_milky_way(sr, pole, core, ctx) * 2.6 * smoothstep(0.0, 0.2, rd.y);
             c += star_field(sr, 0.9, ctx) * smoothstep(0.0, 0.12, rd.y);
         }
         return c;
@@ -328,11 +328,12 @@ fn shade(p: vec3f, rd: vec3f, t: f32, mat: f32, l: Look, ctx: Ctx) -> vec3f {
         alb = col_hex(0x7a5436u) * (0.75 + 0.25 * noise_value2(vec2f((p.x + p.z) * 2.0, p.y * 7.0)));
     } else if (mat > 1.5) {
         // dolomite: pale, bedded in horizontal layers, streaked by rain
-        let bed = 0.88 + 0.12 * smoothstep(0.3, 0.7, fract(p.y / 31.0 + 0.3 * snoise(vec2f(p.x * 0.008, 1.0))));
+        // (bedding shows on the walls; on slopes it would read as contours)
+        let bed = 1.0 - 0.12 * (1.0 - smoothstep(0.3, 0.7, fract(p.y / 31.0 + 0.3 * snoise(vec2f(p.x * 0.008, 1.0))))) * sstep(0.5, 0.2, n.y);
         let streak = noise_fbm2(vec2f((p.x - p.z * 0.5) * 0.04, p.y * 0.004), 4);
         alb = col_hex(0xd2c9b8u) * bed * (0.78 + 0.4 * streak);
         // dark lichen and water stains running down
-        alb = mix(alb, col_hex(0x6e6a62u), smoothstep(0.6, 0.8, noise_fbm2(vec2f((p.x - p.z * 0.5) * 0.06, p.y * 0.0018), 4)) * 0.55);
+        alb = mix(alb, col_hex(0x7a756cu), smoothstep(0.62, 0.8, noise_fbm2(vec2f((p.x - p.z * 0.5) * 0.12, p.y * 0.0018), 3)) * 0.4);
         // warm iron tint in patches
         alb = mix(alb, col_hex(0xd8ae84u), smoothstep(0.55, 0.8, noise_value2(vec2f(p.x * 0.012, p.y * 0.004))) * 0.4);
         // scree on the ledges
@@ -354,7 +355,7 @@ fn shade(p: vec3f, rd: vec3f, t: f32, mat: f32, l: Look, ctx: Ctx) -> vec3f {
     let dif = saturate(dot(n, l.sun));
     var sh = 1.0;
     // (only the rock and the scree under it are near enough to cast on)
-    if (dif > 0.0 && l.night < 0.5 && p.z < -1200.0) { sh = shadow(p + n * 0.5, l.sun); }
+    if (dif > 0.0 && l.night < 0.5 && p.z < -1200.0) { sh = shadow(p + n * (0.5 + t * ctx.px * 1.5), l.sun); }
     // first light only reaches above the shadow of the ridges to the east
     if (l.lit_line > 0.0) { sh *= smoothstep(l.lit_line - 80.0, l.lit_line + 120.0, p.y - 0.08 * p.x); }
     var c = alb * (l.sun_c * dif * sh + l.amb * (0.65 + 0.35 * n.y) * occ * 1.2);

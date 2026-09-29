@@ -212,7 +212,8 @@ fn sky(rd: vec3f, l: Look, ctx: Ctx, full: bool) -> vec3f {
     var c = sky_atmosphere_haze(rd, l.sun, l.haze);
     let grey = vec3f(col_luma(c)) * vec3f(0.95, 0.98, 1.03);
     c = mix(c, grey * 1.15 + l.amb * 0.2, l.overcast * 0.9);
-    if (full) { c += sky_sun_disk(rd, l.sun, 0.5) * (1.0 - l.overcast); }
+    // (no disk, and so no glint on the water, through an overcast)
+    if (full && l.overcast < 0.5) { c += sky_sun_disk(rd, l.sun, 0.5) * (1.0 - l.overcast); }
     // cumulus, or the overcast's lumpy base (not in the haze colour: at a
     // fixed elevation it would streak)
     if (full && rd.y > -0.02) {
@@ -304,7 +305,7 @@ fn rock_col(p: vec3f, n: vec3f, t: f32, l: Look, f: vec4f, shadows: bool, ctx: C
     alb = mix(alb, vec3f(0.8, 0.83, 0.88), snow);
     let dif = saturate(dot(n, l.sun));
     var sh = 1.0;
-    if (shadows && dif > 0.0 && l.night < 0.5 && l.overcast < 0.9) { sh = shadow(p + n * 3.0, l.sun, f); }
+    if (shadows && dif > 0.0 && l.night < 0.5 && l.overcast < 0.9) { sh = shadow(p + n * (3.0 + t * ctx.px * 1.5), l.sun, f); }
     var c = alb * (l.sun_c * dif * sh * 1.2 + l.amb * (0.6 + 0.4 * n.y) * 1.2);
     if (l.night > 0.5) { c += alb * vec3f(0.0, 0.02, 0.01) * snow; }
     return c;

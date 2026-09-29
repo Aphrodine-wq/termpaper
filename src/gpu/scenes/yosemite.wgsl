@@ -469,7 +469,7 @@ fn shade(p: vec3f, rd: vec3f, t: f32, mat: f32, l: Look, ctx: Ctx) -> vec3f {
     if (mat > 1.5 || p.z > -960.0) { n = nrm(p, t, ctx); }
     let dif0 = dot(n, l.sun);
     var sh = 1.0;
-    if (dif0 > 0.0 && l.overcast < 0.95) { sh = shadow(p + n * 2.0, l.sun) * deck_shadow(p, l, ctx.t); }
+    if (dif0 > 0.0 && l.overcast < 0.95) { sh = shadow(p + n * (2.0 + t * ctx.px * 1.5), l.sun) * deck_shadow(p, l, ctx.t); }
     var alb: vec3f;
     var occ = 1.0;
     var snowable = 1.0;
