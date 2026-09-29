@@ -126,6 +126,8 @@ struct Slot {
     pending: Option<usize>,
     /// The copy also carries the scene pass's two timestamps after the cells.
     timed: bool,
+    /// Caller's tag for the frame in flight (the engine: its scene clock).
+    tag: u64,
 }
 
 /// Bytes appended to a staging slot for the scene pass's begin/end timestamps.
@@ -208,6 +210,8 @@ pub struct Gpu {
     /// Timestamp queries for the scene pass, when the adapter has them.
     timestamps: Option<(wgpu::QuerySet, wgpu::Buffer)>,
     scene_ms: Option<f32>,
+    /// Tag of the frame `readback` holds.
+    readback_tag: u64,
 }
 
 /// The finished cells of a frame, ready to be written into a ratatui buffer.
@@ -435,6 +439,7 @@ impl Gpu {
             buffers_gen: 0,
             timestamps,
             scene_ms: None,
+            readback_tag: 0,
         };
         gpu.resize(width, height, max_cells);
         Some(gpu)
@@ -449,6 +454,12 @@ impl Gpu {
     }
 
     /// Invalidate old scene frames without waiting for outstanding commands.
+    /// Forget temporal history (smoothing) without touching frames in
+    /// flight: the next frame shows a different window of the scene.
+    pub fn reset_history(&mut self) {
+        self.prev_valid = false;
+    }
+
     pub fn invalidate(&mut self) {
         let (w, h) = self.dims;
         self.dims = (0, 0);
@@ -552,6 +563,7 @@ impl Gpu {
                 serial: 0,
                 pending: None,
                 timed: false,
+                tag: 0,
             })
             .collect();
 
@@ -701,6 +713,13 @@ impl Gpu {
     /// uniform slots than are reserved, in which case nothing is submitted and
     /// the caller should fall back to the CPU for this frame.
     pub fn submit(&mut self, canvas: &Canvas, plan: &Plan) -> bool {
+        self.submit_tagged(canvas, plan, 0)
+    }
+
+    /// `submit`, remembering `tag` with the frame: once its readback lands,
+    /// `readback_tag` returns it, so a caller can tell which request the
+    /// pipelined cells belong to.
+    pub fn submit_tagged(&mut self, canvas: &Canvas, plan: &Plan, tag: u64) -> bool {
         if self.failed() { return false; }
         let (w, h) = self.dims;
         let shader = self.shader_frame.is_some();
@@ -841,6 +860,7 @@ impl Gpu {
         self.slots[slot_idx].pending = Some(cells);
         self.slots[slot_idx].timed = timed;
         self.slots[slot_idx].serial = self.frame;
+        self.slots[slot_idx].tag = tag;
         self.frame += 1;
         true
     }
@@ -878,6 +898,7 @@ impl Gpu {
                     self.readback.extend_from_slice(bytemuck::cast_slice(&view[..]));
                     self.readback_cells = n;
                     self.readback_serial = Some(self.slots[i].serial);
+                    self.readback_tag = self.slots[i].tag;
                 }
                 if self.slots[i].timed {
                     let at = timing_offset((n * CELL_WORDS * 4) as u64);
@@ -900,6 +921,11 @@ impl Gpu {
             cols,
             rows,
         })
+    }
+
+    /// Tag passed to `submit_tagged` for the frame `poll_cells` returns.
+    pub fn readback_tag(&self) -> u64 {
+        self.readback_tag
     }
 
     /// Block until every in-flight frame has landed. Used by the benches and

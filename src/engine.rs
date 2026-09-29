@@ -131,23 +131,89 @@ fn describe_backend(
     }
 }
 
+/// Everything that decides a simulation's state. Changing any of it
+/// rebuilds the simulation: a new worker generation, replayed up to the
+/// clock out of sight.
 #[derive(Clone, PartialEq)]
-pub struct SceneKey {
+pub struct SimKey {
     pub name: String,
     pub seed: u64,
+    /// with `pixels` set to the mode the canvas is shown in: Classic scenes
+    /// compose for its pixel aspect
     pub opts: SceneOptions,
+    /// canvas size in pixels; (0, 0) for Studio scenes
     pub size: (usize, usize),
+    pub speed: f32,
+}
+
+impl std::fmt::Debug for SimKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SimKey")
+            .field("name", &self.name)
+            .field("seed", &self.seed)
+            .field("theme", &self.opts.theme)
+            .field("detail", &self.opts.detail)
+            .field("text_scale", &self.opts.text_scale)
+            .field("pixels", &self.opts.pixels)
+            .field("size", &self.size)
+            .field("speed", &self.speed)
+            .finish()
+    }
+}
+
+impl SimKey {
+    /// The key for a scene. A Studio scene is a stateless function of time
+    /// and position, so its canvas size and pixel mode are view, not sim:
+    /// they are cleared here and a wall or pixel change never rebuilds it.
+    /// (Its Classic fallback on a GPU-less machine rebuilds inside
+    /// `Playback`, which watches its own size.)
+    pub fn new(name: &str, seed: u64, mut opts: SceneOptions, size: (usize, usize), speed: f32) -> Self {
+        let size = if crate::scene::shader::find(name).is_some() {
+            opts.pixels = Pixels::default();
+            (0, 0)
+        } else {
+            size
+        };
+        SimKey { name: name.to_string(), seed, opts, size, speed }
+    }
+}
+
+/// How the simulation is shown. Changing it keeps the simulation running
+/// and only resets per-view history (temporal smoothing, cell hysteresis).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewKey {
+    /// the full (wall) canvas in pixels this pane shows a window of
+    pub canvas: (usize, usize),
+    /// terminal cells
     pub grid: (usize, usize),
+    /// canvas pixel at the pane's top-left cell
     pub crop: (usize, usize),
     pub pixels: Pixels,
+    /// terminal cell height / width; 2.0 when the terminal does not say
+    pub cell_aspect: f32,
+    /// bumped by the caller for view changes the fields do not show
+    pub rev: u64,
 }
+
+impl ViewKey {
+    /// On-screen height / width of one canvas pixel.
+    pub fn pixel_aspect(&self) -> f32 {
+        let (pw, ph) = self.pixels.cell_size();
+        self.cell_aspect * pw as f32 / ph as f32
+    }
+}
+
+/// Cell aspect assumed when the terminal does not report its pixel size.
+pub const DEFAULT_CELL_ASPECT: f32 = 2.0;
 
 #[derive(Clone)]
 pub struct Request {
     pub generation: u64,
-    pub key: SceneKey,
+    pub sim: SimKey,
+    pub view: ViewKey,
+    /// scene clock to render, ms since the anchor's t0
     pub elapsed_ms: u64,
-    pub speed: f32,
+    /// hold the previous clock (legacy; anchored panes freeze `elapsed_ms`)
     pub paused: bool,
     pub filters: Vec<String>,
     pub quick: Option<String>,
@@ -166,6 +232,12 @@ pub struct Frame {
     pub generation: u64,
     pub canvas: Canvas,
     pub cells: Option<Vec<u32>>,
+    /// terminal grid `cells` were packed for
+    pub grid: (usize, usize),
+    /// the scene clock this frame shows (the request it was rendered for,
+    /// which for pipelined GPU readback is an earlier one than the request
+    /// that returned it)
+    pub elapsed_ms: u64,
     pub backend: String,
     pub render_ms: f32,
 }
@@ -178,13 +250,14 @@ struct Mailbox {
     stopped: bool,
     /// Latest backend status when there is no new frame (shader compiling).
     status: Option<String>,
+    /// While a rebuilt simulation replays: estimated ms until caught up.
+    catchup_ms: Option<u32>,
 }
 
 pub struct Worker {
     shared: Arc<(Mutex<Mailbox>, Condvar)>,
-    key: Option<SceneKey>,
+    sim: Option<SimKey>,
     generation: u64,
-    speed: f32,
 }
 
 impl Worker {
@@ -197,22 +270,26 @@ impl Worker {
             .expect("render worker");
         Self {
             shared,
-            key: None,
+            sim: None,
             generation: 0,
-            speed: 1.0,
         }
     }
 
+    /// Hand the worker the latest request and take the latest finished
+    /// frame of the current generation. Only a sim change starts a new
+    /// generation; view changes (crop, grid, pixel aspect) and the clock
+    /// never do.
     pub fn submit(&mut self, mut request: Request) -> Option<Frame> {
-        let changed = self.key.as_ref() != Some(&request.key) || self.speed != request.speed;
-        if changed {
+        if self.sim.as_ref() != Some(&request.sim) {
             self.generation = self.generation.wrapping_add(1);
-            self.key = Some(request.key.clone());
-            self.speed = request.speed;
+            self.sim = Some(request.sim.clone());
         }
         request.generation = self.generation;
         let (lock, wake) = &*self.shared;
         let mut mailbox = lock.lock().unwrap();
+        if mailbox.generation != self.generation {
+            mailbox.catchup_ms = None;
+        }
         mailbox.generation = self.generation;
         mailbox.request = Some(request);
         let frame = mailbox
@@ -225,6 +302,13 @@ impl Worker {
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// While the current generation replays its simulation up to the clock:
+    /// the estimated ms until it catches up (None once it shows frames).
+    pub fn catchup_ms(&self) -> Option<u32> {
+        let mailbox = self.shared.0.lock().unwrap();
+        mailbox.catchup_ms.filter(|_| mailbox.generation == self.generation)
     }
 
     /// Status line published while no frame is available (e.g. a Studio
@@ -246,9 +330,9 @@ impl Drop for Worker {
 }
 
 /// Mix every value that decides a Studio frame's pixels into one hash, so a
-/// request that would redraw the identical tick can reuse the last cells.
+/// request that would redraw the identical frame can reuse the last cells.
 #[cfg(feature = "gpu")]
-fn frame_hash(u: &crate::gpu::FrameUniforms, r: &Request, k: &SceneKey) -> u64 {
+fn frame_hash(u: &crate::gpu::FrameUniforms, r: &Request) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut eat = |bytes: &[u8]| {
         for b in bytes {
@@ -267,10 +351,11 @@ fn frame_hash(u: &crate::gpu::FrameUniforms, r: &Request, k: &SceneKey) -> u64 {
     for v in [r.hue, r.saturation, r.contrast, r.dim, r.smooth] {
         eat(&v.to_le_bytes());
     }
-    for v in [k.grid.0, k.grid.1, k.crop.0, k.crop.1] {
-        eat(&(v as u64).to_le_bytes());
+    let v = &r.view;
+    for n in [v.grid.0, v.grid.1, v.crop.0, v.crop.1, v.canvas.0, v.canvas.1] {
+        eat(&(n as u64).to_le_bytes());
     }
-    eat(&[k.pixels as u8]);
+    eat(&[v.pixels as u8]);
     h
 }
 
@@ -293,6 +378,8 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
     let mut previous = Canvas::new(1, 1);
     let mut last = Instant::now();
     let mut elapsed_ms = 0;
+    // the view the per-view history (smoothing, hysteresis) belongs to
+    let mut view: Option<ViewKey> = None;
     #[cfg(feature = "gpu")]
     let mut governor = crate::governor::Governor::new(DEFAULT_GPU_BUDGET_MS, 4);
     // Studio scenes whose shader failed to compile this session: shown via
@@ -314,40 +401,52 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
             mailbox.request.take().unwrap()
         };
         let start = Instant::now();
-        let k = &request.key;
+        let sim = &request.sim;
+        let v = request.view;
         // scenes see the pixel mode they will be shown in (aspect/orientation)
         let opts = SceneOptions {
-            pixels: k.pixels,
-            ..k.opts.clone()
+            pixels: v.pixels,
+            ..sim.opts.clone()
         };
         if request.generation != generation {
             generation = request.generation;
             player = None;
             previous = Canvas::new(1, 1);
             elapsed_ms = request.elapsed_ms;
+            view = None;
             #[cfg(feature = "gpu")]
             {
                 last_hash = None;
                 if let Some(g) = &mut gpu {
                     g.invalidate();
                 }
-                if let Some(spec) = crate::scene::shader::find(&k.name) {
+                if let Some(spec) = crate::scene::shader::find(&sim.name) {
                     governor.reset(crate::scene::shader::max_spp(spec.cost, opts.detail));
                 }
             }
+        }
+        if view != Some(v) {
+            // same simulation, new window onto it: history from the old
+            // window would ghost into the new one
+            #[cfg(feature = "gpu")]
+            if let Some(g) = &mut gpu {
+                g.reset_history();
+            }
+            view = Some(v);
         }
         if request.paused {
             request.elapsed_ms = elapsed_ms;
         } else {
             elapsed_ms = request.elapsed_ms;
         }
+        let sim = &request.sim;
         #[cfg(feature = "gpu")]
         if gpu.as_ref().is_some_and(|g| g.failed()) {
             gpu = None;
             adapter = None;
             errored = true;
         }
-        let mut backend = plan_backend(renderer, adapter.is_some(), k.size, &k.name);
+        let mut backend = plan_backend(renderer, adapter.is_some(), v.canvas, &sim.name);
         if let Backend::GpuShader(spec) = backend {
             if broken.contains(&spec.name) {
                 backend = Backend::ShaderFallback(spec.fallback);
@@ -357,6 +456,9 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
         let mut label = describe_backend(renderer, adapter.as_deref(), errored, backend);
         #[allow(unused_mut)]
         let mut cells = None;
+        // the clock of the frame `cells` hold
+        #[allow(unused_mut)]
+        let mut shown_ms = request.elapsed_ms;
 
         #[cfg(feature = "gpu")]
         if let Some(name) = &request.prefetch {
@@ -380,12 +482,12 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
                 }
                 ShaderStatus::Ready => {}
             }
-            let (pw, ph) = k.pixels.cell_size();
+            let (pw, ph) = v.pixels.cell_size();
             // the pane's window: every pixel its cells show, starting at the
             // crop — rendered even where it overhangs the wall canvas, since
             // a Studio scene is defined everywhere
-            let window = ((k.grid.0 * pw).max(1), (k.grid.1 * ph).max(1));
-            g.resize(window.0, window.1, k.grid.0 * k.grid.1);
+            let window = ((v.grid.0 * pw).max(1), (v.grid.1 * ph).max(1));
+            g.resize(window.0, window.1, v.grid.0 * v.grid.1);
             governor.set_budget(request.budget_ms);
             let mirror = request.filters.iter().any(|f| f == "mirror");
             let theme = opts
@@ -395,18 +497,18 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
                 .unwrap_or(0) as u32;
             let spp = governor.spp();
             let u = crate::gpu::uniforms(&crate::gpu::FrameDesc {
-                view: crate::gpu::ShaderView::for_canvas(k.size, k.crop, k.pixels.aspect() as f64),
+                view: crate::gpu::ShaderView::for_canvas(v.canvas, v.crop, v.pixel_aspect() as f64),
                 window,
-                time: crate::gpu::shader_time(request.elapsed_ms, request.speed),
-                speed: request.speed,
-                seed: k.seed,
+                time: crate::gpu::shader_time(request.elapsed_ms, sim.speed),
+                speed: sim.speed,
+                seed: sim.seed,
                 theme,
                 detail: opts.detail,
                 spp,
                 mirror,
                 exposure: 0.0,
             });
-            let hash = frame_hash(&u, &request, k);
+            let hash = frame_hash(&u, &request);
             let post_filters: Vec<String> = request.filters.iter().filter(|f| *f != "mirror").cloned().collect();
             let smooth = request
                 .smooth
@@ -424,21 +526,22 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
                     contrast: request.contrast,
                     dim: request.dim,
                     smooth,
-                    pixels: k.pixels,
-                    cols: k.grid.0,
-                    rows: k.grid.1,
+                    pixels: v.pixels,
+                    cols: v.grid.0,
+                    rows: v.grid.1,
                     crop: (0, 0),
                 };
-                g.poll_cells(k.grid.0, k.grid.1);
-                if g.submit(&raw, &plan) {
+                g.poll_cells(v.grid.0, v.grid.1);
+                if g.submit_tagged(&raw, &plan, request.elapsed_ms) {
                     last_hash = Some(hash);
                 } else {
                     governor.on_backpressure();
                 }
             }
-            if let Some(done) = g.poll_cells(k.grid.0, k.grid.1) {
+            if let Some(done) = g.poll_cells(v.grid.0, v.grid.1) {
                 cells = Some(done.words.to_vec());
             }
+            shown_ms = g.readback_tag();
             if let Some(ms) = g.take_scene_ms() {
                 governor.observe(ms, spp);
                 label = format!("{label} · {spp} spp · {ms:.1} ms");
@@ -452,6 +555,8 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
                 generation,
                 canvas: Canvas::new(1, 1),
                 cells,
+                grid: v.grid,
+                elapsed_ms: shown_ms,
                 backend: label,
                 render_ms: start.elapsed().as_secs_f32() * 1000.0,
             };
@@ -465,26 +570,27 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
         // Classic scene (or a Studio scene's fallback) on the CPU.
         let cpu_name: &str = match backend {
             Backend::ShaderFallback(fb) => fb,
-            _ => &k.name,
+            _ => &sim.name,
         };
         if matches!(backend, Backend::GpuShader(_)) {
             // GPU vanished between planning and drawing: next request replans
             continue;
         }
+        let size = v.canvas;
         let gpu_world = backend == Backend::GpuWorld;
         let gpu_post = backend.gpu_post();
         if gpu_world {
-            if (raw.width(), raw.height()) != k.size {
-                raw.resize(k.size.0, k.size.1);
+            if (raw.width(), raw.height()) != size {
+                raw.resize(size.0, size.1);
             }
         } else {
-            let player = player.get_or_insert_with(|| Playback::new(cpu_name, &opts, k.seed));
-            player.advance_cancellable(
+            let player = player.get_or_insert_with(|| Playback::new(cpu_name, &opts, sim.seed));
+            let progress = player.advance_cancellable(
                 cpu_name,
                 &opts,
-                k.size,
+                size,
                 request.elapsed_ms,
-                request.speed,
+                sim.speed,
                 request.paused,
                 &mut raw,
                 || {
@@ -492,6 +598,12 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
                     mailbox.stopped || mailbox.generation != generation
                 },
             );
+            // a rebuilt simulation replays out of sight: no frame (the pane
+            // stays black or mid-fade), only the estimate of how long
+            publish_catchup(&shared, generation, (!progress.ready).then_some(progress.eta).flatten());
+            if !progress.ready {
+                continue;
+            }
         }
         // Discard superseded work before encoding or applying filters.
         if shared.0.lock().unwrap().generation != generation {
@@ -505,9 +617,9 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
         last = Instant::now();
         #[cfg(feature = "gpu")]
         if let Some(g) = gpu.as_mut().filter(|_| gpu_post) {
-            g.resize(k.size.0, k.size.1, k.grid.0 * k.grid.1);
+            g.resize(size.0, size.1, v.grid.0 * v.grid.1);
             if gpu_world {
-                g.scene_frame(&k.name, &opts, k.seed, t, request.speed);
+                g.scene_frame(&sim.name, &opts, sim.seed, t, sim.speed);
             } else {
                 g.canvas_frame();
             }
@@ -520,17 +632,18 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
                 contrast: request.contrast,
                 dim: request.dim,
                 smooth,
-                pixels: k.pixels,
-                cols: k.grid.0,
-                rows: k.grid.1,
-                crop: k.crop,
+                pixels: v.pixels,
+                cols: v.grid.0,
+                rows: v.grid.1,
+                crop: v.crop,
             };
             // Reclaim completed slots before trying to submit into the ring.
-            g.poll_cells(k.grid.0, k.grid.1);
-            g.submit(&raw, &plan);
-            if let Some(done) = g.poll_cells(k.grid.0, k.grid.1) {
+            g.poll_cells(v.grid.0, v.grid.1);
+            g.submit_tagged(&raw, &plan, request.elapsed_ms);
+            if let Some(done) = g.poll_cells(v.grid.0, v.grid.1) {
                 cells = Some(done.words.to_vec());
             }
+            shown_ms = g.readback_tag();
         }
         // Initial GPU frames are in flight. Do not publish a blank CPU canvas
         // over the last completed image while waiting for asynchronous readback.
@@ -559,6 +672,8 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
             generation,
             canvas,
             cells,
+            grid: v.grid,
+            elapsed_ms: shown_ms,
             backend: label,
             render_ms: start.elapsed().as_secs_f32() * 1000.0,
         };
@@ -566,6 +681,15 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
         if mailbox.generation == generation && !mailbox.stopped {
             mailbox.frame = Some(frame);
         }
+    }
+}
+
+/// Report (or clear, with None) how long the current generation's replay
+/// still needs.
+fn publish_catchup(shared: &Arc<(Mutex<Mailbox>, Condvar)>, generation: u64, eta: Option<std::time::Duration>) {
+    let mut mailbox = shared.0.lock().unwrap();
+    if mailbox.generation == generation {
+        mailbox.catchup_ms = eta.map(|d| d.as_millis().min(u32::MAX as u128) as u32);
     }
 }
 
@@ -584,19 +708,19 @@ mod tests {
     use super::*;
 
     fn request(name: &str) -> Request {
+        let opts = SceneOptions { pixels: Pixels::Half, ..SceneOptions::default() };
         Request {
             generation: 0,
-            key: SceneKey {
-                name: name.into(),
-                seed: 42,
-                opts: SceneOptions::default(),
-                size: (24, 24),
+            sim: SimKey::new(name, 42, opts, (24, 24), 1.0),
+            view: ViewKey {
+                canvas: (24, 24),
                 grid: (24, 12),
                 crop: (0, 0),
                 pixels: Pixels::Half,
+                cell_aspect: DEFAULT_CELL_ASPECT,
+                rev: 0,
             },
             elapsed_ms: 100,
-            speed: 1.0,
             paused: false,
             filters: vec![],
             quick: None,
@@ -660,12 +784,7 @@ mod tests {
     fn mailbox_is_bounded_and_discards_superseded_frames() {
         // No worker consumes the queue: submissions must remain nonblocking
         // even when rendering is indefinitely busy.
-        let mut worker = Worker {
-            shared: Arc::new((Mutex::new(Mailbox::default()), Condvar::new())),
-            key: None,
-            generation: 0,
-            speed: 1.0,
-        };
+        let mut worker = idle_worker();
         for ms in 0..1000 {
             let mut r = request("fire");
             r.elapsed_ms = ms;
@@ -688,15 +807,89 @@ mod tests {
             generation: 1,
             canvas: Canvas::new(24, 24),
             cells: None,
+            grid: (24, 12),
+            elapsed_ms: 999,
             backend: "test".into(),
             render_ms: 0.0,
         });
         assert!(worker.submit(request("scroll")).is_none());
         assert_eq!(worker.generation(), 2);
         let mut faster = request("scroll");
-        faster.speed = 2.0;
+        faster.sim.speed = 2.0;
         worker.submit(faster);
         assert_eq!(worker.generation(), 3);
+    }
+
+    fn idle_worker() -> Worker {
+        Worker {
+            shared: Arc::new((Mutex::new(Mailbox::default()), Condvar::new())),
+            sim: None,
+            generation: 0,
+        }
+    }
+
+    /// Moving the window (wall crop, terminal resize, pixel aspect) or the
+    /// clock keeps the simulation; changing what is simulated rebuilds it.
+    #[test]
+    fn view_changes_keep_the_generation_and_sim_changes_bump_it() {
+        let mut worker = idle_worker();
+        worker.submit(request("fire"));
+        let gen = worker.generation();
+        let views: [fn(&mut ViewKey); 5] = [
+            |v| v.crop = (8, 4),
+            |v| v.grid = (30, 10),
+            |v| v.cell_aspect = 2.25,
+            |v| v.rev += 1,
+            |v| v.crop = (0, 0),
+        ];
+        for (i, change) in views.iter().enumerate() {
+            let mut r = request("fire");
+            r.elapsed_ms = 5_000 + i as u64;
+            change(&mut r.view);
+            worker.submit(r);
+            assert_eq!(worker.generation(), gen, "view change {i} rebuilt the simulation");
+        }
+        // a frame of the current generation survives a view change
+        worker.shared.0.lock().unwrap().frame = Some(Frame {
+            generation: gen,
+            canvas: Canvas::new(24, 24),
+            cells: None,
+            grid: (24, 12),
+            elapsed_ms: 5_000,
+            backend: "test".into(),
+            render_ms: 0.0,
+        });
+        let mut moved = request("fire");
+        moved.view.crop = (2, 2);
+        assert!(worker.submit(moved).is_some(), "an old-view frame stays showable");
+        let sims: [fn(&mut SimKey); 5] = [
+            |s| s.seed = 43,
+            |s| s.speed = 1.5,
+            |s| s.size = (48, 24),
+            |s| s.opts.detail = crate::scene::Detail::High,
+            |s| s.name = "rain".into(),
+        ];
+        for (i, change) in sims.iter().enumerate() {
+            let before = worker.generation();
+            let mut r = request("fire");
+            change(&mut r.sim);
+            worker.submit(r);
+            assert_eq!(worker.generation(), before + 1, "sim change {i} kept the old simulation");
+            worker.submit(request("fire"));
+        }
+    }
+
+    /// A Studio scene has no state: canvas size and pixel mode are view.
+    #[test]
+    fn studio_sim_keys_ignore_canvas_and_pixels() {
+        let Some(spec) = crate::scene::shader::SHADER_SCENES.first() else { return };
+        let half = SceneOptions { pixels: Pixels::Half, ..SceneOptions::default() };
+        let quad = SceneOptions { pixels: Pixels::Quad, ..SceneOptions::default() };
+        assert_eq!(
+            SimKey::new(spec.name, 1, half.clone(), (100, 50), 1.0),
+            SimKey::new(spec.name, 1, quad.clone(), (400, 90), 1.0)
+        );
+        assert_ne!(SimKey::new("fire", 1, half, (100, 50), 1.0), SimKey::new("fire", 1, quad, (100, 50), 1.0));
     }
 
     #[test]

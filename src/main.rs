@@ -708,6 +708,10 @@ fn join_group(
 /// suspend: the anchor is retimed so the scene resumes where it stopped.
 const SUSPEND_JUMP_MS: i64 = 5_000;
 
+/// A rebuilt simulation estimated to need longer than this to replay up to
+/// the anchor's clock asks for a fresh anchor instead.
+const REANCHOR_ETA_MS: u32 = 3_000;
+
 /// Merge current runtime settings into the stored config and save it.
 fn persist(settings: &mut Settings, scene_name: &str, opts: &SceneOptions) {
     let cfg = &mut settings.cfg;
@@ -887,6 +891,10 @@ fn run(
     let mut worker_status: Option<String> = None;
     // suspend detection: realtime vs monotonic progress between frames
     let mut clock_probe = (Instant::now(), link::epoch_now_ms());
+    // the anchor this pane asked the leader to replace (catch-up too long)
+    let mut reanchor_wanted: Option<link::Stamp> = None;
+    // bumped whenever the wall layout moves this pane's window
+    let mut view_rev = 0u64;
     let mut wall_layout: Option<wall::WallLayout> = None;
     let mut wall_refresh = Instant::now() - Duration::from_secs(10);
     // hyprctl inside the frame loop stalls the frame it lands on
@@ -1048,9 +1056,11 @@ fn run(
             }
             idx = names.iter().position(|n| *n == st.cur.scene).unwrap_or(idx);
             sim_debt = 0.0;
+            reanchor_wanted = None;
             if let Some(g) = &mut guard {
                 g.set_scene(names[idx]);
                 g.set_synced(st.synced);
+                g.set_reanchor(None);
             }
             last_switch = now;
         }
@@ -1070,6 +1080,7 @@ fn run(
             if let Some(g) = &mut guard {
                 g.set_geometry(cols, rows, geo.map(|g| (g.x, g.y, g.w, g.h)));
             }
+            let old_layout = wall_layout;
             wall_layout = if let Some(spec) = &settings.wall_spec {
                 wall::manual_layout(spec, cols, rows)
             } else if settings.link_enabled && settings.wall_enabled {
@@ -1106,6 +1117,9 @@ fn run(
                 if l.too_big {
                     wall_layout = None; // guard: virtual area too big, stay local
                 }
+            }
+            if wall_layout != old_layout {
+                view_rev += 1;
             }
         }
 
@@ -1146,13 +1160,20 @@ fn run(
             let crop = wall_layout.map(|l| (l.crop_x * pw, l.crop_y * ph)).unwrap_or((0, 0));
             let request = termpaper::engine::Request {
                 generation: 0,
-                key: termpaper::engine::SceneKey {
-                    name: st.cur.scene.clone(), seed: st.cur.seed, opts: shown_opts.clone(), size,
-                    grid: (area.width as usize, area.height as usize), crop, pixels: shown_pixels,
+                // what is simulated: a change rebuilds (and replays out of sight)
+                sim: termpaper::engine::SimKey::new(&st.cur.scene, st.cur.seed, shown_opts.clone(), size, st.cur.speed),
+                // how it is shown: a change keeps the simulation running
+                view: termpaper::engine::ViewKey {
+                    canvas: size,
+                    grid: (area.width as usize, area.height as usize),
+                    crop,
+                    pixels: shown_pixels,
+                    cell_aspect: termpaper::engine::DEFAULT_CELL_ASPECT,
+                    rev: view_rev,
                 },
                 // a paused anchor freezes elapsed itself: the worker keeps
                 // replaying up to it (a pane joining a paused wall catches up)
-                elapsed_ms, speed: st.cur.speed, paused: false, filters: settings.filters.clone(),
+                elapsed_ms, paused: false, filters: settings.filters.clone(),
                 quick: quick_filter.clone(), hue: settings.hue_shift, saturation: settings.saturation,
                 contrast: settings.contrast, dim: fade * settings.dim, smooth: settings.smooth,
                 budget_ms: settings.gpu_budget_ms,
@@ -1168,8 +1189,10 @@ fn run(
                 let mut drawn = false;
                 #[cfg(feature = "gpu")]
                 if let Some(words) = &frame.cells {
+                    // the frame's own grid: after a resize the last frame
+                    // (same simulation, old view) stays up until the next
                     let cells = termpaper::gpu::FrameCells {
-                        words, cols: area.width as usize, rows: area.height as usize,
+                        words, cols: frame.grid.0, rows: frame.grid.1,
                     };
                     termpaper::gpu::blit(&cells, &frame.canvas, crop, shown_pixels, area,
                         f.buffer_mut(), settings.truecolor);
@@ -1282,6 +1305,34 @@ fn run(
             }
         })?;
         crossterm::execute!(terminal.backend_mut(), crossterm::terminal::EndSynchronizedUpdate)?;
+
+        // A rebuilt simulation that would need more than a few seconds of
+        // replay to reach the anchor's clock (an hours-old anchor, a wall
+        // resize) asks for a fresh anchor instead: the leader restarts the
+        // scene for the whole group, together, after a fade.
+        if st.next.is_none() && worker.catchup_ms().is_some_and(|eta| eta > REANCHOR_ETA_MS) {
+            match guard.as_mut().filter(|_| st.synced) {
+                Some(g) => {
+                    g.set_reanchor(Some(st.cur.stamp));
+                    reanchor_wanted = Some(st.cur.stamp);
+                }
+                None => {
+                    let mut a = st.cur.clone();
+                    a.seed = rand::rng().random();
+                    begin_switch(&mut st, &mut guard, &mut transition, &names, a, false);
+                }
+            }
+        }
+        // the leader answers re-anchor requests for the anchor it runs
+        if st.synced && st.next.is_none() && guard.is_some() && is_leader(&peers.list, true) {
+            let stamp = st.cur.stamp;
+            let wanted = reanchor_wanted == Some(stamp) || peers.list.iter().any(|i| i.reanchor == Some(stamp));
+            if wanted {
+                let mut a = st.cur.clone();
+                a.seed = rand::rng().random();
+                begin_switch(&mut st, &mut guard, &mut transition, &names, a, true);
+            }
+        }
 
         // steady pacing: coarse sleep to ~1ms before the deadline, then
         // Sleep (inside the event poll) to just before the deadline, then spin

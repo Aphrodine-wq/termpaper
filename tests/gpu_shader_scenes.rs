@@ -2,7 +2,7 @@
 //! device): `cargo test --release --test gpu_shader_scenes -- --ignored`.
 #![cfg(feature = "gpu")]
 use std::time::{Duration, Instant};
-use termpaper::engine::{Renderer, Request, SceneKey, Worker, DEFAULT_GPU_BUDGET_MS};
+use termpaper::engine::{Renderer, Request, SimKey, ViewKey, Worker, DEFAULT_CELL_ASPECT, DEFAULT_GPU_BUDGET_MS};
 use termpaper::gpu::{self, Gpu};
 use termpaper::render::Pixels;
 use termpaper::scene::{shader, Detail, SceneOptions};
@@ -127,17 +127,16 @@ fn the_worker_delivers_cells_for_a_studio_scene() {
     loop {
         let req = Request {
             generation: 0,
-            key: SceneKey {
-                name: spec.name.into(),
-                seed: 1,
-                opts: SceneOptions::default(),
-                size: (grid.0, grid.1 * 2),
+            sim: SimKey::new(spec.name, 1, SceneOptions::default(), (grid.0, grid.1 * 2), 1.0),
+            view: ViewKey {
+                canvas: (grid.0, grid.1 * 2),
                 grid,
                 crop: (0, 0),
                 pixels: Pixels::Half,
+                cell_aspect: DEFAULT_CELL_ASPECT,
+                rev: 0,
             },
             elapsed_ms: start.elapsed().as_millis() as u64,
-            speed: 1.0,
             paused: false,
             filters: vec!["vignette".into()],
             quick: None,
