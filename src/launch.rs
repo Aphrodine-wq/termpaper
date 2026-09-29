@@ -4,7 +4,9 @@
 //! placed with a Hyprland exec rule. Font sizes are scaled by each monitor's
 //! pixel pitch so terminal cells come out the same physical size everywhere —
 //! the art is equally sharp on every screen and Classic scenes resample by
-//! ~1. Padding is forced to zero so the cell grid starts at the window edge.
+//! ~1. Padding is forced to zero so the cell grid starts at the window edge,
+//! and the background is opaque (a translucent terminal would let the desktop
+//! show through the art).
 //! Windows are classed `termpaper-wallpaper-<OUTPUT>`, which the hyprwinwrap
 //! plugin (if configured for that pattern) moves into the background layer.
 use crate::desk::Desk;
@@ -70,8 +72,8 @@ pub fn plan_wall_up(
             term.extend(extra.iter().map(|e| shell_quote(e)));
             let command = format!(
                 "kitty --class {} -o font_size={} -o window_padding_width=0 \
-                 -o placement_strategy=top-left -o repaint_delay=5 -o input_delay=0 \
-                 -o sync_to_monitor=yes -o confirm_os_window_close=0 -e {}",
+                 -o placement_strategy=top-left -o background_opacity=1 -o repaint_delay=5 \
+                 -o input_delay=0 -o sync_to_monitor=yes -o confirm_os_window_close=0 -e {}",
                 class,
                 pt,
                 term.join(" ")
