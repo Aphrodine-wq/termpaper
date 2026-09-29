@@ -362,6 +362,45 @@ fn main() {
     m.handle(Input::Char('?'), &c);
     states.push(("help".into(), m));
 
+    // the colour studio, one state per tab, with a palette in play
+    let mut studio_look = c.look.clone();
+    studio_look.grade.hue = 20.0;
+    studio_look.grade.shadows = termpaper::look::Tone { hue: 215.0, amount: 0.6 };
+    studio_look.grade.highlights = termpaper::look::Tone { hue: 40.0, amount: 0.4 };
+    studio_look.palette.colors = termpaper::look::PALETTES[0].1.to_vec();
+    studio_look.palette.mode = termpaper::look::PaletteMode::Tint;
+    studio_look.palette.strength = 0.6;
+    let studios: Vec<(String, termpaper::studio::Studio)> = termpaper::studio::Tab::ALL
+        .iter()
+        .map(|t| {
+            let mut s = termpaper::studio::Studio::new();
+            s.open_on(*t);
+            s.swatch = 2;
+            (format!("studio_{}", t.title().to_lowercase()), s)
+        })
+        .collect();
+    for (name, s) in &studios {
+        let mut term = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+        term.draw(|f| {
+            render::draw(&canvas, f.area(), f.buffer_mut(), true, Pixels::Half);
+            termpaper::studio::render(f, f.area(), s, &studio_look, true, 2.0);
+        })
+        .unwrap();
+        let mut p = Painter {
+            w: cols as usize * CW,
+            h: rows as usize * CH,
+            px: vec![(0, 0, 0); cols as usize * CW * rows as usize * CH],
+            regular: regular.clone(),
+            bold: bold.clone(),
+            fallback: fallback.clone(),
+            cache: HashMap::new(),
+        };
+        p.paint(term.backend().buffer());
+        let path = out.join(format!("{name}.png"));
+        p.save(&path);
+        println!("{}", path.display());
+    }
+
     for (name, m) in &states {
         let mut term = Terminal::new(TestBackend::new(cols, rows)).unwrap();
         term.draw(|f| {

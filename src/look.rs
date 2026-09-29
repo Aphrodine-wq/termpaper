@@ -230,6 +230,43 @@ impl Default for Palette {
 
 pub const MAX_COLORS: usize = 8;
 
+const fn c(hex: u32) -> Rgb {
+    Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+/// Named palettes, darkest colour first (what a `map` runs through from the
+/// shadows up). Terminal colour schemes' own colours, plus a few moods.
+pub const PALETTES: &[(&str, &[Rgb])] = &[
+    ("Tokyo Night", &[c(0x1a1b26), c(0x24283b), c(0x414868), c(0x7aa2f7), c(0xbb9af7), c(0xc0caf5)]),
+    ("Catppuccin Mocha", &[c(0x1e1e2e), c(0x313244), c(0x585b70), c(0x89b4fa), c(0xcba6f7), c(0xf5c2e7), c(0xcdd6f4)]),
+    ("Gruvbox", &[c(0x282828), c(0x504945), c(0xcc241d), c(0xd65d0e), c(0xd79921), c(0xb8bb26), c(0xebdbb2)]),
+    ("Nord", &[c(0x2e3440), c(0x3b4252), c(0x4c566a), c(0x5e81ac), c(0x88c0d0), c(0xd8dee9), c(0xeceff4)]),
+    ("Dracula", &[c(0x282a36), c(0x44475a), c(0x6272a4), c(0xbd93f9), c(0xff79c6), c(0xf8f8f2)]),
+    ("Solarized", &[c(0x002b36), c(0x073642), c(0x268bd2), c(0x2aa198), c(0xb58900), c(0xeee8d5), c(0xfdf6e3)]),
+    ("Rosé Pine", &[c(0x191724), c(0x26233a), c(0x6e6a86), c(0xc4a7e7), c(0xebbcba), c(0xe0def4)]),
+    ("Everforest", &[c(0x2d353b), c(0x3d484d), c(0x7a8478), c(0x83c092), c(0xa7c080), c(0xdbbc7f), c(0xd3c6aa)]),
+    ("Kanagawa", &[c(0x1f1f28), c(0x2a2a37), c(0x54546d), c(0x7e9cd8), c(0x957fb8), c(0xdcd7ba)]),
+    ("One Dark", &[c(0x282c34), c(0x3e4452), c(0x5c6370), c(0x61afef), c(0xc678dd), c(0xe5c07b), c(0xabb2bf)]),
+    ("Game Boy", &[c(0x0f380f), c(0x306230), c(0x8bac0f), c(0x9bbc0f)]),
+    ("Amber CRT", &[c(0x1a0f00), c(0x5c3300), c(0xc77700), c(0xffb000), c(0xffd480)]),
+    ("Green Phosphor", &[c(0x001a00), c(0x004d00), c(0x00aa22), c(0x33ff66), c(0xb3ffc6)]),
+    ("Vaporwave", &[c(0x1a0033), c(0x3d0066), c(0xff00a0), c(0x00e5ff), c(0xffd1f0)]),
+    ("Synthwave", &[c(0x120024), c(0x2b0f54), c(0xab1f65), c(0xff4f69), c(0xff8f56), c(0xffe36e)]),
+    ("Cyberpunk", &[c(0x0d0221), c(0x261447), c(0xf6019d), c(0xff3864), c(0x2de2e6), c(0xf9c80e)]),
+    ("Sunset", &[c(0x1b1036), c(0x5b2a6e), c(0xc2446c), c(0xf47c48), c(0xffcf6b)]),
+    ("Ocean", &[c(0x03101c), c(0x0b3954), c(0x087e8b), c(0x7fc8d8), c(0xdff3f8)]),
+    ("Forest", &[c(0x0b1a0f), c(0x1e3a24), c(0x3f6b3a), c(0x8ba65a), c(0xe4e7b9)]),
+    ("Arctic", &[c(0x0b1320), c(0x1c3d5a), c(0x4f8fc0), c(0xa9d6f5), c(0xf0faff)]),
+    ("Sepia", &[c(0x1e140c), c(0x4a3423), c(0x8a6a4b), c(0xc7a47f), c(0xf1e1c6)]),
+    ("Pastel", &[c(0x2b2d42), c(0x8d99ae), c(0xffb5a7), c(0xfcd5ce), c(0xf8edeb)]),
+    ("Mono", &[c(0x0a0a0a), c(0x6e6e6e), c(0xf5f5f5)]),
+];
+
+/// The named palette with exactly these colours, if any.
+pub fn palette_name(colors: &[Rgb]) -> Option<&'static str> {
+    PALETTES.iter().find(|(_, p)| *p == colors).map(|(n, _)| *n)
+}
+
 /// The effect stack: names applied in order, each with a strength (1 is
 /// the classic look, 0 is off).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

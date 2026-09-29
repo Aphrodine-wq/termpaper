@@ -1,6 +1,6 @@
 //! termpaper — Wallpaper Engine for the terminal. Live truecolor worlds.
 
-use termpaper::{color_wheel, config, filter, link, menu, render, scene, transition, wall};
+use termpaper::{config, filter, link, menu, render, scene, studio, transition, wall};
 
 use clap::{Parser, Subcommand};
 use config::CycleScope;
@@ -1239,8 +1239,8 @@ fn run(
     // settings as they were before each change the menu made (`u` undoes)
     let mut undo: Vec<Snapshot> = Vec::new();
     let mut undo_last: Option<(std::mem::Discriminant<Effect>, Instant)> = None;
-    let mut color_open = false;
-    let mut color_param = color_wheel::Param::Hue;
+    // the colour studio (c, or the menu's Colour studio… and Palette rows)
+    let mut studio = studio::Studio::new();
     let mut opts = SceneOptions {
         theme: settings.theme.clone(),
         detail: settings.detail,
@@ -1583,10 +1583,8 @@ fn run(
                     }
                     save.mark(now);
                 }
-                Effect::OpenColorGrade | Effect::OpenPalette => {
-                    color_open = true;
-                    color_param = color_wheel::Param::Hue;
-                }
+                Effect::OpenColorGrade => studio.open_on(studio::Tab::Colour),
+                Effect::OpenPalette => studio.open_on(studio::Tab::Palette),
                 Effect::Undo => {
                     match undo.pop() {
                         Some(snap) => {
@@ -1631,7 +1629,7 @@ fn run(
         }
         // config writes coalesce while the menu or wheel is up; otherwise
         // (including right after either closes) they go out immediately
-        let write = if menu.open || color_open { save.due(now) } else { save.take() };
+        let write = if menu.open || studio.open { save.due(now) } else { save.take() };
         if write {
             let (scene_name, theme) = remembered_scene(&preview, &names, idx, &opts);
             persist(&mut settings, scene_name, theme, opts.detail);
@@ -2060,8 +2058,9 @@ fn run(
                 }
             }
 
-            // the menu floats over the live scene
-            if menu.open {
+            // the menu floats over the live scene (the studio takes its
+            // place while it is up)
+            if menu.open && !studio.open {
                 let status = worker_status.clone().or_else(|| rendered.as_ref().map(|f| format!("{} · worker {:.1} ms · lead {}", f.backend, f.render_ms, lead.lead())))
                     .unwrap_or_else(|| "Renderer initializing…".into());
                 let wall_status = match (my_plan.as_ref(), wall_layout) {
@@ -2082,9 +2081,10 @@ fn run(
                 let ctx = menu_ctx(&settings, &opts, names[idx], status, wall_status, instances);
                 menu::view::render(f, area, &menu, &ctx);
             }
-            if color_open {
-                let g = &settings.look.get().grade;
-                color_wheel::render(f, area, g.hue, g.saturation, g.contrast, color_param);
+            if studio.open {
+                // round wheels need the real cell shape
+                let aspect = cell_px.map(|(w, h)| h / w).unwrap_or(termpaper::engine::DEFAULT_CELL_ASPECT);
+                studio::render(f, area, &studio, settings.look.get(), settings.truecolor, aspect);
             }
         })?;
         crossterm::execute!(terminal.backend_mut(), crossterm::terminal::EndSynchronizedUpdate)?;
@@ -2160,13 +2160,18 @@ fn run(
                         let Some(input) = menu::Input::from_mouse(mouse) else {
                             continue;
                         };
-                        if menu.open {
+                        if studio.open {
+                            pending_fx.extend(studio.handle(input, settings.look.get()));
+                            if !pending_fx.is_empty() || !studio.open {
+                                break;
+                            }
+                        } else if menu.open {
                             let ctx = menu_ctx(&settings, &opts, names[idx], String::new(), String::new(), Vec::new());
                             pending_fx.extend(menu.handle(input, &ctx));
                             if !pending_fx.is_empty() || !menu.open {
                                 break;
                             }
-                        } else if !color_open
+                        } else if !studio.open
                             && matches!(input, menu::Input::Mouse { kind: menu::Mouse::Down, .. })
                             && !settings.screensaver
                         {
@@ -2194,64 +2199,27 @@ fn run(
                         break;
                     }
 
-                    if color_open {
-                        if key.code == KeyCode::Esc || km.matches("color", key.code) {
-                            color_open = false;
+                    // Ctrl-C quits from anywhere, menu or not
+                    let ctrl_c = key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL);
+
+                    // the colour studio takes every key while it is up
+                    if studio.open && !ctrl_c {
+                        if km.matches("color", key.code) && key.code != KeyCode::Char('c') {
+                            studio.open = false;
+                        } else if let Some(input) = menu::Input::from_key(key) {
+                            pending_fx.extend(studio.handle(input, settings.look.get()));
+                        }
+                        if !studio.open {
                             save.mark(Instant::now());
-                            break;
                         }
-                        if key.code == KeyCode::Tab {
-                            color_param = match color_param {
-                                color_wheel::Param::Hue => color_wheel::Param::Saturation,
-                                color_wheel::Param::Saturation => color_wheel::Param::Contrast,
-                                color_wheel::Param::Contrast => color_wheel::Param::Hue,
-                            };
-                            break;
-                        }
-                        if key.code == KeyCode::Char('0') {
-                            let mut look = settings.look.get().clone();
-                            look.grade.hue = 0.0;
-                            look.grade.saturation = 1.0;
-                            look.grade.contrast = 1.0;
-                            settings.look.set(look);
-                            if let Some(g) = &mut guard {
-                                g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                            }
-                            break;
-                        }
-                        let fine = match key.code {
-                            KeyCode::Left => Some(-1),
-                            KeyCode::Right => Some(1),
-                            KeyCode::Up => Some(10),
-                            KeyCode::Down => Some(-10),
-                            _ => None,
-                        };
-                        if let Some(steps) = fine {
-                            let mut look = settings.look.get().clone();
-                            let g = &mut look.grade;
-                            match color_param {
-                                color_wheel::Param::Hue => {
-                                    g.hue = color_wheel::step_hue_steps(g.hue, steps);
-                                }
-                                color_wheel::Param::Saturation => {
-                                    g.saturation = color_wheel::step_sat(g.saturation, steps as f32 * color_wheel::SAT_STEP);
-                                }
-                                color_wheel::Param::Contrast => {
-                                    g.contrast = color_wheel::step_contrast(g.contrast, steps as f32 * color_wheel::CONTRAST_STEP);
-                                }
-                            }
-                            settings.look.set(look);
-                            if let Some(g) = &mut guard {
-                                g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                            }
+                        if !pending_fx.is_empty() || !studio.open {
                             break;
                         }
                         continue;
                     }
 
-                    // Ctrl-C quits from anywhere, menu or not
-                    let ctrl_c = key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL);
+                    // (Ctrl-C quits from anywhere, menu or not: `ctrl_c` above)
 
                     if menu.open && !ctrl_c {
                         // modal: every key goes to the menu — including `0`,
@@ -2312,17 +2280,7 @@ fn run(
                         continue;
                     }
                     if km.matches("color", key.code) {
-                        color_open = !color_open;
-                        if color_open {
-                            color_param = color_wheel::Param::Hue;
-                            if settings.look.get().basic_grade_is_neutral() {
-                                let mut look = settings.look.get().clone();
-                                look.grade.hue = 45.0;
-                                settings.look.set(look);
-                            }
-                        } else {
-                            save.mark(Instant::now());
-                        }
+                        studio.open_on(studio.tab);
                         continue;
                     }
                     // relative to the scene a pending switch lands on, so

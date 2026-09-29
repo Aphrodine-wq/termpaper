@@ -8,7 +8,7 @@
 //! drives their stepping, their text and the bar the view draws.
 
 use super::{fps_step, speed_step, Effect, MenuCtx, Page};
-use crate::color_wheel;
+use crate::studio as color_wheel;
 use crate::config::CycleScope;
 use crate::engine::Renderer;
 use crate::link::{self, GROUP_PRESETS};
