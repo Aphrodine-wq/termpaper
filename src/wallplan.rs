@@ -192,6 +192,88 @@ pub fn plan(desk: &Desk, cfg: &DeskConfig, clients: &[HyprClient], panes: &[Pane
     })
 }
 
+/// Leader side: recompute the plan from a fresh compositor snapshot twice a
+/// second and publish it when the layout really changed (after seeing the
+/// same result twice, so a window mid-drag does not thrash every pane).
+pub struct Planner {
+    active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Planner {
+    /// `panes` returns the group's current pane geometry (from the registry).
+    pub fn spawn<F>(dir: std::path::PathBuf, leader: u32, panes: F) -> Self
+    where
+        F: Fn() -> Vec<PaneGeom> + Send + 'static,
+    {
+        use std::sync::atomic::Ordering;
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = active.clone();
+        let _ = std::thread::Builder::new().name("termpaper-planner".into()).spawn(move || {
+            let mut candidate: Option<WallPlan> = None;
+            let mut published: Option<WallPlan> = WallPlan::load(&dir);
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if !flag.load(Ordering::Acquire) {
+                    candidate = None;
+                    continue;
+                }
+                let (Some(mons), Some(clients)) = (crate::hypr::monitors(), crate::hypr::clients()) else {
+                    continue;
+                };
+                let cfg = crate::desk::load_desk();
+                let desk = Desk::from_hypr(&mons, &cfg);
+                let Some(next) = plan(&desk, &cfg, &clients, &panes(), leader) else { continue };
+                let stable = candidate.as_ref().is_some_and(|c| c.same_layout(&next));
+                let changed = !published.as_ref().is_some_and(|p| p.same_layout(&next));
+                if stable && changed {
+                    let on_disk = WallPlan::load(&dir).map(|p| p.rev).unwrap_or(0);
+                    let mut out = next.clone();
+                    out.rev = on_disk.max(published.as_ref().map(|p| p.rev).unwrap_or(0)) + 1;
+                    out.computed_ms = crate::link::epoch_now_ms();
+                    if out.store(&dir).is_ok() {
+                        published = Some(out);
+                    }
+                }
+                candidate = Some(next);
+            }
+        });
+        Planner { active }
+    }
+
+    /// Only the leader plans; followers keep the thread idle.
+    pub fn set_active(&self, on: bool) {
+        self.active.store(on, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Follower side: pick up a newly published plan with one `stat` per call.
+pub struct PlanWatcher {
+    dir: std::path::PathBuf,
+    stamp: Option<std::time::SystemTime>,
+    rev: u64,
+}
+
+impl PlanWatcher {
+    pub fn new(dir: std::path::PathBuf) -> Self {
+        Self { dir, stamp: None, rev: 0 }
+    }
+
+    /// A plan newer than the last one returned, if the file changed.
+    pub fn poll(&mut self) -> Option<WallPlan> {
+        let m = std::fs::metadata(self.dir.join("wall.json")).ok()?.modified().ok()?;
+        if self.stamp == Some(m) {
+            return None;
+        }
+        self.stamp = Some(m);
+        let p = WallPlan::load(&self.dir)?;
+        if p.rev <= self.rev {
+            return None;
+        }
+        self.rev = p.rev;
+        Some(p)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +375,25 @@ mod tests {
         let p = plan(&desk, &cfg, &clients, &panes, 10).unwrap();
         assert!(p.pane(30).unwrap().classic.is_none());
         assert!(p.pane(10).unwrap().classic.is_some());
+    }
+
+    #[test]
+    fn watcher_returns_each_revision_once() {
+        let (desk, cfg, clients, panes) = setup();
+        let dir = std::env::temp_dir().join(format!("termpaper-watch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut w = PlanWatcher::new(dir.clone());
+        assert!(w.poll().is_none());
+        let mut p = plan(&desk, &cfg, &clients, &panes, 10).unwrap();
+        p.rev = 1;
+        p.store(&dir).unwrap();
+        assert_eq!(w.poll().map(|p| p.rev), Some(1));
+        assert!(w.poll().is_none(), "unchanged file");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        p.rev = 2;
+        p.store(&dir).unwrap();
+        assert_eq!(w.poll().map(|p| p.rev), Some(2));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
