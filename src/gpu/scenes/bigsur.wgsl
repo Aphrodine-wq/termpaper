@@ -193,7 +193,8 @@ fn shade_land(p: vec3f, rd: vec3f, t: f32, mat: f32, l: Look, ctx: Ctx) -> vec3f
     let dif = saturate(dot(n, l.sun));
     var sh = 1.0;
     if (dif > 0.0 && t < 2500.0) {
-        sh = land_shadow(p + n * 1.5, l.sun, ctx);
+        // start past the march's hit tolerance, which grows with distance
+        sh = land_shadow(p + n * (1.5 + t * ctx.px * 1.5), l.sun, ctx);
     }
     let occ = 0.6 + 0.4 * saturate(n.y);
     var c = alb * (sun_c * dif * sh * 1.1 + amb * occ * 1.5);
