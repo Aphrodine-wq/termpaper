@@ -25,6 +25,8 @@ fn gpu_replay_resize_and_backpressure() {
         cols: 48,
         rows: 48,
         crop: (0, 0),
+        virt: None,
+        hysteresis: 0,
     };
     for name in ["fire", "life", "boids", "sand", "reaction"] {
         gpu.invalidate();
@@ -92,6 +94,8 @@ fn hybrid_canvas_frame_packs_cpu_scene() {
         cols: w,
         rows: h / 2,
         crop: (0, 0),
+        virt: None,
+        hysteresis: 0,
     };
     gpu.canvas_frame();
     let words = gpu.run_blocking(&canvas, &plan).unwrap();

@@ -226,6 +226,22 @@ pub struct Request {
     pub budget_ms: f32,
     /// The scene a pending switch will show: its shader starts compiling now.
     pub prefetch: Option<String>,
+    /// Studio scenes: cell hysteresis threshold in levels (0 = off). Cells
+    /// whose colours move by no more re-send last frame's values.
+    pub hysteresis: u8,
+}
+
+/// Studio scenes render this many extra pixels around the pane's window when
+/// a filter reads neighbours (blur, edges, warp...), so those filters see the
+/// real scene at the pane's edges instead of clamping there — seamless
+/// across the panes of a wall.
+pub const APRON: usize = 8;
+
+/// Post filters that read neighbouring pixels.
+#[cfg(feature = "gpu")]
+fn needs_apron(filters: &[String], quick: Option<&str>) -> bool {
+    const NEIGHBOURS: &[&str] = &["bloom", "crt", "chroma", "pixelate", "edges", "warp", "sharpen"];
+    filters.iter().map(String::as_str).chain(quick).any(|f| NEIGHBOURS.contains(&f))
 }
 
 pub struct Frame {
@@ -355,7 +371,7 @@ fn frame_hash(u: &crate::gpu::FrameUniforms, r: &Request) -> u64 {
     for n in [v.grid.0, v.grid.1, v.crop.0, v.crop.1, v.canvas.0, v.canvas.1] {
         eat(&(n as u64).to_le_bytes());
     }
-    eat(&[v.pixels as u8]);
+    eat(&[v.pixels as u8, r.hysteresis]);
     h
 }
 
@@ -485,8 +501,11 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
             let (pw, ph) = v.pixels.cell_size();
             // the pane's window: every pixel its cells show, starting at the
             // crop — rendered even where it overhangs the wall canvas, since
-            // a Studio scene is defined everywhere
-            let window = ((v.grid.0 * pw).max(1), (v.grid.1 * ph).max(1));
+            // a Studio scene is defined everywhere — plus an apron all round
+            // when a filter reads neighbours
+            let apron = if needs_apron(&request.filters, request.quick.as_deref()) { APRON } else { 0 };
+            let window = ((v.grid.0 * pw).max(1) + 2 * apron, (v.grid.1 * ph).max(1) + 2 * apron);
+            let origin = (v.crop.0 as i64 - apron as i64, v.crop.1 as i64 - apron as i64);
             g.resize(window.0, window.1, v.grid.0 * v.grid.1);
             governor.set_budget(request.budget_ms);
             let mirror = request.filters.iter().any(|f| f == "mirror");
@@ -497,7 +516,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
                 .unwrap_or(0) as u32;
             let spp = governor.spp();
             let u = crate::gpu::uniforms(&crate::gpu::FrameDesc {
-                view: crate::gpu::ShaderView::for_canvas(v.canvas, v.crop, v.pixel_aspect() as f64),
+                view: crate::gpu::ShaderView::for_window(v.canvas, origin, v.pixel_aspect() as f64),
                 window,
                 time: crate::gpu::shader_time(request.elapsed_ms, sim.speed),
                 speed: sim.speed,
@@ -529,7 +548,16 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
                     pixels: v.pixels,
                     cols: v.grid.0,
                     rows: v.grid.1,
-                    crop: (0, 0),
+                    // cells start past the apron
+                    crop: (apron, apron),
+                    // position-dependent filters work in wall coordinates
+                    virt: Some([
+                        origin.0 as i32,
+                        origin.1 as i32,
+                        v.canvas.0 as i32,
+                        v.canvas.1 as i32,
+                    ]),
+                    hysteresis: request.hysteresis,
                 };
                 g.poll_cells(v.grid.0, v.grid.1);
                 if g.submit_tagged(&raw, &plan, request.elapsed_ms) {
@@ -636,6 +664,10 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
                 cols: v.grid.0,
                 rows: v.grid.1,
                 crop: v.crop,
+                // a Classic canvas is the whole wall: unchanged filters, and
+                // no hysteresis (the CPU path it mirrors has none)
+                virt: None,
+                hysteresis: 0,
             };
             // Reclaim completed slots before trying to submit into the ring.
             g.poll_cells(v.grid.0, v.grid.1);
@@ -731,6 +763,7 @@ mod tests {
             smooth: 0.0,
             budget_ms: DEFAULT_GPU_BUDGET_MS,
             prefetch: None,
+            hysteresis: 0,
         }
     }
 

@@ -96,9 +96,14 @@ struct Params {
     fp: [f32; 4],
     /// p3..p6 — reserved for filters that grow more knobs
     fp2: [f32; 4],
-    /// pixel mode, then three filter-specific flags
+    /// pixel mode, then three pass-specific values (pack_cells: hysteresis
+    /// threshold, history valid)
     flags: [u32; 4],
+    /// global x0, y0 (i32 bits) of the buffer's pixel (0, 0) on the wall,
+    /// wall W, H — position-dependent filters use wall coordinates
+    virt: [u32; 4],
 }
+const _: () = assert!(std::mem::size_of::<Params>() % 16 == 0);
 
 /// Where a pass writes, which decides whether the ping-pong flips after it.
 #[derive(Clone, Copy, PartialEq)]
@@ -155,6 +160,13 @@ pub struct Plan<'a> {
     pub cols: usize,
     pub rows: usize,
     pub crop: (usize, usize),
+    /// Where the buffer sits on the wall: global x0, y0 of its pixel (0, 0)
+    /// and the wall's W, H. None = the buffer is the whole canvas
+    /// (`(0, 0, w, h)`, every CPU canvas).
+    pub virt: Option<[i32; 4]>,
+    /// Cell hysteresis threshold in levels; 0 = off (parity tests, benches,
+    /// Classic scenes).
+    pub hysteresis: u8,
 }
 
 pub struct Gpu {
@@ -184,6 +196,9 @@ pub struct Gpu {
     cell_capacity: usize,
     /// True once the scratch history plane holds a frame at these dimensions.
     prev_valid: bool,
+    /// The grid whose last emitted cells the scratch hysteresis region
+    /// holds, if it holds any.
+    hist_grid: Option<(usize, usize)>,
 
     /// Upload scratch, kept across frames so the packing does not allocate.
     upload: Vec<u32>,
@@ -407,7 +422,7 @@ impl Gpu {
         let mut gpu = Gpu {
             buf_a: Self::pixel_buffer(&device, 1, "a"),
             buf_b: Self::pixel_buffer(&device, 1, "b"),
-            scratch: Self::pixel_buffer(&device, 3, "scratch"),
+            scratch: Self::pixel_buffer(&device, 3 + CELL_WORDS, "scratch"),
             buf_cells: Self::cell_buffer(&device, 1),
             params_buf: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("params"),
@@ -422,6 +437,7 @@ impl Gpu {
             dims: (0, 0),
             cell_capacity: 0,
             prev_valid: false,
+            hist_grid: None,
             upload: Vec::new(),
             readback: Vec::new(),
             readback_cells: 0,
@@ -458,6 +474,7 @@ impl Gpu {
     /// flight: the next frame shows a different window of the scene.
     pub fn reset_history(&mut self) {
         self.prev_valid = false;
+        self.hist_grid = None;
     }
 
     pub fn invalidate(&mut self) {
@@ -508,7 +525,8 @@ impl Gpu {
         let px = width * height;
         self.buf_a = Self::pixel_buffer(&self.device, px, "a");
         self.buf_b = Self::pixel_buffer(&self.device, px, "b");
-        self.scratch = Self::pixel_buffer(&self.device, px * 3, "scratch");
+        // three pixel planes, then the previous frame's cells (hysteresis)
+        self.scratch = Self::pixel_buffer(&self.device, px * 3 + max_cells.max(1) * CELL_WORDS, "scratch");
         self.buf_cells = Self::cell_buffer(&self.device, max_cells);
 
         let mk = |src: &wgpu::Buffer, dst: &wgpu::Buffer, this: &Gpu| {
@@ -570,6 +588,7 @@ impl Gpu {
         self.dims = (width, height);
         self.cell_capacity = max_cells;
         self.prev_valid = false;
+        self.hist_grid = None;
         self.frame = 0;
         self.upload.resize(px, 0);
         self.readback.clear();
@@ -614,6 +633,10 @@ impl Gpu {
                 0,
                 0,
             ],
+            virt: match plan.virt {
+                Some([x0, y0, vw, vh]) => [x0 as u32, y0 as u32, vw.max(1) as u32, vh.max(1) as u32],
+                None => [0, 0, w as u32, h as u32],
+            },
         };
 
         let mut passes = Vec::new();
@@ -705,7 +728,12 @@ impl Gpu {
             push("temporal_smooth", p, Target::Pong);
         }
 
-        push("pack_cells", base, Target::Cells);
+        let mut pack = base;
+        if plan.hysteresis > 0 {
+            pack.flags[1] = plan.hysteresis as u32;
+            pack.flags[2] = (self.hist_grid == Some((plan.cols, plan.rows))) as u32;
+        }
+        push("pack_cells", pack, Target::Cells);
         passes
     }
 
@@ -840,6 +868,9 @@ impl Gpu {
             enc.copy_buffer_to_buffer(resolve, 0, &self.slots[slot_idx].buf, timing_offset(cell_bytes), TIMING_BYTES as u64);
         }
         self.queue.submit([enc.finish()]);
+        // the next frame's pack_cells compares against what this one emits
+        // (queue order), as long as the grid stays and hysteresis stays on
+        self.hist_grid = (plan.hysteresis > 0).then_some((plan.cols, plan.rows));
 
         let ready = self.slots[slot_idx].ready.clone();
         ready.store(false, Ordering::Release);

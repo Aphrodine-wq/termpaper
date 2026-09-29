@@ -43,6 +43,13 @@ impl ShaderView {
     /// taller than wide, of which this pane renders the window whose top-left
     /// pixel is `win`. A single terminal is `win = (0, 0)` of its own canvas.
     pub fn for_canvas(full: (usize, usize), win: (usize, usize), aspect: f64) -> Self {
+        Self::for_window(full, (win.0 as i64, win.1 as i64), aspect)
+    }
+
+    /// `for_canvas` for a window that may start outside the canvas (a crop
+    /// widened by an apron): the scene is defined everywhere, so pixels left
+    /// of or above the wall are simply further out in composition space.
+    pub fn for_window(full: (usize, usize), win: (i64, i64), aspect: f64) -> Self {
         let w = full.0.max(1) as f64;
         let h = full.1.max(1) as f64 * aspect;
         let short = w.min(h);
@@ -563,6 +570,15 @@ mod tests {
         let q = ShaderView::for_canvas((200, 100), (0, 0), 2.0);
         assert!((q.half[0] - 0.5).abs() < 1e-12 && (q.half[1] - 0.5).abs() < 1e-12);
         assert!((q.step[1] - 2.0 * q.step[0]).abs() < 1e-12);
+    }
+
+    #[test]
+    fn an_apron_extends_the_same_mapping() {
+        let crop = ShaderView::for_canvas((300, 120), (4, 2), 2.0);
+        let apron = ShaderView::for_window((300, 120), (4 - 8, 2 - 8), 2.0);
+        assert!((apron.origin[0] - (crop.origin[0] - 8.0 * crop.step[0])).abs() < 1e-12);
+        assert!((apron.origin[1] - (crop.origin[1] + 8.0 * crop.step[1])).abs() < 1e-12);
+        assert_eq!((apron.step, apron.half), (crop.step, crop.half));
     }
 
     #[test]

@@ -324,6 +324,7 @@ fn main() -> std::io::Result<()> {
             .map(|p| p.to_px(1.0))
             .unwrap_or((0.0, 0.0)),
         placement: cfg.placement.unwrap_or_default(),
+        hysteresis: cfg.hysteresis.unwrap_or(DEFAULT_HYSTERESIS),
         cfg,
         keymap,
         text_scale,
@@ -408,6 +409,8 @@ struct Settings {
     pad: (f32, f32),
     /// where the terminal puts its leftover strip
     placement: wall::Placement,
+    /// Studio scenes' cell hysteresis threshold (levels; 0 = off)
+    hysteresis: u8,
     cfg: config::Config,
     theme: Option<String>,
     text_scale: Option<u32>,
@@ -445,6 +448,10 @@ fn measure_cell_px(geo: Option<&wall::GeoWatcher>) -> Option<(f32, f32)> {
         geo.and_then(|w| w.latest()),
     )
 }
+
+/// Cell hysteresis for Studio scenes unless the config says otherwise:
+/// colour changes of up to this many levels are not re-sent.
+const DEFAULT_HYSTERESIS: u8 = 3;
 
 /// How long before the frame deadline to stop sleeping and busy-wait.
 /// Sized from `examples/pace_bench.rs` — see the frame loop for the tradeoff.
@@ -1209,6 +1216,13 @@ fn run(
                 contrast: settings.contrast, dim: fade * settings.dim, smooth: settings.smooth,
                 budget_ms: settings.gpu_budget_ms,
                 prefetch: transition.pending().map(|i| names[i % names.len()].to_string()),
+                // Studio scenes only: Classic GPU output stays identical to
+                // the CPU path, which has no hysteresis
+                hysteresis: if scene::lookup(&st.cur.scene).is_some_and(|e| e.needs_gpu()) {
+                    settings.hysteresis
+                } else {
+                    0
+                },
             };
             if let Some(frame) = worker.submit(request) {
                 lead.on_frame(frame.elapsed_ms, slot);

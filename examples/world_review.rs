@@ -42,6 +42,8 @@ fn main() {
         cols: w,
         rows: h / 2,
         crop: (0, 0),
+        virt: None,
+        hysteresis: 0,
     };
     for name in scene::names() {
         if selected != "all" && selected != name {

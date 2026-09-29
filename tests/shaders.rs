@@ -11,6 +11,19 @@ fn world_shader_is_valid_without_a_gpu() {
     .unwrap_or_else(|error| panic!("{}", error.emit_to_string(source)));
 }
 
+#[test]
+fn post_shader_is_valid_without_a_gpu() {
+    let source = include_str!("../src/gpu/shaders/post.wgsl");
+    let module = naga::front::wgsl::parse_str(source)
+        .unwrap_or_else(|error| panic!("{}", error.emit_to_string(source)));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("{}", error.emit_to_string(source)));
+}
+
 // WGSL `case N:` arms are indexed by catalog position, so new scenes are
 // appended at the end of `SCENES` (and of this list). A scene without an arm
 // falls into the shader's `default:` and is CPU-rendered unless allowlisted.
