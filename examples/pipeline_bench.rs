@@ -15,6 +15,7 @@ fn main() {
             theme: None,
             detail: Detail::Low,
             text_scale: None,
+            pixels: Default::default(),
         };
         let mut s = scene::create(name, &opts, StdRng::seed_from_u64(1)).unwrap();
         let mut canvas = Canvas::new(200, 100);

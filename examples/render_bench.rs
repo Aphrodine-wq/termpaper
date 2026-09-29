@@ -37,6 +37,7 @@ fn user_config_bench() {
             theme: None,
             detail: Detail::Low,
             text_scale: None,
+            pixels: Default::default(),
         };
         let mut canvas = Canvas::new(w, h);
         let mut scene = scene::create("koi", &opts, StdRng::seed_from_u64(1)).unwrap();
@@ -79,6 +80,7 @@ fn main() {
         theme: None,
         detail: Detail::Medium,
         text_scale: None,
+        pixels: Default::default(),
     };
 
     for mode in [Pixels::Half, Pixels::Quad, Pixels::Braille] {

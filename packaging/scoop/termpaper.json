@@ -1,0 +1,29 @@
+{
+    "version": "0.2.0",
+    "description": "Wallpaper Engine for the terminal: live, GPU-rendered scenes in any 24-bit colour terminal",
+    "homepage": "https://github.com/Aphrodine-wq/termpaper",
+    "license": "MIT",
+    "notes": "Run `termpaper` and press ? for the menu. Best in Windows Terminal with the Cascadia Mono font.",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/Aphrodine-wq/termpaper/releases/download/v0.2.0/termpaper-x86_64-pc-windows-msvc.zip",
+            "hash": "FILL-IN-AT-RELEASE"
+        },
+        "arm64": {
+            "url": "https://github.com/Aphrodine-wq/termpaper/releases/download/v0.2.0/termpaper-aarch64-pc-windows-msvc.zip",
+            "hash": "FILL-IN-AT-RELEASE"
+        }
+    },
+    "bin": "termpaper.exe",
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/Aphrodine-wq/termpaper/releases/download/v$version/termpaper-x86_64-pc-windows-msvc.zip"
+            },
+            "arm64": {
+                "url": "https://github.com/Aphrodine-wq/termpaper/releases/download/v$version/termpaper-aarch64-pc-windows-msvc.zip"
+            }
+        }
+    }
+}

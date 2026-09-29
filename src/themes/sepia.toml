@@ -1,0 +1,22 @@
+format = 1
+name = "Sepia"
+author = "termpaper"
+description = "Old photographs: every colour turned to brown and cream."
+tags = ["cinematic", "vintage", "mono"]
+
+[grade]
+contrast = 1.05
+
+[palette]
+mode = "tint"
+strength = 0.85
+colors = ["#1e140c", "#4a3423", "#8a6a4b", "#c7a47f", "#f1e1c6"]
+
+[effects]
+stack = ["grain", "vignette"]
+grain = 0.4
+vignette = 0.6
+
+[scene]
+name = "venice"
+variant = "morning"

@@ -1,0 +1,18 @@
+format = 1
+name = "Green Phosphor"
+author = "termpaper"
+description = "A green-screen terminal: scanlines, glow and a slight fringe."
+tags = ["retro", "mono", "green"]
+
+[palette]
+mode = "map"
+colors = ["#001a00", "#004d00", "#00aa22", "#33ff66", "#b3ffc6"]
+
+[effects]
+stack = ["scanlines", "bloom", "chroma"]
+scanlines = 0.8
+chroma = 0.3
+
+[scene]
+name = "sonar"
+variant = "green"

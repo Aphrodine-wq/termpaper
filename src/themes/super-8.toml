@@ -1,0 +1,20 @@
+format = 1
+name = "Super 8"
+author = "termpaper"
+description = "Home movies: heavy grain, a warm cast, a dark frame and glowing highlights."
+tags = ["cinematic", "vintage"]
+
+[grade]
+saturation = 0.9
+fade = 0.08
+
+[effects]
+stack = ["warm", "halation", "grain", "vignette"]
+warm = 0.6
+halation = 0.5
+grain = 1.2
+vignette = 0.9
+
+[scene]
+name = "trainwindow"
+variant = "golden"

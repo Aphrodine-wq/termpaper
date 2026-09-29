@@ -14,6 +14,14 @@ pub enum Pixels {
     Quad,
     /// 2x4 px per cell via braille dot patterns — highest density.
     Braille,
+    /// 2x3 px per cell via the sextant blocks of Unicode's Symbols for
+    /// Legacy Computing (U+1FB00): sharper than quadrants, squarer pixels.
+    Sextant,
+    /// 1x2 px per cell as a character from a density ramp (` .:-=+*#%@`)
+    /// in the pixels' colour: works in any font.
+    Ascii,
+    /// 1x1 px per cell as a background colour: the fewest bytes a frame.
+    Blocks,
 }
 
 impl Pixels {
@@ -23,7 +31,35 @@ impl Pixels {
             Pixels::Half => (1, 2),
             Pixels::Quad => (2, 2),
             Pixels::Braille => (2, 4),
+            Pixels::Sextant => (2, 3),
+            Pixels::Ascii => (1, 2),
+            Pixels::Blocks => (1, 1),
         }
+    }
+
+    /// Every mode, in menu order.
+    pub const ALL: [Pixels; 6] = [Pixels::Half, Pixels::Quad, Pixels::Braille, Pixels::Sextant, Pixels::Ascii, Pixels::Blocks];
+
+    /// The mode's number in the GPU `pack_cells` pass.
+    pub fn code(self) -> u32 {
+        match self {
+            Pixels::Half => 0,
+            Pixels::Quad => 1,
+            Pixels::Braille => 2,
+            Pixels::Sextant => 3,
+            Pixels::Ascii => 4,
+            Pixels::Blocks => 5,
+        }
+    }
+
+    /// Height of one canvas pixel divided by its width, on screen. A terminal
+    /// cell is close to 1:2, so half-block and braille pixels are roughly
+    /// square while quadrant pixels are twice as tall as they are wide.
+    /// Scenes use this to keep circles round and to detect portrait canvases.
+    pub fn aspect(self) -> f32 {
+        let (pw, ph) = self.cell_size();
+        // cell is 1 wide : 2 tall; pixel = (1/pw) wide, (2/ph) tall
+        (2.0 / ph as f32) / (1.0 / pw as f32)
     }
 
     #[allow(dead_code)] // used by the settings menu
@@ -32,25 +68,26 @@ impl Pixels {
             Pixels::Half => "half",
             Pixels::Quad => "quad",
             Pixels::Braille => "braille",
+            Pixels::Sextant => "sextant",
+            Pixels::Ascii => "ascii",
+            Pixels::Blocks => "blocks",
         }
     }
 
-    #[allow(dead_code)] // used by the settings menu
+    /// The next mode in menu order, wrapping.
     pub fn next(self) -> Self {
-        match self {
-            Pixels::Half => Pixels::Quad,
-            Pixels::Quad => Pixels::Braille,
-            Pixels::Braille => Pixels::Half,
-        }
+        let i = Pixels::ALL.iter().position(|p| *p == self).unwrap_or(0);
+        Pixels::ALL[(i + 1) % Pixels::ALL.len()]
+    }
+
+    /// The previous mode in menu order, wrapping.
+    pub fn prev(self) -> Self {
+        let i = Pixels::ALL.iter().position(|p| *p == self).unwrap_or(0);
+        Pixels::ALL[(i + Pixels::ALL.len() - 1) % Pixels::ALL.len()]
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "half" => Some(Pixels::Half),
-            "quad" => Some(Pixels::Quad),
-            "braille" => Some(Pixels::Braille),
-            _ => None,
-        }
+        Pixels::ALL.into_iter().find(|p| p.name() == s)
     }
 }
 
@@ -158,6 +195,34 @@ pub fn braille_glyph(mask: u8) -> char {
     char::from_u32(0x2800 + m as u32).unwrap_or('⠀')
 }
 
+/// Sextant for a 2x3 mask (bits TL, TR, ML, MR, BL, BR). The block holds
+/// the 60 patterns that had no character before it; the other four are the
+/// space, the left and right halves, and the full block.
+pub fn sextant_glyph(mask: u8) -> char {
+    let m = (mask & 0x3F) as u32;
+    match m {
+        0 => ' ',
+        21 => '▌',
+        42 => '▐',
+        63 => '█',
+        _ => char::from_u32(0x1FB00 + m - 1 - (m > 21) as u32 - (m > 42) as u32).unwrap_or(' '),
+    }
+}
+
+/// The ASCII mode's characters, emptiest first.
+pub const RAMP: [char; 10] = [' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
+
+/// The ramp character for a luminance `3r + 6g + b` (0..=2550).
+pub fn ramp_glyph(lum: u32) -> char {
+    RAMP[(lum * RAMP.len() as u32 / 2551).min(RAMP.len() as u32 - 1) as usize]
+}
+
+/// The mean of two pixels, rounded down (as the GPU does it).
+fn mean2(a: (u8, u8, u8), b: (u8, u8, u8)) -> (u8, u8, u8) {
+    let m = |x: u8, y: u8| ((x as u16 + y as u16) / 2) as u8;
+    (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
+}
+
 /// Paint the canvas into a ratatui buffer in the given pixel mode.
 /// Canvas dims must be (area.width*pw, area.height*ph).
 pub fn draw(canvas: &Canvas, area: Rect, buf: &mut Buffer, truecolor: bool, mode: Pixels) {
@@ -230,13 +295,170 @@ pub fn draw_crop(
                     cell.set_fg(to_color(fg, truecolor));
                     cell.set_bg(to_color(bg, truecolor));
                 }
+                Pixels::Sextant => {
+                    let mut px = [(0u8, 0u8, 0u8); 6];
+                    for dy in 0..3 {
+                        for dx in 0..2 {
+                            px[dy * 2 + dx] = canvas
+                                .get(crop_x + col as i32 * 2 + dx as i32, crop_y + row as i32 * 3 + dy as i32)
+                                .color;
+                        }
+                    }
+                    let (mask, fg, bg) = split(&px);
+                    cell.set_char(sextant_glyph(mask));
+                    cell.set_fg(to_color(fg, truecolor));
+                    cell.set_bg(to_color(bg, truecolor));
+                }
+                Pixels::Ascii => {
+                    let bottom = canvas.get(crop_x + col as i32, crop_y + (row * 2 + 1) as i32);
+                    let c = mean2(tl.color, bottom.color);
+                    cell.set_char(ramp_glyph(lum(c)));
+                    cell.set_fg(to_color(c, truecolor));
+                    cell.set_bg(to_color((0, 0, 0), truecolor));
+                }
+                Pixels::Blocks => {
+                    // one colour a cell, in the background: the foreground
+                    // stays the same everywhere, so it is never re-sent
+                    cell.set_char(' ');
+                    cell.set_fg(to_color((0, 0, 0), truecolor));
+                    cell.set_bg(to_color(tl.color, truecolor));
+                }
             }
+        }
+    }
+}
+
+/// Resample part of a larger canvas into `out` (a pane-sized canvas of
+/// `cols x rows` cells in `mode`). Pane cell (c, r) shows the source cells
+/// from `origin + (c, r) * step` over one `step`; both canvases have the same
+/// pixels per cell. Steps above ~1 average the covered pixels (box filter),
+/// so a coarser pane does not alias or skip columns; below that it samples
+/// the nearest pixel, keeping glyph characters.
+pub fn resample_view(src: &Canvas, origin: [f64; 2], step: [f64; 2], cols: usize, rows: usize, mode: Pixels, out: &mut Canvas) {
+    let (pw, ph) = mode.cell_size();
+    let (w, h) = (cols * pw, rows * ph);
+    if (out.width(), out.height()) != (w, h) {
+        out.resize(w, h);
+    }
+    let ox = origin[0] * pw as f64;
+    let oy = origin[1] * ph as f64;
+    let (sx, sy) = (step[0].max(1e-6), step[1].max(1e-6));
+    for y in 0..h {
+        let y0 = oy + y as f64 * sy;
+        for x in 0..w {
+            let x0 = ox + x as f64 * sx;
+            if sx <= 1.25 && sy <= 1.25 {
+                let c = src.get((x0 + sx * 0.5).floor() as i32, (y0 + sy * 0.5).floor() as i32);
+                match c.ch {
+                    Some(ch) => out.set_char(x as i32, y as i32, ch, c.color),
+                    None => out.set(x as i32, y as i32, c.color),
+                }
+                continue;
+            }
+            // pixels whose centres fall inside the footprint (at least one)
+            let (ax, bx) = ((x0 - 0.5).ceil() as i32, ((x0 + sx - 0.5).ceil() as i32).max((x0 - 0.5).ceil() as i32 + 1));
+            let (ay, by) = ((y0 - 0.5).ceil() as i32, ((y0 + sy - 0.5).ceil() as i32).max((y0 - 0.5).ceil() as i32 + 1));
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for yy in ay..by {
+                for xx in ax..bx {
+                    let c = src.get(xx, yy).color;
+                    r += c.0 as u32;
+                    g += c.1 as u32;
+                    b += c.2 as u32;
+                    n += 1;
+                }
+            }
+            let n = n.max(1);
+            out.set(x as i32, y as i32, ((r / n) as u8, (g / n) as u8, (b / n) as u8));
+        }
+    }
+}
+
+/// Whether a view is a whole-pixel crop, so the plain crop path applies.
+pub fn view_is_crop(origin: [f64; 2], step: [f64; 2], mode: Pixels) -> Option<(i32, i32)> {
+    let (pw, ph) = mode.cell_size();
+    let (x, y) = (origin[0] * pw as f64, origin[1] * ph as f64);
+    let whole = |v: f64| (v - v.round()).abs() < 0.05;
+    ((step[0] - 1.0).abs() < 0.01 && (step[1] - 1.0).abs() < 0.01 && whole(x) && whole(y))
+        .then(|| (x.round() as i32, y.round() as i32))
+}
+
+/// Paint a pane's view of a larger canvas (see [`resample_view`]), taking
+/// the plain crop path when the view is a whole-pixel crop.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_view(
+    canvas: &Canvas,
+    origin: [f64; 2],
+    step: [f64; 2],
+    area: Rect,
+    buf: &mut Buffer,
+    truecolor: bool,
+    mode: Pixels,
+    scratch: &mut Canvas,
+) {
+    if let Some((x, y)) = view_is_crop(origin, step, mode) {
+        draw_crop(canvas, x, y, area, buf, truecolor, mode);
+        return;
+    }
+    resample_view(canvas, origin, step, area.width as usize, area.height as usize, mode, scratch);
+    draw_crop(scratch, 0, 0, area, buf, truecolor, mode);
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+
+    #[test]
+    fn unit_views_are_crops_and_match_draw_crop() {
+        let mut c = Canvas::new(40, 40);
+        for y in 0..40 {
+            for x in 0..40 {
+                c.set(x, y, ((x * 6) as u8, (y * 6) as u8, 90));
+            }
+        }
+        assert_eq!(view_is_crop([3.0, 2.0], [1.0, 1.0], Pixels::Half), Some((3, 4)));
+        assert_eq!(view_is_crop([3.3, 2.0], [1.0, 1.0], Pixels::Half), None);
+        let area = Rect::new(0, 0, 10, 8);
+        let mut a = Buffer::empty(area);
+        let mut b = Buffer::empty(area);
+        let mut scratch = Canvas::new(1, 1);
+        draw_crop(&c, 3, 4, area, &mut a, true, Pixels::Half);
+        // force the resampling path with a hair-off origin: still identical
+        resample_view(&c, [3.0 + 1e-9, 2.0], [1.0, 1.0], 10, 8, Pixels::Half, &mut scratch);
+        draw_crop(&scratch, 0, 0, area, &mut b, true, Pixels::Half);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn coarse_views_average_instead_of_skipping() {
+        // alternating black/white columns, viewed at 2 source px per pane px
+        let mut c = Canvas::new(20, 4);
+        for y in 0..4 {
+            for x in 0..20 {
+                let v = if x % 2 == 0 { 0 } else { 200 };
+                c.set(x, y, (v, v, v));
+            }
+        }
+        let mut out = Canvas::new(1, 1);
+        resample_view(&c, [0.0, 0.0], [2.0, 1.0], 10, 2, Pixels::Half, &mut out);
+        for x in 0..10 {
+            assert_eq!(out.get(x, 0).color, (100, 100, 100), "column {x} should be the average");
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pixel_aspect_matches_cell_geometry() {
+        use super::Pixels;
+        // a 1:2 terminal cell: half and braille pixels are square, quad
+        // pixels are twice as tall as wide
+        assert_eq!(Pixels::Half.aspect(), 1.0);
+        assert_eq!(Pixels::Braille.aspect(), 1.0);
+        assert_eq!(Pixels::Quad.aspect(), 2.0);
+    }
+
     use super::*;
 
     #[test]
@@ -312,5 +534,125 @@ mod tests {
         draw(&c, area, &mut buf, true, Pixels::Braille);
         let cell = &buf[(0u16, 0u16)];
         assert_eq!(cell.symbol(), "⡇");
+    }
+}
+
+/// Output: after drawing, cells whose colours moved by at most `threshold`
+/// levels a channel since last frame (and kept their glyph) take last
+/// frame's colours again, so the terminal diff skips them. `prev` keeps
+/// what was sent; a new size starts it over. Studio scenes do the same on
+/// the GPU; this serves Classic scenes on the Light setting.
+pub fn hold_small_changes(buf: &mut Buffer, area: Rect, prev: &mut Vec<ratatui::buffer::Cell>, threshold: u8) {
+    let n = area.width as usize * area.height as usize;
+    let fresh = prev.len() != n;
+    let close = |a: Color, b: Color| match (a, b) {
+        (Color::Rgb(r0, g0, b0), Color::Rgb(r1, g1, b1)) => {
+            r0.abs_diff(r1) <= threshold && g0.abs_diff(g1) <= threshold && b0.abs_diff(b1) <= threshold
+        }
+        _ => a == b,
+    };
+    if !fresh {
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let p = &prev[y as usize * area.width as usize + x as usize];
+                let cell = &mut buf[(area.x + x, area.y + y)];
+                if p.symbol() == cell.symbol() && close(p.fg, cell.fg) && close(p.bg, cell.bg) {
+                    cell.fg = p.fg;
+                    cell.bg = p.bg;
+                }
+            }
+        }
+    }
+    prev.clear();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            prev.push(buf[(area.x + x, area.y + y)].clone());
+        }
+    }
+}
+
+#[cfg(test)]
+mod hold_tests {
+    use super::*;
+
+    #[test]
+    fn small_changes_are_held_and_big_ones_pass() {
+        let area = Rect::new(0, 0, 3, 1);
+        let mut prev = Vec::new();
+        let paint = |c: [(u8, u8, u8); 3]| {
+            let mut b = Buffer::empty(area);
+            for (x, (r, g, bl)) in c.into_iter().enumerate() {
+                b[(x as u16, 0)].set_symbol("▀").set_fg(Color::Rgb(r, g, bl)).set_bg(Color::Rgb(r, g, bl));
+            }
+            b
+        };
+        let mut a = paint([(100, 100, 100); 3]);
+        hold_small_changes(&mut a, area, &mut prev, 4);
+        let mut b = paint([(103, 100, 98), (110, 100, 100), (100, 100, 100)]);
+        b[(2u16, 0u16)].set_symbol("▄");
+        hold_small_changes(&mut b, area, &mut prev, 4);
+        assert_eq!(b[(0u16, 0u16)].fg, Color::Rgb(100, 100, 100), "within 4: held");
+        assert_eq!(b[(1u16, 0u16)].fg, Color::Rgb(110, 100, 100), "a real change goes out");
+        assert_eq!(b[(2u16, 0u16)].symbol(), "▄", "a new glyph goes out");
+        // a new size starts over
+        let wide = Rect::new(0, 0, 4, 1);
+        let mut c = Buffer::empty(wide);
+        hold_small_changes(&mut c, wide, &mut prev, 4);
+        assert_eq!(prev.len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+
+    #[test]
+    fn modes_round_trip_by_name_and_cycle() {
+        for p in Pixels::ALL {
+            assert_eq!(Pixels::parse(p.name()), Some(p));
+            assert_eq!(p.next().prev(), p);
+        }
+        assert_eq!(Pixels::Blocks.next(), Pixels::Half);
+        assert_eq!(Pixels::Half.prev(), Pixels::Blocks);
+        assert_eq!(Pixels::parse("sixel"), None);
+    }
+
+    #[test]
+    fn sextants_cover_every_pattern_once() {
+        let mut seen = std::collections::HashSet::new();
+        for m in 0..64u8 {
+            assert!(seen.insert(sextant_glyph(m)), "mask {m} repeats {:?}", sextant_glyph(m));
+        }
+        assert_eq!(sextant_glyph(1), '\u{1FB00}');
+        assert_eq!(sextant_glyph(62), '\u{1FB3B}');
+        assert_eq!(sextant_glyph(22), '\u{1FB14}');
+        assert_eq!((sextant_glyph(21), sextant_glyph(42), sextant_glyph(63)), ('▌', '▐', '█'));
+    }
+
+    #[test]
+    fn new_modes_draw_what_they_promise() {
+        let mut c = Canvas::new(4, 6);
+        // left column bright, right column dark
+        for y in 0..6 {
+            c.set(0, y, (240, 240, 240));
+            c.set(2, y, (240, 240, 240));
+        }
+        let area = Rect::new(0, 0, 2, 2);
+        let mut buf = Buffer::empty(area);
+        draw(&c, area, &mut buf, true, Pixels::Sextant);
+        assert_eq!(buf[(0u16, 0u16)].symbol(), "▌");
+        let area = Rect::new(0, 0, 4, 3);
+        let mut buf = Buffer::empty(area);
+        draw(&c, area, &mut buf, true, Pixels::Ascii);
+        assert_eq!(buf[(0u16, 0u16)].symbol(), "@");
+        assert_eq!(buf[(1u16, 0u16)].symbol(), " ");
+        assert_eq!(buf[(0u16, 0u16)].bg, Color::Rgb(0, 0, 0));
+        let area = Rect::new(0, 0, 4, 6);
+        let mut buf = Buffer::empty(area);
+        draw(&c, area, &mut buf, true, Pixels::Blocks);
+        assert_eq!(buf[(0u16, 3u16)].bg, Color::Rgb(240, 240, 240));
+        assert_eq!(buf[(1u16, 3u16)].bg, Color::Rgb(0, 0, 0));
+        assert_eq!(ramp_glyph(0), ' ');
+        assert_eq!(ramp_glyph(2550), '@');
     }
 }

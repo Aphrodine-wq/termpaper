@@ -1,0 +1,22 @@
+format = 1
+name = "Catppuccin Mocha"
+author = "termpaper"
+description = "Soft pastel colour on a warm dark base, from the Catppuccin scheme."
+tags = ["terminal", "dark", "pastel"]
+
+[grade]
+saturation = 1.05
+fade = 0.03
+
+[palette]
+mode = "tint"
+strength = 0.6
+colors = ["#1e1e2e", "#313244", "#585b70", "#89b4fa", "#cba6f7", "#f5c2e7", "#cdd6f4"]
+
+[effects]
+stack = ["bloom"]
+bloom = 0.4
+
+[scene]
+name = "cafe"
+variant = "rain"

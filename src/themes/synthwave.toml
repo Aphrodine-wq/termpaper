@@ -1,0 +1,22 @@
+format = 1
+name = "Synthwave"
+author = "termpaper"
+description = "Outrun sunset colours with a strong neon glow."
+tags = ["retro", "neon"]
+
+[grade]
+contrast = 1.1
+
+[palette]
+mode = "map"
+strength = 0.6
+colors = ["#120024", "#2b0f54", "#ab1f65", "#ff4f69", "#ff8f56", "#ffe36e"]
+
+[effects]
+stack = ["bloom", "halation"]
+bloom = 1.2
+halation = 0.4
+
+[scene]
+name = "grid"
+variant = "vapor"

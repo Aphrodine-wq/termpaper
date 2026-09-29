@@ -18,6 +18,7 @@ impl Cell {
     };
 }
 
+#[derive(Clone)]
 pub struct Canvas {
     width: usize,
     height: usize,
@@ -87,6 +88,53 @@ impl Canvas {
         if x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height {
             let i = y as usize * self.width + x as usize;
             self.cells[i] = Cell { color, ch: None };
+            self.touched[i] = true;
+        }
+    }
+
+    /// Alpha-blend a pixel toward `color` ("over"). Out-of-bounds writes are
+    /// ignored; the glyph is dropped. The shared painterly primitive behind
+    /// `anim::draw` — every brush, wash and soft edge ends up here.
+    #[inline]
+    pub fn blend(&mut self, x: i32, y: i32, color: (u8, u8, u8), a: f32) {
+        if a <= 0.0 {
+            return;
+        }
+        if x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height {
+            let i = y as usize * self.width + x as usize;
+            let c = &mut self.cells[i];
+            c.color = if a >= 1.0 { color } else { lerp(c.color, color, a) };
+            c.ch = None;
+            self.touched[i] = true;
+        }
+    }
+
+    /// Additive light scaled by `a` (saturating). Out-of-bounds ignored.
+    #[inline]
+    pub fn add_scaled(&mut self, x: i32, y: i32, color: (u8, u8, u8), a: f32) {
+        if a <= 0.0 {
+            return;
+        }
+        if x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height {
+            let i = y as usize * self.width + x as usize;
+            let c = &mut self.cells[i];
+            let a = a.min(4.0);
+            c.color = (
+                (c.color.0 as f32 + color.0 as f32 * a).min(255.0) as u8,
+                (c.color.1 as f32 + color.1 as f32 * a).min(255.0) as u8,
+                (c.color.2 as f32 + color.2 as f32 * a).min(255.0) as u8,
+            );
+            self.touched[i] = true;
+        }
+    }
+
+    /// Multiply a pixel's color by `f` (shadows, darkening). Out-of-bounds ignored.
+    #[inline]
+    pub fn mul(&mut self, x: i32, y: i32, f: f32) {
+        if x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height {
+            let i = y as usize * self.width + x as usize;
+            let c = &mut self.cells[i];
+            c.color = scale(c.color, f.max(0.0));
             self.touched[i] = true;
         }
     }
@@ -507,6 +555,21 @@ pub fn dim(canvas: &mut Canvas, f: f32) {
         for x in 0..w {
             let c = canvas.get(x as i32, y as i32).color;
             canvas.set(x as i32, y as i32, scale(c, f));
+        }
+    }
+}
+
+/// [`dim`], shaped by a transition mask: each pixel is scaled by `f` times
+/// how much of it the mask shows. The canvas is the whole wall.
+pub fn dim_masked(canvas: &mut Canvas, f: f32, mask: Option<&crate::transition::Mask>) {
+    let Some(m) = mask else {
+        return dim(canvas, f);
+    };
+    let (w, h) = (canvas.width(), canvas.height());
+    for y in 0..h {
+        for x in 0..w {
+            let c = canvas.get(x as i32, y as i32).color;
+            canvas.set(x as i32, y as i32, scale(c, f * m.factor(x as i32, y as i32)));
         }
     }
 }

@@ -5,13 +5,14 @@
 # Or set TERMPAPER_SRC to the repo root before makepkg.
 
 pkgname=termpaper
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Wallpaper Engine for the terminal — animated truecolor scenes"
 arch=('x86_64' 'aarch64')
 url="https://github.com/Aphrodine-wq/termpaper"
 license=('MIT')
 depends=()
+optdepends=('vulkan-icd-loader: GPU-rendered Studio scenes' 'vulkan-radeon: AMD GPUs' 'vulkan-intel: Intel GPUs' 'nvidia-utils: NVIDIA GPUs')
 makedepends=('cargo' 'git')
 options=('!strip')
 source=("git+${url}.git#tag=v${pkgver}")

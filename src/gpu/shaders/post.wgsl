@@ -18,10 +18,17 @@ struct Params {
     grid: vec4<u32>,
     // t, p0, p1, p2
     fp: vec4<f32>,
-    // p3, p4, p5, p6
+    // effects: the constants `filter::params` derives from the effect's
+    // strength, passed through unchanged so both sides use the same f32s
     fp2: vec4<f32>,
-    // pixel mode (0 half, 1 quad, 2 braille), unused...
+    // pixel mode (0 half, 1 quad, 2 braille), then three pass-specific
+    // values (pack_cells: hysteresis threshold, history valid)
     flags: vec4<u32>,
+    // where this buffer sits on the wall: global x0, y0 of its pixel (0, 0)
+    // (i32 bits: an apron can start left of the wall), wall W, H. Position-
+    // dependent filters work in these coordinates so they run seamlessly
+    // across panes; a CPU canvas passes (0, 0, w, h) and nothing changes.
+    virt: vec4<u32>,
 }
 
 @group(0) @binding(0) var<storage, read>       src:   array<u32>;
@@ -29,20 +36,28 @@ struct Params {
 @group(0) @binding(2) var<uniform>             P:     Params;
 @group(0) @binding(4) var<storage, read_write> cells: array<u32>;
 
-// One scratch allocation holding three planes: the smoothing history and the
-// two bloom blur legs. They are separate conceptually but share a binding so
-// the layout needs only four storage buffers, which is the downlevel limit —
-// six would have shut out every device that only guarantees the minimum.
+// One scratch allocation holding three planes — the smoothing history and the
+// two bloom blur legs — then the previous frame's packed cells (hysteresis).
+// They are separate conceptually but share a binding so the layout needs only
+// four storage buffers, which is the downlevel limit — six would have shut out
+// every device that only guarantees the minimum.
 @group(0) @binding(3) var<storage, read_write> scratch: array<u32>;
 
 fn plane_prev(i: u32) -> u32 { return i; }
 fn plane_aux0(i: u32) -> u32 { return P.dims.x * P.dims.y + i; }
 fn plane_aux1(i: u32) -> u32 { return 2u * P.dims.x * P.dims.y + i; }
+fn plane_hist(i: u32) -> u32 { return 3u * P.dims.x * P.dims.y + i; }
 
 // ---------------------------------------------------------------- primitives
 
 fn W() -> u32 { return P.dims.x; }
 fn H() -> u32 { return P.dims.y; }
+
+// Wall coordinates of buffer pixel (x, y), and the wall's size.
+fn gx(x: u32) -> i32 { return i32(x) + bitcast<i32>(P.virt.x); }
+fn gy(y: u32) -> i32 { return i32(y) + bitcast<i32>(P.virt.y); }
+fn VW() -> u32 { return P.virt.z; }
+fn VH() -> u32 { return P.virt.w; }
 
 fn idx(x: u32, y: u32) -> u32 { return y * W() + x; }
 
@@ -71,6 +86,13 @@ fn pack_keep(c: vec3<f32>, fl: u32) -> u32 {
 }
 
 fn load(x: u32, y: u32) -> vec3<f32> { return unpack(src[idx(x, y)]); }
+
+// An average of whole numbers, as the CPU's exact division truncates it.
+// WGSL division may be off by 2.5 ULP, so 98 / 7 can come out a hair under
+// 14 and truncate to 13. The average of n <= 17 integers is never within
+// 1/17 of the next integer unless it is one, so a small nudge lands every
+// result where the CPU does.
+fn avg_trunc(sum: vec3<f32>, n: f32) -> vec3<f32> { return floor(sum / n + 1e-3); }
 
 // `Canvas::get` returns black outside the canvas rather than clamping to the
 // edge. The crop path in `pack_cells` can read past the bottom/right edge, so
@@ -143,8 +165,9 @@ fn scanlines(@builtin(global_invocation_id) g: vec3<u32>) {
     let i = idx(g.x, g.y);
     // CPU darkens odd rows only, and leaves even rows byte-identical —
     // including their glyph flag, since it never calls `set` on them.
-    if ((g.y & 1u) == 1u) {
-        dst[i] = pack(floor(unpack(src[i]) * 0.72));
+    // Odd rows of the wall, so the pattern runs on across panes.
+    if ((gy(g.y) & 1) == 1) {
+        dst[i] = pack(floor(unpack(src[i]) * P.fp2.x));
     } else {
         dst[i] = src[i];
     }
@@ -153,12 +176,13 @@ fn scanlines(@builtin(global_invocation_id) g: vec3<u32>) {
 @compute @workgroup_size(8, 8)
 fn vignette(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
-    let cx = f32(W()) / 2.0;
-    let cy = f32(H()) / 2.0;
-    let dx = (f32(g.x) - cx) / cx;
-    let dy = (f32(g.y) - cy) / cy;
+    // one vignette around the whole wall, not one per pane
+    let cx = f32(VW()) / 2.0;
+    let cy = f32(VH()) / 2.0;
+    let dx = (f32(gx(g.x)) - cx) / cx;
+    let dy = (f32(gy(g.y)) - cy) / cy;
     let d = min(sqrt(dx * dx + dy * dy) / 1.4142135, 1.0);
-    let f = 1.0 - d * d * 0.45;
+    let f = 1.0 - d * d * P.fp2.x;
     dst[idx(g.x, g.y)] = pack(floor(load(g.x, g.y) * f));
 }
 
@@ -180,7 +204,10 @@ fn hash3(a: u32, b: u32, c: u32) -> u32 {
 fn grain(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
     let tick = u32(P.fp.x * 30.0);
-    let n = f32(hash3(g.x, g.y, tick) % 29u) - 14.0;
+    let range = u32(P.fp2.x);
+    // hashed on wall coordinates: the grain of a pixel is the same whichever
+    // pane (or apron) draws it
+    let n = f32(hash3(bitcast<u32>(gx(g.x)), bitcast<u32>(gy(g.y)), tick) % (2u * range + 1u)) - f32(range);
     dst[idx(g.x, g.y)] = pack(clamp(load(g.x, g.y) + n, vec3<f32>(0.0), vec3<f32>(255.0)));
 }
 
@@ -188,16 +215,18 @@ fn shift_mul(g: vec3<u32>, m: vec3<f32>) {
     dst[idx(g.x, g.y)] = pack(floor(load(g.x, g.y) * m));
 }
 
+// `warm` and `cool`: per-channel multipliers in fp2.xyz.
 @compute @workgroup_size(8, 8)
-fn warm(@builtin(global_invocation_id) g: vec3<u32>) {
+fn shift(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
-    shift_mul(g, vec3<f32>(1.10, 1.0, 0.88));
+    shift_mul(g, P.fp2.xyz);
 }
 
-@compute @workgroup_size(8, 8)
-fn cool(@builtin(global_invocation_id) g: vec3<u32>) {
-    if (oob(g)) { return; }
-    shift_mul(g, vec3<f32>(0.88, 1.0, 1.12));
+// `filter::mix_to`: toward the effect by fp2.x, exactly the effect at 1.
+fn mix_to(c: vec3<f32>, e: vec3<f32>) -> vec3<f32> {
+    let t = P.fp2.x;
+    if (t >= 1.0) { return e; }
+    return floor(clamp(c + (e - c) * t, vec3<f32>(0.0), vec3<f32>(255.0)));
 }
 
 // p0 carries the rotation in turns, so `hue` (fixed 120°) and `spectrum`
@@ -214,7 +243,7 @@ fn duotone(@builtin(global_invocation_id) g: vec3<u32>) {
     let accent = vec3<f32>(120.0, 180.0, 255.0);
     let c = load(g.x, g.y);
     let l = (c.x * 2.0 + c.y * 3.0 + c.z) / (6.0 * 255.0);
-    dst[idx(g.x, g.y)] = pack(floor(accent * l));
+    dst[idx(g.x, g.y)] = pack(mix_to(c, floor(accent * l)));
 }
 
 @compute @workgroup_size(8, 8)
@@ -234,13 +263,14 @@ fn thermal(@builtin(global_invocation_id) g: vec3<u32>) {
     let f = seg - f32(i);
     let a = ramp[i];
     let b = ramp[i + 1u];
-    dst[idx(g.x, g.y)] = pack(floor(a + (b - a) * f));
+    dst[idx(g.x, g.y)] = pack(mix_to(c, floor(a + (b - a) * f)));
 }
 
 @compute @workgroup_size(8, 8)
 fn invert(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
-    dst[idx(g.x, g.y)] = pack(vec3<f32>(255.0) - load(g.x, g.y));
+    let c = load(g.x, g.y);
+    dst[idx(g.x, g.y)] = pack(mix_to(c, vec3<f32>(255.0) - c));
 }
 
 @compute @workgroup_size(8, 8)
@@ -252,13 +282,13 @@ fn sepia(@builtin(global_invocation_id) g: vec3<u32>) {
         c.x * 0.349 + c.y * 0.686 + c.z * 0.168,
         c.x * 0.272 + c.y * 0.534 + c.z * 0.131,
     );
-    dst[idx(g.x, g.y)] = pack(floor(min(o, vec3<f32>(255.0))));
+    dst[idx(g.x, g.y)] = pack(mix_to(c, floor(min(o, vec3<f32>(255.0)))));
 }
 
 @compute @workgroup_size(8, 8)
 fn posterize(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
-    let levels = 5.0;
+    let levels = P.fp2.x;
     let c = load(g.x, g.y);
     // matches the CPU LUT: round to `levels` steps in 0..1, then rescale
     let q = round(c / 255.0 * levels) / levels * 255.0;
@@ -269,7 +299,7 @@ fn posterize(@builtin(global_invocation_id) g: vec3<u32>) {
 fn gamma(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
     let c = load(g.x, g.y) / 255.0;
-    dst[idx(g.x, g.y)] = pack(floor(pow(c, vec3<f32>(1.35)) * 255.0));
+    dst[idx(g.x, g.y)] = pack(floor(pow(c, vec3<f32>(P.fp2.x)) * 255.0));
 }
 
 @compute @workgroup_size(8, 8)
@@ -277,7 +307,7 @@ fn noir(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
     let c = load(g.x, g.y);
     let l = (c.x * 0.299 + c.y * 0.587 + c.z * 0.114) / 255.0;
-    let t = clamp((l - 0.5) * 1.6 + 0.5, 0.0, 1.0);
+    let t = clamp((l - 0.5) * P.fp2.x + 0.5, 0.0, 1.0);
     let v = floor(t * 255.0);
     dst[idx(g.x, g.y)] = pack(vec3<f32>(v, v, v));
 }
@@ -287,7 +317,46 @@ fn noir(@builtin(global_invocation_id) g: vec3<u32>) {
 @compute @workgroup_size(8, 8)
 fn dim(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
-    dst[idx(g.x, g.y)] = pack(floor(load(g.x, g.y) * P.fp.y));
+    let f = P.fp.y * transition_mask(gx(g.x), gy(g.y));
+    dst[idx(g.x, g.y)] = pack(floor(load(g.x, g.y) * f));
+}
+
+// `transition::hash2`
+fn mask_hash(x: u32, y: u32) -> u32 {
+    var h = (x * 0x8da6b343u) ^ (y * 0xd8163841u);
+    h ^= h >> 15u; h *= 0x2c1b3c6du;
+    h ^= h >> 12u; h *= 0x297a2d39u;
+    h ^= h >> 15u;
+    return h;
+}
+
+// `transition::Mask::factor` at wall pixel (x, y): flags.y the style (0 none,
+// 1 dissolve, 2 wipe, 3 iris, 4 blinds), flags.z arriving, flags.w the slat
+// height; fp.z the edge, fp.w 1/soft; fp2 1/span, 1/radius, the centre.
+fn transition_mask(x: i32, y: i32) -> f32 {
+    var t = 0.0;
+    switch P.flags.y {
+        case 1u: {
+            t = f32(mask_hash(bitcast<u32>(x), bitcast<u32>(y)) >> 8u) * (1.0 / 16777216.0);
+        }
+        case 2u: {
+            let u = (f32(x) + 0.5) * P.fp2.x;
+            t = select(1.0 - u, u, P.flags.z != 0u);
+        }
+        case 3u: {
+            let dx = f32(x) + 0.5 - P.fp2.z;
+            let dy = f32(y) + 0.5 - P.fp2.w;
+            t = sqrt(dx * dx + dy * dy) * P.fp2.y;
+        }
+        case 4u: {
+            let s = i32(P.flags.w);
+            t = (f32(((y % s) + s) % s) + 0.5) * P.fp2.x;
+        }
+        default: {
+            return 1.0;
+        }
+    }
+    return clamp((P.fp.z - clamp(t, 0.0, 1.0)) * P.fp.w, 0.0, 1.0);
 }
 
 // ---------------------------------------------------------- neighbourhood ops
@@ -295,8 +364,9 @@ fn dim(@builtin(global_invocation_id) g: vec3<u32>) {
 @compute @workgroup_size(8, 8)
 fn chroma(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
-    let cx = f32(W()) / 2.0;
-    let off = i32((f32(g.x) - cx) / cx * 2.0);
+    // fringes grow toward the wall's edges, not each pane's
+    let cx = f32(VW()) / 2.0;
+    let off = i32((f32(gx(g.x)) - cx) / cx * P.fp2.x);
     let xr = clampx(i32(g.x) - off);
     let xb = clampx(i32(g.x) + off);
     let mid = load(g.x, g.y);
@@ -306,19 +376,29 @@ fn chroma(@builtin(global_invocation_id) g: vec3<u32>) {
 @compute @workgroup_size(8, 8)
 fn pixelate(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
-    let block = 3u;
-    let bx = (g.x / block) * block;
-    let by = (g.y / block) * block;
+    // blocks on the wall's 3 px grid (floor division: an apron can sit at
+    // negative wall coordinates), clipped to this buffer
+    let block = i32(P.fp2.x);
+    let wx = gx(g.x);
+    let wy = gy(g.y);
+    let x0 = bitcast<i32>(P.virt.x);
+    let y0 = bitcast<i32>(P.virt.y);
+    let bx = wx - ((wx % block) + block) % block - x0;
+    let by = wy - ((wy % block) + block) % block - y0;
+    let xa = u32(max(bx, 0));
+    let ya = u32(max(by, 0));
+    let xb = u32(min(bx + block, i32(W())));
+    let yb = u32(min(by + block, i32(H())));
     var sum = vec3<f32>(0.0);
     var n = 0u;
-    for (var y = by; y < min(by + block, H()); y = y + 1u) {
-        for (var x = bx; x < min(bx + block, W()); x = x + 1u) {
+    for (var y = ya; y < yb; y = y + 1u) {
+        for (var x = xa; x < xb; x = x + 1u) {
             sum = sum + load(x, y);
             n = n + 1u;
         }
     }
     // integer-average to match the CPU's u32 accumulate-then-divide
-    let avg = floor(sum / f32(n));
+    let avg = avg_trunc(sum, f32(n));
     dst[idx(g.x, g.y)] = pack(avg);
 }
 
@@ -334,14 +414,15 @@ fn edges(@builtin(global_invocation_id) g: vec3<u32>) {
            - (lum6(load(xl, yu)) + 2.0 * lum6(load(xl, g.y)) + lum6(load(xl, yd)));
     let gy = (lum6(load(xl, yd)) + 2.0 * lum6(load(g.x, yd)) + lum6(load(xr, yd)))
            - (lum6(load(xl, yu)) + 2.0 * lum6(load(g.x, yu)) + lum6(load(xr, yu)));
-    let m = clamp(sqrt(gx * gx + gy * gy) / (255.0 * 4.0), 0.0, 1.0);
+    let m = clamp(sqrt(gx * gx + gy * gy) / (255.0 * 4.0) * P.fp2.x, 0.0, 1.0);
     dst[idx(g.x, g.y)] = pack(floor(neon * m));
 }
 
 @compute @workgroup_size(8, 8)
 fn warp(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
-    let shift = i32(round(2.0 * sin(f32(g.y) * 0.35 + P.fp.x * 1.8)));
+    // the wave follows wall rows; the 2 px shift reads into the apron
+    let shift = i32(round(P.fp2.x * sin(f32(gy(g.y)) * 0.35 + P.fp.x * 1.8)));
     let w = i32(W());
     var xs = (i32(g.x) - shift) % w;
     if (xs < 0) { xs = xs + w; }
@@ -359,7 +440,7 @@ fn sharpen(@builtin(global_invocation_id) g: vec3<u32>) {
     let c = lum6(load(g.x, g.y));
     let blur = (lum6(load(g.x - 1u, g.y)) + lum6(load(g.x + 1u, g.y))
               + lum6(load(g.x, g.y - 1u)) + lum6(load(g.x, g.y + 1u))) * 0.25;
-    let edge = clamp(c - blur, -80.0, 80.0);
+    let edge = clamp(c - blur, -80.0, 80.0) * P.fp2.x;
     dst[idx(g.x, g.y)] = pack(floor(clamp(load(g.x, g.y) + edge, vec3<f32>(0.0), vec3<f32>(255.0))));
 }
 
@@ -376,9 +457,9 @@ fn mirror(@builtin(global_invocation_id) g: vec3<u32>) {
 fn bloom_bright(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
     let c = load(g.x, g.y);
-    // CPU threshold is on the integer luminance `(2r+3g+b)/6 > 180`
+    // CPU threshold is on the integer luminance `(2r+3g+b)/6 > threshold`
     let l = u32((c.x * 2.0 + c.y * 3.0 + c.z) / 6.0);
-    if (l > 180u) {
+    if (l > P.flags.y) {
         scratch[plane_aux0(idx(g.x, g.y))] = pack(c);
     } else {
         scratch[plane_aux0(idx(g.x, g.y))] = 0u;
@@ -388,7 +469,7 @@ fn bloom_bright(@builtin(global_invocation_id) g: vec3<u32>) {
 @compute @workgroup_size(8, 8)
 fn bloom_h(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
-    let r = 2i;
+    let r = i32(P.flags.z);
     let x0 = max(i32(g.x) - r, 0);
     let x1 = min(i32(g.x) + r, i32(W()) - 1);
     var sum = vec3<f32>(0.0);
@@ -397,13 +478,13 @@ fn bloom_h(@builtin(global_invocation_id) g: vec3<u32>) {
         sum = sum + unpack(scratch[plane_aux0(idx(u32(x), g.y))]);
         n = n + 1.0;
     }
-    scratch[plane_aux1(idx(g.x, g.y))] = pack(sum / n);
+    scratch[plane_aux1(idx(g.x, g.y))] = pack(avg_trunc(sum, n));
 }
 
 @compute @workgroup_size(8, 8)
 fn bloom_v_add(@builtin(global_invocation_id) g: vec3<u32>) {
     if (oob(g)) { return; }
-    let r = 2i;
+    let r = i32(P.flags.z);
     let y0 = max(i32(g.y) - r, 0);
     let y1 = min(i32(g.y) + r, i32(H()) - 1);
     var sum = vec3<f32>(0.0);
@@ -413,7 +494,102 @@ fn bloom_v_add(@builtin(global_invocation_id) g: vec3<u32>) {
         n = n + 1.0;
     }
     let base = load(g.x, g.y);
-    dst[idx(g.x, g.y)] = pack(floor(min(base + sum / n * 0.4, vec3<f32>(255.0))));
+    // per-channel gains: bloom is neutral, halation warm
+    dst[idx(g.x, g.y)] = pack(floor(min(base + sum / n * P.fp2.xyz, vec3<f32>(255.0))));
+}
+
+// ------------------------------------------------------------- new effects
+
+// `filter::letterbox`: black bars across the whole wall, top and bottom.
+@compute @workgroup_size(8, 8)
+fn letterbox(@builtin(global_invocation_id) g: vec3<u32>) {
+    if (oob(g)) { return; }
+    let bars = i32(round(f32(VH()) * P.fp2.x));
+    let y = gy(g.y);
+    let i = idx(g.x, g.y);
+    if (y < bars || y >= i32(VH()) - bars) {
+        dst[i] = 0u;
+    } else {
+        // untouched, glyph flag included: the CPU never calls set() there
+        dst[i] = src[i];
+    }
+}
+
+// `filter::dither_channel`: ordered dither to fp2.x levels per channel, the
+// Bayer pattern on wall coordinates.
+fn dither_ch(v: f32, steps: f32, th: f32) -> f32 {
+    let q = clamp(floor(v * steps / 255.0 + th), 0.0, steps);
+    return round(q * 255.0 / steps);
+}
+
+@compute @workgroup_size(8, 8)
+fn dither(@builtin(global_invocation_id) g: vec3<u32>) {
+    if (oob(g)) { return; }
+    let steps = max(P.fp2.x - 1.0, 1.0);
+    let bx = u32(((gx(g.x) % 4) + 4) % 4);
+    let by = u32(((gy(g.y) % 4) + 4) % 4);
+    let th = (f32(BAYER4[by * 4u + bx]) + 0.5) / 16.0;
+    let c = load(g.x, g.y);
+    dst[idx(g.x, g.y)] = pack(vec3<f32>(dither_ch(c.x, steps, th), dither_ch(c.y, steps, th), dither_ch(c.z, steps, th)));
+}
+
+// Tilt-shift is three passes like bloom: a box blur into aux0 (rows), aux1
+// (columns), then a mix with the untouched source by row. flags.z = radius.
+@compute @workgroup_size(8, 8)
+fn blur_h(@builtin(global_invocation_id) g: vec3<u32>) {
+    if (oob(g)) { return; }
+    let r = i32(P.flags.z);
+    let x0 = max(i32(g.x) - r, 0);
+    let x1 = min(i32(g.x) + r, i32(W()) - 1);
+    var sum = vec3<f32>(0.0);
+    var n = 0.0;
+    for (var x = x0; x <= x1; x = x + 1) {
+        sum = sum + load(u32(x), g.y);
+        n = n + 1.0;
+    }
+    scratch[plane_aux0(idx(g.x, g.y))] = pack(avg_trunc(sum, n));
+}
+
+@compute @workgroup_size(8, 8)
+fn blur_v(@builtin(global_invocation_id) g: vec3<u32>) {
+    if (oob(g)) { return; }
+    let r = i32(P.flags.z);
+    let y0 = max(i32(g.y) - r, 0);
+    let y1 = min(i32(g.y) + r, i32(H()) - 1);
+    var sum = vec3<f32>(0.0);
+    var n = 0.0;
+    for (var y = y0; y <= y1; y = y + 1) {
+        sum = sum + unpack(scratch[plane_aux0(idx(g.x, u32(y)))]);
+        n = n + 1.0;
+    }
+    scratch[plane_aux1(idx(g.x, g.y))] = pack(avg_trunc(sum, n));
+}
+
+// `filter::tilt_weight` on the wall's rows: fp2.x strength, fp2.y band.
+@compute @workgroup_size(8, 8)
+fn tilt_mix(@builtin(global_invocation_id) g: vec3<u32>) {
+    if (oob(g)) { return; }
+    let height = f32(VH());
+    var yn = 0.5;
+    if (height > 1.0) { yn = f32(gy(g.y)) / (height - 1.0); }
+    let band = P.fp2.y;
+    let s = clamp((abs(yn - 0.5) - band) / max(0.5 - band, 1e-3), 0.0, 1.0);
+    let t = clamp(s * s * (3.0 - 2.0 * s) * P.fp2.x, 0.0, 1.0);
+    let c = load(g.x, g.y);
+    let b = unpack(scratch[plane_aux1(idx(g.x, g.y))]);
+    dst[idx(g.x, g.y)] = pack(floor(clamp(c + (b - c) * t, vec3<f32>(0.0), vec3<f32>(255.0))));
+}
+
+// `filter::kaleido` on a whole canvas (Classic scenes). Studio scenes mirror
+// in the scene pass instead, where the whole wall's picture exists.
+@compute @workgroup_size(8, 8)
+fn kaleido(@builtin(global_invocation_id) g: vec3<u32>) {
+    if (oob(g)) { return; }
+    var sx = g.x;
+    if (g.x >= W() / 2u) { sx = W() - 1u - g.x; }
+    var sy = g.y;
+    if (g.y >= H() / 2u) { sy = H() - 1u - g.y; }
+    dst[idx(g.x, g.y)] = pack(load(sx, sy));
 }
 
 // ------------------------------------------------------------- colour grading
@@ -482,6 +658,112 @@ fn grade(@builtin(global_invocation_id) g: vec3<u32>) {
         c = vec3<f32>(contrast_ch(c.x, contrast), contrast_ch(c.y, contrast), contrast_ch(c.z, contrast));
     }
     dst[idx(g.x, g.y)] = pack(c);
+}
+
+// ------------------------------------------------------------------ look LUT
+
+// `look::Lut3D::apply`: tetrahedral interpolation through the look's 33^3
+// table, 10-bit channels packed `r | g << 10 | b << 20`. The host uploads it
+// into the scratch buffer at `flags.y` whenever it changes.
+const LUT_N: u32 = 33u;
+
+fn lut_node(r: u32, g: u32, b: u32) -> vec3<f32> {
+    let v = scratch[P.flags.y + (b * LUT_N + g) * LUT_N + r];
+    return vec3<f32>(f32(v & 1023u), f32((v >> 10u) & 1023u), f32((v >> 20u) & 1023u));
+}
+
+@compute @workgroup_size(8, 8)
+fn look_lut(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (oob(gid)) { return; }
+    let c = load(gid.x, gid.y);
+    let f = c * (f32(LUT_N - 1u) / 255.0);
+    let i = min(vec3<u32>(floor(f)), vec3<u32>(LUT_N - 2u));
+    let fr = f - vec3<f32>(i);
+    let c000 = lut_node(i.x, i.y, i.z);
+    let c111 = lut_node(i.x + 1u, i.y + 1u, i.z + 1u);
+    var w: vec4<f32>;
+    var ca: vec3<f32>;
+    var cb: vec3<f32>;
+    // the tetrahedron holding the point, by the order of its fractions
+    if (fr.x > fr.y) {
+        if (fr.y > fr.z) {
+            w = vec4<f32>(1.0 - fr.x, fr.x - fr.y, fr.y - fr.z, fr.z);
+            ca = lut_node(i.x + 1u, i.y, i.z);
+            cb = lut_node(i.x + 1u, i.y + 1u, i.z);
+        } else if (fr.x > fr.z) {
+            w = vec4<f32>(1.0 - fr.x, fr.x - fr.z, fr.z - fr.y, fr.y);
+            ca = lut_node(i.x + 1u, i.y, i.z);
+            cb = lut_node(i.x + 1u, i.y, i.z + 1u);
+        } else {
+            w = vec4<f32>(1.0 - fr.z, fr.z - fr.x, fr.x - fr.y, fr.y);
+            ca = lut_node(i.x, i.y, i.z + 1u);
+            cb = lut_node(i.x + 1u, i.y, i.z + 1u);
+        }
+    } else if (fr.z > fr.y) {
+        w = vec4<f32>(1.0 - fr.z, fr.z - fr.y, fr.y - fr.x, fr.x);
+        ca = lut_node(i.x, i.y, i.z + 1u);
+        cb = lut_node(i.x, i.y + 1u, i.z + 1u);
+    } else if (fr.z > fr.x) {
+        w = vec4<f32>(1.0 - fr.y, fr.y - fr.z, fr.z - fr.x, fr.x);
+        ca = lut_node(i.x, i.y + 1u, i.z);
+        cb = lut_node(i.x, i.y + 1u, i.z + 1u);
+    } else {
+        w = vec4<f32>(1.0 - fr.y, fr.y - fr.x, fr.x - fr.z, fr.z);
+        ca = lut_node(i.x, i.y + 1u, i.z);
+        cb = lut_node(i.x + 1u, i.y + 1u, i.z);
+    }
+    let v = w.x * c000 + w.y * ca + w.z * cb + w.w * c111;
+    dst[idx(gid.x, gid.y)] = pack(floor(v * (255.0 / 1023.0) + 0.5));
+}
+
+// ------------------------------------------------------------- palette snap
+
+// `look::snap_pixel`: nearest palette colour by a green-weighted distance,
+// or (flags.w) the two nearest mixed by a Bayer threshold in wall
+// coordinates. Colours sit in the scratch buffer at flags.y, flags.z of them.
+var<private> BAYER4: array<u32, 16> = array<u32, 16>(0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
+
+fn pal_color(k: u32) -> vec3<f32> { return unpack(scratch[P.flags.y + k]); }
+
+fn snap_dist(a: vec3<f32>, b: vec3<f32>) -> f32 {
+    let d = a - b;
+    return 2.0 * d.x * d.x + 4.0 * d.y * d.y + 3.0 * d.z * d.z;
+}
+
+@compute @workgroup_size(8, 8)
+fn palette_snap(@builtin(global_invocation_id) g: vec3<u32>) {
+    if (oob(g)) { return; }
+    let c = load(g.x, g.y);
+    let n = P.flags.z;
+    var best = 3.0e30;
+    var bi = 0u;
+    var second = 3.0e30;
+    var si = 0u;
+    for (var k = 0u; k < 8u; k = k + 1u) {
+        if (k >= n) { break; }
+        let d = snap_dist(c, pal_color(k));
+        if (d < best) {
+            second = best;
+            si = bi;
+            best = d;
+            bi = k;
+        } else if (d < second) {
+            second = d;
+            si = k;
+        }
+    }
+    var pick = bi;
+    if (P.flags.w != 0u && second < 1.0e30) {
+        let d1 = sqrt(best);
+        let d2 = sqrt(second);
+        var t = 0.0;
+        if (d1 + d2 > 0.0) { t = d1 / (d1 + d2); }
+        let bx = u32(((gx(g.x) % 4) + 4) % 4);
+        let by = u32(((gy(g.y) % 4) + 4) % 4);
+        let threshold = (f32(BAYER4[by * 4u + bx]) + 0.5) / 16.0;
+        if (t > threshold) { pick = si; }
+    }
+    dst[idx(g.x, g.y)] = pack(pal_color(pick));
 }
 
 // ------------------------------------------------------------------ smoothing
@@ -574,10 +856,40 @@ fn braille_glyph(mask: u32) -> u32 {
     return 0x2800u + m;
 }
 
+// Every channel of two packed colours within `t` levels.
+fn within_levels(a: u32, b: u32, t: u32) -> bool {
+    for (var s = 0u; s < 24u; s = s + 8u) {
+        let ca = i32((a >> s) & 0xffu);
+        let cb = i32((b >> s) & 0xffu);
+        if (u32(abs(ca - cb)) > t) { return false; }
+    }
+    return true;
+}
+
+// Write a cell. With hysteresis on (flags.y = threshold) a cell whose fg and
+// bg each moved by at most the threshold — keeping its glyph, or being flat
+// (fg ≈ bg) so the glyph does not show — re-emits last frame's values, so
+// the terminal diff skips it. The history holds what was emitted, so a slow
+// drift is sent once it adds up past the threshold: error stays bounded.
 fn store_cell(ci: u32, glyph: u32, fg: vec3<f32>, bg: vec3<f32>) {
-    cells[ci * 3u + 0u] = glyph;
-    cells[ci * 3u + 1u] = pack(fg);
-    cells[ci * 3u + 2u] = pack(bg);
+    var out = vec3<u32>(glyph, pack(fg), pack(bg));
+    let t = P.flags.y;
+    if (t > 0u) {
+        let h = plane_hist(ci * 3u);
+        if (P.flags.z != 0u) {
+            let prev = vec3<u32>(scratch[h], scratch[h + 1u], scratch[h + 2u]);
+            let steady = within_levels(out.y, prev.y, t) && within_levels(out.z, prev.z, t);
+            if (steady && (out.x == prev.x || within_levels(out.y, out.z, t))) {
+                out = prev;
+            }
+        }
+        scratch[h] = out.x;
+        scratch[h + 1u] = out.y;
+        scratch[h + 2u] = out.z;
+    }
+    cells[ci * 3u + 0u] = out.x;
+    cells[ci * 3u + 1u] = out.y;
+    cells[ci * 3u + 2u] = out.z;
 }
 
 // Sentinel: this cell carries a glyph the CPU owns. fg/bg are still valid.
@@ -624,7 +936,7 @@ fn pack_cells(@builtin(global_invocation_id) g: vec3<u32>) {
         let s = split_block(px, 4u);
         store_cell(ci, quad_glyph(s.mask), s.fg, s.bg);
         return;
-    } else {
+    } else if (mode == 2u) {
         for (var dx = 0u; dx < 2u; dx = dx + 1u) {
             for (var dy = 0u; dy < 4u; dy = dy + 1u) {
                 px[dx * 4u + dy] = load_or_black(ox + dx, oy + dy);
@@ -633,5 +945,38 @@ fn pack_cells(@builtin(global_invocation_id) g: vec3<u32>) {
         let s = split_block(px, 8u);
         store_cell(ci, braille_glyph(s.mask), s.fg, s.bg);
         return;
+    } else if (mode == 3u) {
+        // sextant: 2x3, rows top to bottom
+        for (var dy = 0u; dy < 3u; dy = dy + 1u) {
+            for (var dx = 0u; dx < 2u; dx = dx + 1u) {
+                px[dy * 2u + dx] = load_or_black(ox + dx, oy + dy);
+            }
+        }
+        let s = split_block(px, 6u);
+        store_cell(ci, sextant_glyph(s.mask), s.fg, s.bg);
+        return;
+    } else if (mode == 4u) {
+        // ascii: the two pixels' mean, as a ramp character on black
+        let c = floor((unpack(tl_raw) + load_or_black(ox, oy + 1u)) * 0.5);
+        let l = u32(c.x) * 3u + u32(c.y) * 6u + u32(c.z);
+        store_cell(ci, RAMP[min(l * 10u / 2551u, 9u)], c, vec3<f32>(0.0));
+        return;
+    } else {
+        // blocks: one colour a cell, in the background
+        store_cell(ci, 0x20u, vec3<f32>(0.0), unpack(tl_raw));
+        return;
     }
 }
+
+// `render::sextant_glyph`
+fn sextant_glyph(mask: u32) -> u32 {
+    let m = mask & 63u;
+    if (m == 0u) { return 0x20u; }
+    if (m == 21u) { return 0x258cu; }
+    if (m == 42u) { return 0x2590u; }
+    if (m == 63u) { return 0x2588u; }
+    return 0x1fb00u + m - 1u - select(0u, 1u, m > 21u) - select(0u, 1u, m > 42u);
+}
+
+// `render::RAMP`
+const RAMP = array<u32, 10>(0x20u, 0x2eu, 0x3au, 0x2du, 0x3du, 0x2bu, 0x2au, 0x23u, 0x25u, 0x40u);

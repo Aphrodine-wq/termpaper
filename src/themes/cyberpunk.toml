@@ -1,0 +1,23 @@
+format = 1
+name = "Cyberpunk"
+author = "termpaper"
+description = "Night city neon: hot pink and cyan, hard contrast, glowing signs."
+tags = ["mood", "neon"]
+
+[grade]
+contrast = 1.15
+vibrance = 0.4
+
+[palette]
+mode = "tint"
+strength = 0.55
+colors = ["#0d0221", "#261447", "#f6019d", "#ff3864", "#2de2e6", "#f9c80e"]
+
+[effects]
+stack = ["bloom", "chroma"]
+bloom = 1.2
+chroma = 0.6
+
+[scene]
+name = "shibuya"
+variant = "rain"

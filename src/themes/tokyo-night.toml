@@ -1,0 +1,24 @@
+format = 1
+name = "Tokyo Night"
+author = "termpaper"
+description = "Any scene in the Tokyo Night palette: deep navy shadows, blue and violet light."
+tags = ["terminal", "dark", "blue"]
+
+[grade]
+contrast = 1.08
+vibrance = 0.25
+temperature = -0.15
+shadows = { hue = 230.0, amount = 0.2 }
+
+[palette]
+mode = "tint"
+strength = 0.65
+colors = ["#1a1b26", "#24283b", "#414868", "#7aa2f7", "#bb9af7", "#c0caf5"]
+
+[effects]
+stack = ["bloom"]
+bloom = 0.6
+
+[scene]
+name = "tokyo"
+variant = "rain"

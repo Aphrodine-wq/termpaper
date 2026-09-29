@@ -12,7 +12,7 @@ use termpaper::{filter, render};
 fn main() {
     let (cols, rows) = (544usize, 66usize); // half mode -> 544x132 px
     let (w, h) = (cols, rows * 2);
-    let opts = SceneOptions { theme: None, detail: Detail::Low, text_scale: None };
+    let opts = SceneOptions { theme: None, detail: Detail::Low, text_scale: None, pixels: Default::default() };
     let mut s = scene::create("koi", &opts, StdRng::seed_from_u64(7)).unwrap();
     let mut canvas = Canvas::new(w, h);
     for _ in 0..40 { s.update(1.0 / 60.0, &mut canvas); }
@@ -23,9 +23,8 @@ fn main() {
     for name in ["hue", "spectrum", "sharpen", "bloom", "pixelate", "edges"] {
         let filters = vec![name.to_string()];
         let plan = Plan {
-            filters: &filters, quick_filter: None, t: 1.5,
-            hue_shift: 0.0, saturation: 1.0, contrast: 1.0, dim: 1.0, smooth: 0.0,
-            pixels: Pixels::Half, cols, rows, crop: (0, 0),
+            look: &termpaper::look::Look::with_effects(&filters), lut: None, quick_filter: None, t: 1.5, dim: 1.0, mask: None, smooth: 0.0,
+            pixels: Pixels::Half, cols, rows, crop: (0, 0), virt: None, hysteresis: 0,
         };
         let mut c = canvas.clone_for_smooth();
         filter::apply_all(&filters, &mut c, plan.t);

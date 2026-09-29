@@ -1,0 +1,547 @@
+//! The menu, rasterised to PNG for review without a terminal.
+//!
+//! ```text
+//! cargo run --example ui_snapshot -- [COLSxROWS] [OUT_DIR]
+//! ```
+//!
+//! Draws every menu state (each page, the Effects sub-page, search, help)
+//! over a live Classic scene, the way the frame loop composes them, then
+//! paints the cell buffer: text with a real monospace font (`TERMPAPER_FONT`,
+//! else JetBrains Mono / DejaVu / Liberation from the usual places), block
+//! elements, box drawing and braille geometrically, the way terminals draw
+//! them. Writes `OUT_DIR/<state>.png` (default `target/ui_snapshot`), plus
+//! `themes_<scene>.png`: every built-in theme over the same frame.
+use rand::{rngs::StdRng, SeedableRng};
+use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, style::Modifier, Terminal};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use termpaper::canvas::Canvas;
+use termpaper::menu::{self, Input, Menu, MenuCtx, Page};
+use termpaper::render::{self, Pixels};
+use termpaper::scene::{self, Detail, SceneOptions};
+
+const CW: usize = 10;
+const CH: usize = 20;
+
+fn xterm(i: u8) -> (u8, u8, u8) {
+    const BASE: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (205, 0, 0),
+        (0, 205, 0),
+        (205, 205, 0),
+        (0, 0, 238),
+        (205, 0, 205),
+        (0, 205, 205),
+        (229, 229, 229),
+        (127, 127, 127),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (92, 92, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ];
+    match i {
+        0..=15 => BASE[i as usize],
+        16..=231 => {
+            let v = i - 16;
+            let s = |c: u8| if c == 0 { 0 } else { 55 + c * 40 };
+            (s(v / 36), s((v / 6) % 6), s(v % 6))
+        }
+        _ => {
+            let g = 8 + (i - 232) * 10;
+            (g, g, g)
+        }
+    }
+}
+
+fn rgb(c: Color, default: (u8, u8, u8)) -> (u8, u8, u8) {
+    match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(i) => xterm(i),
+        Color::Reset => default,
+        Color::Black => xterm(0),
+        Color::Red => xterm(1),
+        Color::Green => xterm(2),
+        Color::Yellow => xterm(3),
+        Color::Blue => xterm(4),
+        Color::Magenta => xterm(5),
+        Color::Cyan => xterm(6),
+        Color::Gray => xterm(7),
+        Color::DarkGray => xterm(8),
+        Color::LightRed => xterm(9),
+        Color::LightGreen => xterm(10),
+        Color::LightYellow => xterm(11),
+        Color::LightBlue => xterm(12),
+        Color::LightMagenta => xterm(13),
+        Color::LightCyan => xterm(14),
+        Color::White => xterm(15),
+    }
+}
+
+struct Painter {
+    w: usize,
+    h: usize,
+    px: Vec<(u8, u8, u8)>,
+    regular: fontdue::Font,
+    bold: Option<fontdue::Font>,
+    /// symbol fonts for glyphs the monospace font lacks, as terminals fall
+    /// back to them
+    fallback: Vec<fontdue::Font>,
+    cache: HashMap<(char, bool), (fontdue::Metrics, Vec<u8>)>,
+}
+
+impl Painter {
+    fn rect(&mut self, x: usize, y: usize, w: usize, h: usize, c: (u8, u8, u8)) {
+        for yy in y..(y + h).min(self.h) {
+            for xx in x..(x + w).min(self.w) {
+                self.px[yy * self.w + xx] = c;
+            }
+        }
+    }
+
+    fn blend(&mut self, x: usize, y: usize, c: (u8, u8, u8), a: f32) {
+        if x >= self.w || y >= self.h {
+            return;
+        }
+        let p = &mut self.px[y * self.w + x];
+        let m = |bg: u8, fg: u8| (bg as f32 + (fg as f32 - bg as f32) * a).round() as u8;
+        *p = (m(p.0, c.0), m(p.1, c.1), m(p.2, c.2));
+    }
+
+    /// Glyphs terminals draw themselves: blocks, box lines, braille. True
+    /// when drawn.
+    fn geometric(&mut self, ch: char, x: usize, y: usize, c: (u8, u8, u8)) -> bool {
+        let (hw, hh) = (CW / 2, CH / 2);
+        let quad = |tl: bool, tr: bool, bl: bool, br: bool| [tl, tr, bl, br];
+        let q = match ch {
+            '▀' => Some(quad(true, true, false, false)),
+            '▄' => Some(quad(false, false, true, true)),
+            '█' => Some(quad(true, true, true, true)),
+            '▌' => Some(quad(true, false, true, false)),
+            '▐' => Some(quad(false, true, false, true)),
+            '▘' => Some(quad(true, false, false, false)),
+            '▝' => Some(quad(false, true, false, false)),
+            '▖' => Some(quad(false, false, true, false)),
+            '▗' => Some(quad(false, false, false, true)),
+            '▚' => Some(quad(true, false, false, true)),
+            '▞' => Some(quad(false, true, true, false)),
+            '▛' => Some(quad(true, true, true, false)),
+            '▜' => Some(quad(true, true, false, true)),
+            '▙' => Some(quad(true, false, true, true)),
+            '▟' => Some(quad(false, true, true, true)),
+            _ => None,
+        };
+        if let Some([tl, tr, bl, br]) = q {
+            for (on, dx, dy) in [(tl, 0, 0), (tr, hw, 0), (bl, 0, hh), (br, hw, hh)] {
+                if on {
+                    self.rect(x + dx, y + dy, hw, hh, c);
+                }
+            }
+            return true;
+        }
+        let mid_y = y + CH / 2;
+        let mid_x = x + CW / 2;
+        match ch {
+            '─' => self.rect(x, mid_y, CW, 1, c),
+            '━' => self.rect(x, mid_y - 1, CW, 3, c),
+            '│' => self.rect(mid_x, y, 1, CH, c),
+            '╭' => {
+                self.rect(mid_x, mid_y, CW - CW / 2, 1, c);
+                self.rect(mid_x, mid_y, 1, CH - CH / 2, c);
+            }
+            '╮' => {
+                self.rect(x, mid_y, CW / 2 + 1, 1, c);
+                self.rect(mid_x, mid_y, 1, CH - CH / 2, c);
+            }
+            '╰' => {
+                self.rect(mid_x, mid_y, CW - CW / 2, 1, c);
+                self.rect(mid_x, y, 1, CH / 2 + 1, c);
+            }
+            '╯' => {
+                self.rect(x, mid_y, CW / 2 + 1, 1, c);
+                self.rect(mid_x, y, 1, CH / 2 + 1, c);
+            }
+            '\u{2800}'..='\u{28ff}' => {
+                let bits = ch as u32 - 0x2800;
+                // dots 1,2,3,7 left column, 4,5,6,8 right
+                let at = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2), (0, 3), (1, 3)];
+                for (i, (cx, cy)) in at.iter().enumerate() {
+                    if bits & (1 << i) != 0 {
+                        self.rect(x + 2 + cx * (CW / 2), y + 2 + cy * (CH / 4), 2, 2, c);
+                    }
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn glyph(&mut self, ch: char, bold: bool, x: usize, y: usize, c: (u8, u8, u8)) {
+        if ch == ' ' || self.geometric(ch, x, y, c) {
+            return;
+        }
+        let key = (ch, bold);
+        if !self.cache.contains_key(&key) {
+            let primary = if bold { self.bold.as_ref().unwrap_or(&self.regular) } else { &self.regular };
+            let font = std::iter::once(primary)
+                .chain(self.fallback.iter())
+                .find(|f| f.lookup_glyph_index(ch) != 0)
+                .unwrap_or(primary);
+            let r = font.rasterize(ch, CH as f32 * 0.8);
+            self.cache.insert(key, r);
+        }
+        let (m, bitmap) = self.cache[&key].clone();
+        let baseline = y as i32 + (CH as f32 * 0.78) as i32;
+        let gx = x as i32 + m.xmin;
+        let gy = baseline - m.height as i32 - m.ymin;
+        for row in 0..m.height {
+            for col in 0..m.width {
+                let a = bitmap[row * m.width + col] as f32 / 255.0;
+                if a > 0.0 {
+                    let (px, py) = (gx + col as i32, gy + row as i32);
+                    if px >= 0 && py >= 0 {
+                        self.blend(px as usize, py as usize, c, a);
+                    }
+                }
+            }
+        }
+    }
+
+    fn paint(&mut self, buf: &Buffer) {
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                let (px, py) = (x as usize * CW, y as usize * CH);
+                let bg = rgb(cell.bg, (0, 0, 0));
+                let fgc = rgb(cell.fg, (220, 220, 220));
+                self.rect(px, py, CW, CH, bg);
+                let bold = cell.modifier.contains(Modifier::BOLD);
+                if let Some(ch) = cell.symbol().chars().next() {
+                    self.glyph(ch, bold, px, py, fgc);
+                }
+                if cell.modifier.contains(Modifier::UNDERLINED) {
+                    self.rect(px, py + CH - 3, CW, 1, fgc);
+                }
+            }
+        }
+    }
+
+    fn save(&self, path: &PathBuf) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), self.w as u32, self.h as u32);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut w = enc.write_header().unwrap();
+        let data: Vec<u8> = self.px.iter().flat_map(|p| [p.0, p.1, p.2]).collect();
+        w.write_image_data(&data).unwrap();
+    }
+}
+
+fn load_font(bold: bool) -> Option<fontdue::Font> {
+    let mut paths: Vec<String> = Vec::new();
+    if let Ok(p) = std::env::var("TERMPAPER_FONT") {
+        paths.push(p);
+    }
+    let style = if bold { "Bold" } else { "Regular" };
+    for dir in ["/usr/share/fonts/TTF", "/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/liberation"] {
+        paths.push(format!("{dir}/JetBrainsMonoNerdFont-{style}.ttf"));
+        paths.push(format!("{dir}/JetBrainsMono-{style}.ttf"));
+        paths.push(format!("{dir}/DejaVuSansMono{}.ttf", if bold { "-Bold" } else { "" }));
+        paths.push(format!("{dir}/LiberationMono-{style}.ttf"));
+    }
+    paths.iter().find_map(|p| {
+        let bytes = std::fs::read(p).ok()?;
+        fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).ok()
+    })
+}
+
+/// A plausible host snapshot for the menu.
+fn ctx() -> MenuCtx {
+    let mut look = termpaper::look::Look::default();
+    look.grade.exposure = 0.3;
+    look.grade.temperature = -0.25;
+    look.grade.vibrance = 0.35;
+    look.effects.stack = vec!["bloom".into(), "vignette".into()];
+    look.effects.set_amount("vignette", 0.6);
+    MenuCtx {
+        renderer_status: "GPU shader · AMD Radeon RX 6700 XT · Vulkan".into(),
+        wall_status: "wall: local".into(),
+        scene_name: "koi",
+        pixels: Pixels::Half,
+        detail: Detail::Medium,
+        theme: Some("teal".into()),
+        speed: 1.0,
+        fps: 120,
+        smooth: 0.3,
+        dim: 0.9,
+        fade: 0.25,
+        clock: true,
+        look,
+        link_enabled: true,
+        link_group: "default".into(),
+        wall_enabled: true,
+        truecolor: true,
+        gpu: Some(true),
+        favorites: vec!["tokyo".into(), "bigsur".into(), "koi".into()],
+        recents: vec!["koi".into(), "fire".into()],
+        key_display: termpaper::config::ACTIONS
+            .iter()
+            .map(|a| (a.to_string(), termpaper::config::default_key(a).to_string()))
+            .collect(),
+        instances: vec!["pid 4242     koi          up 312s (you)".into()],
+        themes: std::sync::Arc::new(menu::themes::rows(&termpaper::theme::Store::load_from(None))),
+        active_theme: Some("teal-and-orange".into()),
+        theme_modified: true,
+        ..Default::default()
+    }
+}
+
+/// A Classic scene after a few seconds, on a canvas of `cols`×`rows` cells.
+fn frame(name: &str, cols: u16, rows: u16) -> Canvas {
+    let opts = SceneOptions { theme: None, detail: Detail::Medium, text_scale: None, pixels: Pixels::Half };
+    let mut s = scene::create(name, &opts, StdRng::seed_from_u64(3)).unwrap();
+    let mut canvas = Canvas::new(cols as usize, rows as usize * 2);
+    for _ in 0..240 {
+        s.update(1.0 / 60.0, &mut canvas);
+    }
+    canvas
+}
+
+/// Each transition style leaving (level 0.75, 0.5, 0.25) and arriving
+/// (0.25, 0.5, 0.75), a row per style.
+fn transition_sheet(scene: &str) -> Buffer {
+    use ratatui::layout::Rect;
+    use termpaper::prefs::TransitionStyle;
+    const TW: u16 = 40;
+    const TH: u16 = 11;
+    let base = frame(scene, TW, TH - 1);
+    let steps: [(f32, bool); 6] = [(0.75, false), (0.5, false), (0.25, false), (0.25, true), (0.5, true), (0.75, true)];
+    let styles = TransitionStyle::ALL;
+    let mut buf = Buffer::empty(Rect::new(0, 0, TW * steps.len() as u16, TH * styles.len() as u16));
+    for (row, style) in styles.iter().enumerate() {
+        for (col, (level, arriving)) in steps.iter().enumerate() {
+            let (x, y) = (col as u16 * TW, row as u16 * TH);
+            let mut cv = base.clone();
+            let (w, h) = (cv.width() as u32, cv.height() as u32);
+            let mask = termpaper::transition::Mask::new(*style, *level, *arriving, w, h);
+            let dim = if mask.is_some() { 1.0 } else { *level };
+            termpaper::canvas::dim_masked(&mut cv, dim, mask.as_ref());
+            render::draw(&cv, Rect::new(x, y, TW, TH - 1), &mut buf, true, Pixels::Half);
+            let label = format!(" {} {} {:.0}%", style.label(), if *arriving { "in" } else { "out" }, level * 100.0);
+            buf.set_string(x, y + TH - 1, label, ratatui::style::Style::new().fg(Color::Rgb(220, 220, 220)));
+        }
+    }
+    buf
+}
+
+/// Every built-in theme over one frame of `scene`, six to a row, named.
+fn theme_sheet(scene: &str) -> Buffer {
+    use ratatui::layout::Rect;
+    const TW: u16 = 40;
+    const TH: u16 = 11;
+    const PER_ROW: u16 = 6;
+    let store = termpaper::theme::Store::load_from(None);
+    let base = frame(scene, TW, TH - 1);
+    let n = store.entries.len() as u16;
+    let area = Rect::new(0, 0, TW * PER_ROW, TH * n.div_ceil(PER_ROW));
+    let mut buf = Buffer::empty(area);
+    for (i, e) in store.entries.iter().enumerate() {
+        let (x, y) = ((i as u16 % PER_ROW) * TW, (i as u16 / PER_ROW) * TH);
+        let mut cv = base.clone();
+        termpaper::engine::finish_look(&mut cv, &termpaper::look::Baked::new(e.theme.look.clone()), 4.0);
+        render::draw(&cv, Rect::new(x, y, TW, TH - 1), &mut buf, true, Pixels::Half);
+        let label: String = format!(" {}", e.theme.name).chars().take(TW as usize - 1).collect();
+        buf.set_string(x, y + TH - 1, label, ratatui::style::Style::new().fg(Color::Rgb(220, 220, 220)));
+    }
+    buf
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let (cols, rows) = args
+        .get(1)
+        .and_then(|s| s.split_once('x'))
+        .and_then(|(a, b)| Some((a.parse::<u16>().ok()?, b.parse::<u16>().ok()?)))
+        .unwrap_or((120, 36));
+    let out = PathBuf::from(args.get(2).map(String::as_str).unwrap_or("target/ui_snapshot"));
+    std::fs::create_dir_all(&out).unwrap();
+    let regular = load_font(false).expect("no monospace font found; set TERMPAPER_FONT");
+    let bold = load_font(true);
+    let fallback: Vec<fontdue::Font> = [
+        "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSansSymbols-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    ]
+    .iter()
+    .filter_map(|p| fontdue::Font::from_bytes(std::fs::read(p).ok()?, fontdue::FontSettings::default()).ok())
+    .collect();
+
+    // the scene behind the menu, as the frame loop would draw it
+    let opts = SceneOptions { theme: Some("teal".into()), detail: Detail::Medium, text_scale: None, pixels: Pixels::Half };
+    let mut s = scene::create("koi", &opts, StdRng::seed_from_u64(3)).unwrap();
+    let mut canvas = Canvas::new(cols as usize, rows as usize * 2);
+    for _ in 0..240 {
+        s.update(1.0 / 60.0, &mut canvas);
+    }
+
+    let c = ctx();
+    let mut states: Vec<(String, Menu)> = Vec::new();
+    let mut looks: HashMap<String, termpaper::look::Look> = HashMap::new();
+    let later = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    for page in Page::ALL {
+        let mut m = Menu::new();
+        m.open(&c);
+        m.goto(page);
+        if page == Page::Look {
+            // focus a slider so its bar shows as active
+            for _ in 0..3 {
+                m.handle(Input::Down, &c);
+            }
+        }
+        if page == Page::Display {
+            // down among the overlays, so the page has scrolled
+            for _ in 0..16 {
+                m.handle(Input::Down, &c);
+            }
+        }
+        if page == Page::Themes {
+            // resting on another theme: its preview behind the drawer
+            for _ in 0..3 {
+                m.handle(Input::Down, &c);
+            }
+            for fx in m.tick_with(later, &c) {
+                if let menu::Effect::PreviewLook(l) = fx {
+                    looks.insert("page_themes".into(), l);
+                }
+            }
+        }
+        states.push((format!("page_{}", page.title().to_lowercase()), m));
+    }
+    let mut m = Menu::new();
+    m.open(&c);
+    m.goto(Page::Themes);
+    m.handle(Input::Char('/'), &c);
+    for ch in "night".chars() {
+        m.handle(Input::Char(ch), &c);
+    }
+    states.push(("theme_search".into(), m));
+    let mut m = Menu::new();
+    m.open(&c);
+    m.goto(Page::Themes);
+    m.handle(Input::Char('n'), &c);
+    for ch in "Late koi".chars() {
+        m.handle(Input::Char(ch), &c);
+    }
+    states.push(("theme_prompt".into(), m));
+    let mut m = Menu::new();
+    m.open(&c);
+    m.goto(Page::Look);
+    let fx = menu::settings::LOOK.iter().position(|s| s.id == menu::settings::SettingId::Filters).unwrap();
+    for _ in 0..fx {
+        m.handle(Input::Down, &c);
+    }
+    m.handle(Input::Enter, &c);
+    for _ in 0..13 {
+        m.handle(Input::Down, &c);
+    }
+    states.push(("effects".into(), m));
+    let mut m = Menu::new();
+    m.open(&c);
+    m.handle(Input::Char('/'), &c);
+    for ch in "rain".chars() {
+        m.handle(Input::Char(ch), &c);
+    }
+    states.push(("search".into(), m));
+    let mut m = Menu::new();
+    m.open(&c);
+    m.handle(Input::Char('?'), &c);
+    states.push(("help".into(), m));
+
+    // the colour studio, one state per tab, with a palette in play
+    let mut studio_look = c.look.clone();
+    studio_look.grade.hue = 20.0;
+    studio_look.grade.shadows = termpaper::look::Tone { hue: 215.0, amount: 0.6 };
+    studio_look.grade.highlights = termpaper::look::Tone { hue: 40.0, amount: 0.4 };
+    studio_look.palette.colors = termpaper::look::PALETTES[0].1.to_vec();
+    studio_look.palette.mode = termpaper::look::PaletteMode::Tint;
+    studio_look.palette.strength = 0.6;
+    let studios: Vec<(String, termpaper::studio::Studio)> = termpaper::studio::Tab::ALL
+        .iter()
+        .map(|t| {
+            let mut s = termpaper::studio::Studio::new();
+            s.open_on(*t);
+            s.swatch = 2;
+            (format!("studio_{}", t.title().to_lowercase()), s)
+        })
+        .collect();
+    for (name, s) in &studios {
+        let mut term = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+        term.draw(|f| {
+            render::draw(&canvas, f.area(), f.buffer_mut(), true, Pixels::Half);
+            termpaper::studio::render(f, f.area(), s, &studio_look, true, 2.0);
+        })
+        .unwrap();
+        let mut p = Painter {
+            w: cols as usize * CW,
+            h: rows as usize * CH,
+            px: vec![(0, 0, 0); cols as usize * CW * rows as usize * CH],
+            regular: regular.clone(),
+            bold: bold.clone(),
+            fallback: fallback.clone(),
+            cache: HashMap::new(),
+        };
+        p.paint(term.backend().buffer());
+        let path = out.join(format!("{name}.png"));
+        p.save(&path);
+        println!("{}", path.display());
+    }
+
+    for (name, m) in &states {
+        // the scene as the host shows it: through the look in use, or the
+        // one being previewed
+        let mut shown = canvas.clone();
+        let look = looks.get(name).unwrap_or(&c.look);
+        termpaper::engine::finish_look(&mut shown, &termpaper::look::Baked::new(look.clone()), 4.0);
+        let mut term = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+        term.draw(|f| {
+            render::draw(&shown, f.area(), f.buffer_mut(), true, Pixels::Half);
+            menu::view::render(f, f.area(), m, &c);
+        })
+        .unwrap();
+        let mut p = Painter {
+            w: cols as usize * CW,
+            h: rows as usize * CH,
+            px: vec![(0, 0, 0); cols as usize * CW * rows as usize * CH],
+            regular: regular.clone(),
+            bold: bold.clone(),
+            fallback: fallback.clone(),
+            cache: HashMap::new(),
+        };
+        p.paint(term.backend().buffer());
+        let path = out.join(format!("{name}.png"));
+        p.save(&path);
+        println!("{}", path.display());
+    }
+
+    let sheets = [("koi", theme_sheet("koi")), ("city", theme_sheet("city")), ("clouds", theme_sheet("clouds")), ("transitions", transition_sheet("clouds"))];
+    for (scene, buf) in sheets {
+        let (w, h) = (buf.area.width as usize, buf.area.height as usize);
+        let mut p = Painter {
+            w: w * CW,
+            h: h * CH,
+            px: vec![(0, 0, 0); w * CW * h * CH],
+            regular: regular.clone(),
+            bold: bold.clone(),
+            fallback: fallback.clone(),
+            cache: HashMap::new(),
+        };
+        p.paint(&buf);
+        let path = out.join(if scene == "transitions" { "transitions.png".to_string() } else { format!("themes_{scene}.png") });
+        p.save(&path);
+        println!("{}", path.display());
+    }
+}

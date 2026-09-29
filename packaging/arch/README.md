@@ -7,7 +7,7 @@ cd packaging/arch
 makepkg -si
 ```
 
-Requires the `v0.1.0` tag on the remote configured in `PKGBUILD`.
+Requires the `v0.2.0` tag on the remote configured in `PKGBUILD`.
 
 ## Local dev build (no tag)
 

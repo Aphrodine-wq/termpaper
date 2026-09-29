@@ -1,129 +1,826 @@
 //! termpaper — Wallpaper Engine for the terminal. Live truecolor worlds.
 
-use termpaper::{canvas, color_grade, color_wheel, config, filter, link, menu, render, scene, transition, wall};
+use termpaper::{config, filter, link, menu, render, scene, studio, transition, wall};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use config::CycleScope;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use menu::{Effect, Menu, MenuCtx};
-use rand::{rngs::StdRng, RngExt, SeedableRng};
+use rand::RngExt;
 use render::Pixels;
 use scene::{Detail, SceneOptions};
 use ratatui::{layout::Rect, style::Style, text::Text, widgets::Paragraph};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(
     name = "termpaper",
     version,
-    about = "Wallpaper Engine for the terminal — 120fps, 22 filters, sync clusters, seamless walls"
+    about = "Wallpaper Engine for the terminal — 120fps, 27 effects, 34 themes, sync clusters, seamless walls",
+    after_help = "Press ? in a running scene for the menu; `termpaper list` shows the catalog."
 )]
 struct Args {
-    /// Scene to run (see --list)
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Scene to run (see `termpaper list`)
+    #[arg(help_heading = "Scene", display_order = 0)]
     scene: Option<String>,
 
-    /// List available scenes and exit
-    #[arg(long)]
-    list: bool,
-
-    /// Rotate through all scenes every N seconds
-    #[arg(long)]
-    cycle: Option<f64>,
-
-    /// Target frames per second
-    #[arg(long)]
-    fps: Option<u32>,
-
-    /// Throttle to this fps while the terminal is unfocused (needs a
-    /// terminal that reports focus; off unless set)
-    #[arg(long)]
-    idle_fps: Option<u32>,
-
-    /// Animation speed multiplier
-    #[arg(long)]
-    speed: Option<f32>,
-
-    /// Scene color theme (see --list; e.g. nexus: cyan/amber/violet/mono)
-    #[arg(long)]
+    /// A theme (see `termpaper theme list`), or one of this scene's
+    /// variants, as before (e.g. nexus: cyan/amber/violet/mono)
+    #[arg(long, help_heading = "Scene")]
     theme: Option<String>,
 
-    /// Post-processing filter (repeatable): scanlines, vignette, grain,
-    /// warm, cool, hue, crt
-    #[arg(long)]
+    /// The scene's variant: its time of day, weather or colours (e.g.
+    /// hongkong: night)
+    #[arg(long, help_heading = "Scene")]
+    variant: Option<String>,
+
+    /// Move on to another scene every N seconds
+    #[arg(long, value_name = "SECS", help_heading = "Scene")]
+    cycle: Option<f64>,
+
+    /// Animation speed multiplier
+    #[arg(long, help_heading = "Scene")]
+    speed: Option<f32>,
+
+    /// Screensaver mode: any key exits
+    #[arg(long, help_heading = "Scene")]
+    screensaver: bool,
+
+    /// An effect, repeatable (e.g. --filter crt --filter bloom); `--theme`
+    /// sets a whole look
+    #[arg(long, help_heading = "Look")]
     filter: Vec<String>,
 
-    /// Detail level: low, medium or high (particle/layer counts)
-    #[arg(long)]
-    detail: Option<String>,
-
-    /// Pixel mode: half, quad or braille
-    #[arg(long)]
+    /// Pixel mode: half, quad, sextant, braille, ascii or blocks
+    #[arg(long, help_heading = "Look")]
     pixels: Option<String>,
 
     /// Bump text scale: 1, 2 or 3
-    #[arg(long)]
+    #[arg(long, help_heading = "Look")]
     text_scale: Option<u32>,
 
     /// Force 256-color output even on truecolor terminals
-    #[arg(long)]
+    #[arg(long, help_heading = "Look")]
     no_truecolor: bool,
 
-    /// Run the post-processing chain (filters, grading, smoothing and the
-    /// pixels-to-cells packing) on the GPU. Requires a build with
-    /// `--features gpu` and a working Vulkan device; falls back to the CPU
-    /// silently if either is missing.
-    #[arg(long)]
+    /// Target frames per second
+    #[arg(long, help_heading = "Performance")]
+    fps: Option<u32>,
+
+    /// While the terminal is unfocused, drop to 30 fps (or 15 for values up
+    /// to 20); Display → When unfocused keeps it for good (needs a terminal
+    /// that reports focus)
+    #[arg(long, help_heading = "Performance")]
+    idle_fps: Option<u32>,
+
+    /// Quality: low, medium or high (particle/layer counts)
+    #[arg(long, help_heading = "Performance")]
+    detail: Option<String>,
+
+    /// Rendering backend: auto = the GPU when there is one (Studio scenes
+    /// and post-processing), else the CPU; gpu = the same, but says so when
+    /// the GPU is missing; cpu = everything on the CPU (Studio scenes show
+    /// their Classic fallback); shader = also draw Classic scenes from their
+    /// experimental WGSL worlds
+    #[arg(long, value_enum, help_heading = "Performance")]
+    renderer: Option<termpaper::engine::Renderer>,
+
+    /// Legacy alias for --renderer gpu
+    #[arg(long, hide = true)]
     gpu: bool,
 
-    /// Screensaver mode: any key exits
-    #[arg(long)]
-    screensaver: bool,
-
     /// Enable instance linking (default on)
-    #[arg(long, overrides_with = "no_link")]
+    #[arg(long, overrides_with = "no_link", help_heading = "Linking & wall")]
     link: bool,
 
     /// Disable instance linking
-    #[arg(long)]
+    #[arg(long, help_heading = "Linking & wall")]
     no_link: bool,
 
-    /// List live termpaper instances and exit
-    #[arg(long)]
-    instances: bool,
-
-    /// Publish a scene switch to all running instances and exit
-    #[arg(long)]
-    switch: Option<String>,
-
     /// Link group for this instance (instances in the same group sync)
-    #[arg(long)]
+    #[arg(long, help_heading = "Linking & wall")]
     group: Option<String>,
 
-    /// With --switch, publish to every link group
-    #[arg(long)]
-    all_groups: bool,
-
-    /// Disable video-wall mode
-    #[arg(long)]
+    /// Never join a video wall: render the local canvas and hide this
+    /// window's geometry from peers (linking still syncs scenes)
+    #[arg(long, help_heading = "Linking & wall")]
     no_wall: bool,
 
     /// Manual video-wall tiling: COLSxROWS:INDEX (e.g. 2x1:0)
-    #[arg(long)]
+    #[arg(long, help_heading = "Linking & wall")]
     wall: Option<String>,
 
-    /// Terminal padding in px (all sides) so wall crops line up across
-    /// window borders despite the margin
-    #[arg(long)]
-    pad: Option<i32>,
+    /// Terminal padding so wall crops line up across window borders despite
+    /// the margin: px (`7`), points (`3.5pt`, e.g. kitty's
+    /// window_padding_width), or `x,y`
+    #[arg(long, help_heading = "Linking & wall")]
+    pad: Option<String>,
+
+    // Pre-subcommand spellings, kept working but out of --help.
+    /// Old spelling of `termpaper list`
+    #[arg(long, hide = true)]
+    list: bool,
+
+    /// Old spelling of `termpaper instances`
+    #[arg(long, hide = true)]
+    instances: bool,
+
+    /// Old spelling of `termpaper switch SCENE`
+    #[arg(long, hide = true, value_name = "SCENE")]
+    switch: Option<String>,
+
+    /// Old spelling of `termpaper switch SCENE --all`
+    #[arg(long, hide = true)]
+    all_groups: bool,
 }
 
-fn detect_truecolor() -> bool {
-    std::env::var("COLORTERM")
-        .map(|v| v.contains("truecolor") || v.contains("24bit"))
-        .unwrap_or(false)
+#[derive(Subcommand)]
+enum Command {
+    /// List scenes by category and exit
+    List {
+        /// Only this category: coast, wilds, weather, city, cozy, space or classic
+        #[arg(long)]
+        category: Option<String>,
+        /// Every scene as JSON: name, title, category, description,
+        /// variants, tags, Studio or Classic, fallback
+        #[arg(long)]
+        json: bool,
+    },
+    /// List live termpaper instances in every group and exit
+    Instances,
+    /// Switch running instances to a scene and exit
+    Switch {
+        /// Scene to switch to
+        scene: String,
+        /// Link group to switch (default: "default")
+        #[arg(long)]
+        group: Option<String>,
+        /// Switch every link group
+        #[arg(long, conflicts_with = "group")]
+        all: bool,
+    },
+    /// Show the physical desk (monitors in millimetres) and the wall plan
+    Desk,
+    /// Line the monitors up: every wall pane shows a millimetre test
+    /// pattern while this terminal nudges monitor offsets, bezels and scale
+    Calibrate,
+    /// Start or stop one wall terminal per monitor
+    Wall {
+        #[command(subcommand)]
+        action: WallCmd,
+    },
+    /// Themes: list, apply, make and share them, and install them from the
+    /// gallery
+    Theme {
+        #[command(subcommand)]
+        action: ThemeCmd,
+    },
 }
 
-fn entropy_rng() -> StdRng {
-    StdRng::from_rng(&mut rand::rng())
+#[derive(Subcommand)]
+enum ThemeCmd {
+    /// Every theme, built in and yours
+    List {
+        /// One JSON object per theme, with its share code
+        #[arg(long)]
+        json: bool,
+    },
+    /// What a theme does, where its file is, and its share code
+    Show { name: String },
+    /// Use a theme: saved as your look, and running panes in the group
+    /// switch to it
+    Apply {
+        name: String,
+        /// Link group of the running panes (default: yours, else "default")
+        #[arg(long)]
+        group: Option<String>,
+    },
+    /// Save the look you have (or --from another theme) as a theme of
+    /// yours, to use, share or edit by hand
+    New {
+        name: String,
+        /// Start from this theme instead of your look
+        #[arg(long)]
+        from: Option<String>,
+    },
+    /// Print a theme's file, or with --code its share code
+    Export {
+        name: String,
+        #[arg(long)]
+        code: bool,
+    },
+    /// Add a theme from a share code, a .toml file, or - (stdin)
+    Import {
+        source: String,
+        /// Save it under this name instead
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Check a theme file (or share code) before sharing it
+    Check { file: String },
+    /// Delete one of your themes
+    Delete { name: String },
+    /// Add a theme from the gallery: its id, a link to its page, or a share
+    /// code
+    Install { what: String },
+    /// Themes people shared in the gallery (every word must match)
+    Browse {
+        query: Vec<String>,
+        /// Only themes with this tag
+        #[arg(long)]
+        tag: Option<String>,
+        /// Most installed first (default: newest first)
+        #[arg(long)]
+        popular: bool,
+    },
+    /// Share one of your themes in the gallery, for anyone to install
+    Publish {
+        name: String,
+        /// Publish without asking first
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Take a theme you published from here out of the gallery
+    Unpublish { id: String },
+}
+
+#[derive(Subcommand)]
+enum WallCmd {
+    /// Open a kitty on every monitor (fonts matched to pixel pitch, zero
+    /// padding) running termpaper in one group; skips monitors that have one
+    Up {
+        /// Print the commands instead of running them
+        #[arg(long)]
+        dry_run: bool,
+        /// Font size in points on the reference (first landscape) monitor
+        #[arg(long, default_value_t = 11.0)]
+        font: f32,
+        /// Only these outputs (repeatable), e.g. --monitor DP-1
+        #[arg(long)]
+        monitor: Vec<String>,
+        /// Extra arguments for each termpaper (after --)
+        #[arg(last = true)]
+        extra: Vec<String>,
+    },
+    /// Close every wall terminal
+    Down,
+}
+
+/// `termpaper desk`: the desk, and the group's current plan if any.
+fn print_desk(group: &str) {
+    let Some(mons) = termpaper::hypr::monitors() else {
+        eprintln!("termpaper: not running under Hyprland");
+        std::process::exit(1);
+    };
+    let cfg = termpaper::desk::load_desk();
+    let desk = termpaper::desk::Desk::from_hypr(&mons, &cfg);
+    print!("{}", termpaper::desk::describe(&desk));
+    println!(
+        "align {} · bezel {} mm · frame {} · portrait {} · config {}",
+        cfg.align.name(),
+        cfg.bezel_mm,
+        cfg.frame,
+        cfg.portrait,
+        termpaper::desk::desk_path().map(|p| p.display().to_string()).unwrap_or_default()
+    );
+    let plan = link::group_dir(group).and_then(|d| termpaper::wallplan::WallPlan::load(&d));
+    match plan {
+        Some(p) => {
+            println!(
+                "\nwall plan (group {group}, rev {}, leader {}): frame {:.0}x{:.0} mm, classic canvas {}x{} cells",
+                p.rev, p.leader, p.frame.w, p.frame.h, p.classic_cells.0, p.classic_cells.1
+            );
+            for pp in &p.panes {
+                println!(
+                    "  pid {:<8} {:<10} content x {:>7.1} y {:>6.1} w {:>6.1} h {:>6.1} mm{}",
+                    pp.pid,
+                    pp.monitor,
+                    pp.content.x,
+                    pp.content.y,
+                    pp.content.w,
+                    pp.content.h,
+                    if pp.portrait { "  (portrait)" } else { "" }
+                );
+            }
+        }
+        None => println!("\nno wall plan in group {group} (start panes with `termpaper wall up`)"),
+    }
+}
+
+/// The group's panes as the wall planner sees them.
+fn panes_of(group: &str) -> Vec<termpaper::wallplan::PaneGeom> {
+    link::list_instances_in_group(group)
+        .into_iter()
+        .filter(|i| i.geo.is_some())
+        .map(|i| termpaper::wallplan::PaneGeom {
+            pid: i.pid,
+            ancestors: termpaper::hypr::ancestors(i.pid),
+            cols: i.cols.min(u16::MAX as usize) as u16,
+            rows: i.rows.min(u16::MAX as usize) as u16,
+            cell: i.cell.map(|(w, h)| (w as f64, h as f64)),
+            pad: (i.pad.0 as f64, i.pad.1 as f64),
+            centered: i.placement == wall::Placement::Center,
+        })
+        .collect()
+}
+
+fn print_instances() {
+    let list = link::list_all_instances();
+    if list.is_empty() {
+        println!("no live termpaper instances");
+    }
+    for i in &list {
+        println!(
+            "pid {:<8} group {:<10} scene {:<12} up {}s",
+            i.pid,
+            i.group,
+            i.scene,
+            link::uptime_secs(i.started_at)
+        );
+    }
+}
+
+fn switch_remote(scene: &str, group: Option<&str>, all: bool, args: &Args) -> std::io::Result<()> {
+    if !scene::exists(scene) {
+        eprintln!("termpaper: unknown scene '{scene}'. See `termpaper list`.");
+        std::process::exit(2);
+    }
+    let seed: u64 = rand::rng().random();
+    // a short fade-out lead, so running panes swap together
+    let t0 = link::epoch_now_ms() + (config::DEFAULT_FADE * 1000.0) as u64 + SWITCH_MARGIN_MS;
+    // sim settings for a group that has no anchor yet: this config's
+    let cfg = config::load();
+    let defaults = link::Anchor {
+        stamp: link::Stamp::default(),
+        scene: scene.to_string(),
+        theme: None,
+        seed,
+        t0_ms: t0,
+        paused_at_ms: None,
+        speed: args.speed.or(cfg.speed).unwrap_or(config::DEFAULT_SPEED),
+        detail: args.detail.as_deref().or(cfg.detail.as_deref()).and_then(Detail::parse)
+            .unwrap_or_else(platform_default_detail).name().to_string(),
+        pixels: args.pixels.as_deref().or(cfg.pixels.as_deref()).and_then(Pixels::parse)
+            .unwrap_or_else(platform_default_pixels).name().to_string(),
+        text_scale: args.text_scale.or(cfg.text_scale),
+        proto: link::PROTO,
+    };
+    if all {
+        link::publish_remote_all_groups(scene, seed, t0, &defaults)?;
+        println!("published switch to '{scene}' (all groups)");
+    } else {
+        let group = group
+            .map(link::sanitize_group)
+            .unwrap_or_else(|| "default".into());
+        link::publish_remote(scene, seed, t0, &group, &defaults)?;
+        println!("published switch to '{scene}' (group {group})");
+    }
+    Ok(())
+}
+
+/// The scene a start without one named opens on: the last one, a random
+/// favourite, or any scene (Playback → On launch).
+fn launch_scene(cfg: &config::Config) -> Option<String> {
+    use termpaper::prefs::OnLaunch;
+    let pick = |list: Vec<String>| (!list.is_empty()).then(|| list[rand::rng().random_range(0..list.len())].clone());
+    match cfg.playback.on_launch {
+        OnLaunch::Last => cfg.scene.clone(),
+        OnLaunch::Favorite => pick(cfg.favorites.iter().filter(|f| scene::exists(f)).cloned().collect()).or_else(|| cfg.scene.clone()),
+        OnLaunch::Random => pick(scene::all_names().iter().map(|s| s.to_string()).collect()),
+    }
+}
+
+/// The Wall page's view of the settings.
+fn wall_prefs(settings: &Settings) -> termpaper::prefs::WallPrefs {
+    use termpaper::prefs::{WallMode, WallPrefs};
+    let grid = settings.wall_spec.as_deref().and_then(WallPrefs::parse_grid);
+    WallPrefs {
+        mode: match (settings.wall_enabled, grid) {
+            (_, Some(_)) => WallMode::Grid,
+            (true, None) => WallMode::Auto,
+            (false, None) => WallMode::Off,
+        },
+        grid: grid.unwrap_or((2, 1, 0)),
+        pad: settings.pad.0,
+        placement: settings.placement,
+        bezel_mm: settings.bezel_mm,
+        sync_look: settings.sync_look,
+    }
+}
+
+/// What the terminal check needs from the host.
+fn check_ctx(settings: &Settings) -> termpaper::check::CheckCtx {
+    termpaper::check::CheckCtx {
+        terminal: settings.terminal_name,
+        term_truecolor: settings.term_truecolor && !settings.cli_no_truecolor,
+        display: settings.display.clone(),
+        pixels: settings.pixels,
+    }
+}
+
+/// The welcome's key list, as this keymap has them.
+fn welcome_keys(settings: &Settings) -> Vec<(String, &'static str)> {
+    let k = |a: &str| {
+        let key = settings.cfg.keys.get(a).cloned().unwrap_or_else(|| config::default_key(a).to_string());
+        match key.as_str() {
+            "left" => "←".to_string(),
+            "right" => "→".to_string(),
+            _ => key,
+        }
+    };
+    let mut v = vec![
+        (k("menu"), "the menu: scenes, themes, settings"),
+        (format!("{} {}", k("prev"), k("next")), "previous and next scene"),
+        (k("color"), "the colour studio"),
+        (k("pause"), "pause"),
+        (k("quit"), "quit"),
+    ];
+    if settings.display.mouse {
+        v.push(("click".to_string(), "the menu, with the mouse"));
+    }
+    v
+}
+
+/// The performance readout's running numbers, turned into lines once a
+/// second.
+#[derive(Default)]
+struct Hud {
+    frames: u32,
+    bytes: u64,
+    busy: Duration,
+    since: Option<Instant>,
+    lines: Vec<String>,
+}
+
+impl Hud {
+    fn frame(&mut self, now: Instant, bytes: u64, busy: Duration, render: Option<(&str, f32)>, cap: Option<u32>) {
+        self.frames += 1;
+        self.bytes += bytes;
+        self.busy += busy;
+        let since = *self.since.get_or_insert(now);
+        let secs = now.duration_since(since).as_secs_f32();
+        if secs < 1.0 {
+            return;
+        }
+        let mut first = format!(
+            "{:.0} fps · {} out · terminal {:.0}%",
+            self.frames as f32 / secs,
+            termpaper::overlay::rate(self.bytes as f64 / secs as f64),
+            self.busy.as_secs_f32() / secs * 100.0
+        );
+        if let Some(c) = cap {
+            first.push_str(&format!(" · adapted to {c}"));
+        }
+        let second = match render {
+            Some((backend, ms)) => format!("{backend} · {ms:.1} ms a frame"),
+            None => "starting…".into(),
+        };
+        self.lines = vec![first, second];
+        *self = Hud { lines: std::mem::take(&mut self.lines), since: Some(now), ..Default::default() };
+    }
+}
+
+/// `--theme` and `--variant`, as (the variant to run, the theme to wear).
+/// `--theme` is this scene's variant of that name when there is one (what
+/// it has always meant), else a theme, else a variant other scenes have
+/// (for `--cycle`); `--variant` only ever names a variant. Exits on names
+/// that are none of these.
+fn resolve_theme_args<'a>(
+    args: &Args,
+    scene_name: &str,
+    themes: &'a termpaper::theme::Store,
+) -> (Option<String>, Option<&'a termpaper::theme::Entry>) {
+    let variants = scene::themes(scene_name);
+    let anywhere = |v: &str| scene::entries().any(|e| e.themes().contains(&v));
+    let describe = || {
+        if variants.is_empty() {
+            format!("{scene_name} has no variants")
+        } else {
+            format!("{scene_name}'s variants: {}", variants.join(", "))
+        }
+    };
+    let exit = |msg: String| -> ! {
+        eprintln!("termpaper: {msg}");
+        std::process::exit(2);
+    };
+    if let Some(v) = &args.variant {
+        if !variants.contains(&v.as_str()) && !anywhere(v) {
+            exit(format!("no variant '{v}' ({})", describe()));
+        }
+    }
+    let Some(t) = &args.theme else {
+        return (args.variant.clone(), None);
+    };
+    if args.variant.is_none() && variants.contains(&t.as_str()) {
+        return (Some(t.clone()), None);
+    }
+    if let Some(e) = themes.find(t) {
+        return (args.variant.clone(), Some(e));
+    }
+    if args.variant.is_none() && anywhere(t) {
+        return (Some(t.clone()), None);
+    }
+    exit(format!("'{t}' is not a theme (see `termpaper theme list`) or a variant ({})", describe()))
+}
+
+/// `termpaper theme …`
+fn theme_command(action: ThemeCmd, args: &Args) -> std::io::Result<()> {
+    use std::io::{IsTerminal, Read, Write};
+    use termpaper::theme::{Source, Store};
+    use termpaper::theme_cli;
+    let fail = |msg: String| -> ! {
+        eprintln!("termpaper: {msg}");
+        std::process::exit(2);
+    };
+    let color = std::io::stdout().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none()
+        && termpaper::term_caps::detect().truecolor;
+    let user_dir = termpaper::theme::user_dir();
+    let mut store = Store::load();
+    let stdin = || {
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s).map(|_| s)
+    };
+    let out = match action {
+        ThemeCmd::List { json: true } => format!("{}\n", theme_cli::list_json(&store)),
+        ThemeCmd::List { json: false } => {
+            let width = std::io::stdout()
+                .is_terminal()
+                .then(|| crossterm::terminal::size().ok().map(|(w, _)| w as usize))
+                .flatten();
+            theme_cli::list(&store, color, user_dir.as_deref(), width)
+        }
+        ThemeCmd::Show { name } => theme_cli::show(&store, &name, color).unwrap_or_else(|e| fail(e)),
+        ThemeCmd::Export { name, code } => theme_cli::export(&store, &name, code).unwrap_or_else(|e| fail(e)),
+        ThemeCmd::Check { file } => {
+            let text = if file == "-" {
+                stdin()?
+            } else {
+                std::fs::read_to_string(&file).unwrap_or_else(|e| fail(format!("{file}: {e}")))
+            };
+            match theme_cli::check(&text) {
+                Ok(report) => report,
+                Err(e) => {
+                    eprintln!("{file}: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        ThemeCmd::Import { source, name } => {
+            let dir = user_dir.clone().unwrap_or_else(|| fail("no config directory for your themes".into()));
+            let (theme, warnings) = theme_cli::parse_source(&source, stdin).unwrap_or_else(|e| fail(e));
+            theme_cli::import(&mut store, &dir, theme, &warnings, name.as_deref()).unwrap_or_else(|e| fail(e))
+        }
+        ThemeCmd::New { name, from } => {
+            let dir = user_dir.clone().unwrap_or_else(|| fail("no config directory for your themes".into()));
+            let cfg = config::load();
+            let (look, scene, description) = match &from {
+                Some(f) => {
+                    let e = store.find(f).unwrap_or_else(|| fail(format!("no theme called '{f}' (see `termpaper theme list`)")));
+                    (e.theme.look.clone(), e.theme.scene.clone(), format!("Started from {}.", e.theme.name))
+                }
+                None => {
+                    // the look you have, made for the scene you run
+                    let scene = cfg.scene.clone().unwrap_or_else(|| config::DEFAULT_SCENE.to_string());
+                    let variant = cfg.themes.get(&scene).cloned();
+                    let title = scene::lookup(&scene).map_or(scene.clone(), |e| e.title().to_string());
+                    (config::look_of(&cfg), Some(termpaper::theme::SceneHint { name: scene, variant }), format!("Made in termpaper on {title}."))
+                }
+            };
+            let slug = theme_cli::new_theme(&mut store, &dir, &name, &theme_author(), &description, look, scene)
+                .unwrap_or_else(|e| fail(e));
+            let path = dir.join(format!("{slug}.toml"));
+            format!(
+                "Saved “{name}” as {slug}: {}\nUse it:    termpaper --theme {slug}\nShare it:  termpaper theme export {slug} --code\nAfter editing the file by hand: termpaper theme check {}\n",
+                theme_cli::tidy_path(&path),
+                path.display()
+            )
+        }
+        ThemeCmd::Delete { name } => {
+            let e = store.find(&name).unwrap_or_else(|| fail(format!("no theme called '{name}'")));
+            if e.source != Source::User {
+                fail(format!("{} is built in; only your own themes can be deleted", e.theme.name));
+            }
+            let (slug, title) = (e.slug.clone(), e.theme.name.clone());
+            store.delete(&slug).unwrap_or_else(|e| fail(e.to_string()));
+            let mut cfg = config::load();
+            if cfg.look_theme.as_deref() == Some(slug.as_str()) {
+                // the look stays; it just no longer has a theme's name
+                cfg.look_theme = None;
+                config::save(&cfg)?;
+            }
+            format!("Deleted “{title}”\n")
+        }
+        ThemeCmd::Install { what } => {
+            let dir = user_dir.clone().unwrap_or_else(|| fail("no config directory for your themes".into()));
+            match termpaper::gallery::target(&what).unwrap_or_else(|e| fail(e)) {
+                termpaper::gallery::Target::Code(code) => {
+                    let (theme, warnings) = termpaper::theme::Theme::from_code(&code).unwrap_or_else(|e| fail(e));
+                    theme_cli::import(&mut store, &dir, theme, &warnings, None).unwrap_or_else(|e| fail(e))
+                }
+                termpaper::gallery::Target::Id { base: link, id } => {
+                    // one of termpaper's own: nothing to fetch
+                    let own = |slug: &str| store.get(slug).filter(|e| e.source == Source::Builtin).map(|e| e.theme.name.clone());
+                    if let Some(name) = link.is_none().then(|| own(&id)).flatten() {
+                        format!("{name} comes with termpaper: termpaper --theme {id}\n")
+                    } else {
+                        gallery_install(&mut store, &dir, link, &id).unwrap_or_else(|e| fail(e))
+                    }
+                }
+            }
+        }
+        ThemeCmd::Browse { query, tag, popular } => {
+            let width = std::io::stdout()
+                .is_terminal()
+                .then(|| crossterm::terminal::size().ok().map(|(w, _)| w as usize))
+                .flatten();
+            gallery_browse(&query.join(" "), tag.as_deref(), popular, color, width).unwrap_or_else(|e| fail(e))
+        }
+        ThemeCmd::Publish { name, yes } => {
+            let e = store.find(&name).unwrap_or_else(|| fail(format!("no theme called '{name}' (see `termpaper theme list`)")));
+            if e.source == Source::Builtin {
+                fail(format!("{} comes with termpaper, so everyone has it already", e.theme.name));
+            }
+            let theme = e.theme.clone();
+            let base = termpaper::gallery::base_url(config::load().gallery_url.as_deref());
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    fail("publishing asks first: run it in a terminal, or add --yes".into());
+                }
+                print!(
+                    "Publish “{}” to {}? Anyone will be able to see and install it. [y/N] ",
+                    theme.name,
+                    termpaper::gallery::host(&base)
+                );
+                let _ = std::io::stdout().flush();
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                    fail("not published".into());
+                }
+            }
+            gallery_publish(&base, &theme).unwrap_or_else(|e| fail(e))
+        }
+        ThemeCmd::Unpublish { id } => {
+            let base = termpaper::gallery::base_url(config::load().gallery_url.as_deref());
+            gallery_unpublish(&base, &id).unwrap_or_else(|e| fail(e))
+        }
+        ThemeCmd::Apply { name, group } => {
+            let e = store.find(&name).unwrap_or_else(|| fail(format!("no theme called '{name}' (see `termpaper theme list`)")));
+            let mut cfg = config::load();
+            config::set_look(&mut cfg, &e.theme.look, Some(&e.slug));
+            if let Some(dim) = e.theme.display.as_ref().and_then(|d| d.dim) {
+                cfg.dim = (config::round2(dim) != config::DEFAULT_DIM).then(|| config::round2(dim));
+            }
+            config::save(&cfg)?;
+            let group = group
+                .or_else(|| args.group.clone())
+                .or(cfg.group.clone())
+                .map(|g| link::sanitize_group(&g))
+                .unwrap_or_else(|| "default".into());
+            let live = link::list_instances_in_group(&group).len();
+            if live > 0 {
+                link::publish_remote_look(&group, &e.theme.look, Some(&e.slug))?;
+                let panes = if live == 1 { "1 running pane".to_string() } else { format!("{live} running panes") };
+                format!("{}: on {panes} in group {group}, and saved as your look\n", e.theme.name)
+            } else {
+                format!("{}: saved as your look (no panes running in group {group}; it shows next start)\n", e.theme.name)
+            }
+        }
+    };
+    // one write: piping into `head` shouldn't panic on SIGPIPE
+    let _ = std::io::stdout().write_all(out.as_bytes());
+    Ok(())
+}
+
+/// `theme install ID`: fetch it, keep it among your themes (once: the same
+/// theme again is not copied twice) and count the install.
+#[cfg(feature = "net")]
+fn gallery_install(store: &mut termpaper::theme::Store, dir: &std::path::Path, link: Option<String>, id: &str) -> Result<String, String> {
+    use termpaper::gallery;
+    let base = link.unwrap_or_else(|| gallery::base_url(config::load().gallery_url.as_deref()));
+    let l = gallery::fetch(&base, id)?;
+    let (theme, warnings) = termpaper::theme::Theme::from_code(&l.code)?;
+    if l.builtin {
+        return Ok(format!("{} comes with termpaper: termpaper --theme {id}\n", theme.name));
+    }
+    let code = theme.to_code();
+    if let Some(e) = store.entries.iter().find(|e| e.source == termpaper::theme::Source::User && e.theme.to_code() == code) {
+        return Ok(format!("You have “{}” already, as {}: termpaper --theme {}\n", e.theme.name, e.slug, e.slug));
+    }
+    let by = if l.author.trim().is_empty() { String::new() } else { format!(" by {}", l.author.trim()) };
+    let out = termpaper::theme_cli::import(store, dir, theme, &warnings, None)?;
+    gallery::count_install(&base, id);
+    Ok(format!("From {}{by}.\n{out}", gallery::host(&base)))
+}
+
+#[cfg(feature = "net")]
+fn gallery_browse(query: &str, tag: Option<&str>, popular: bool, color: bool, width: Option<usize>) -> Result<String, String> {
+    use termpaper::gallery;
+    let base = gallery::base_url(config::load().gallery_url.as_deref());
+    let (list, next) = gallery::list(&base, query, tag, popular, 0)?;
+    Ok(termpaper::theme_cli::gallery_list(&list, color, width, gallery::host(&base), next.is_some()))
+}
+
+#[cfg(feature = "net")]
+fn gallery_publish(base: &str, theme: &termpaper::theme::Theme) -> Result<String, String> {
+    use termpaper::gallery;
+    let p = gallery::publish(base, theme)?;
+    let kept = match gallery::save_token(base, &p.id, &p.token) {
+        Ok(path) => format!("Its edit token is kept in {}: `termpaper theme unpublish {}` takes it down.", termpaper::theme_cli::tidy_path(&path), p.id),
+        Err(_) => format!("Keep its edit token to take it down later: {}", p.token),
+    };
+    let mut out = format!("Published “{}”: {}\nAnyone can install it:  termpaper theme install {}\n{kept}\n", theme.name, p.url, p.id);
+    for w in &p.warnings {
+        out.push_str(&format!("  note: {w}\n"));
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "net")]
+fn gallery_unpublish(base: &str, id: &str) -> Result<String, String> {
+    use termpaper::gallery;
+    let token = gallery::token(base, id).ok_or_else(|| {
+        format!("no edit token here for {id} at {}: a theme can be taken down from where it was published (on the website, from the browser that published it)", gallery::host(base))
+    })?;
+    gallery::unpublish(base, id, &token)?;
+    gallery::forget_token(base, id);
+    Ok(format!("Took {id} out of the gallery. Copies people installed keep working.\n"))
+}
+
+#[cfg(not(feature = "net"))]
+fn gallery_install(_: &mut termpaper::theme::Store, _: &std::path::Path, _: Option<String>, _: &str) -> Result<String, String> {
+    Err(termpaper::gallery::NO_NET.into())
+}
+
+#[cfg(not(feature = "net"))]
+fn gallery_browse(_: &str, _: Option<&str>, _: bool, _: bool, _: Option<usize>) -> Result<String, String> {
+    Err(termpaper::gallery::NO_NET.into())
+}
+
+#[cfg(not(feature = "net"))]
+fn gallery_publish(_: &str, _: &termpaper::theme::Theme) -> Result<String, String> {
+    Err(termpaper::gallery::NO_NET.into())
+}
+
+#[cfg(not(feature = "net"))]
+fn gallery_unpublish(_: &str, _: &str) -> Result<String, String> {
+    Err(termpaper::gallery::NO_NET.into())
+}
+
+/// `termpaper list --json`: the catalog the website and other tools read.
+fn print_list_json(category: Option<&str>) {
+    use std::io::Write;
+    let only = category.and_then(|s| scene::Category::parse(&s.to_lowercase()));
+    let items: Vec<serde_json::Value> = scene::entries()
+        .filter(|e| only.is_none_or(|c| e.category() == c))
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name(),
+                "title": e.title(),
+                "category": e.category().slug(),
+                "category_label": e.category().label(),
+                "description": e.desc(),
+                "variants": e.themes(),
+                "tags": e.tags(),
+                "studio": e.needs_gpu(),
+                "fallback": scene::shader::find(e.name()).map(|s| s.fallback),
+            })
+        })
+        .collect();
+    let out = serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "scenes": items });
+    let _ = writeln!(std::io::stdout(), "{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+}
+
+fn print_list(category: Option<&str>) {
+    let only = category.map(|s| {
+        scene::Category::parse(&s.to_lowercase()).unwrap_or_else(|| {
+            let slugs: Vec<_> = scene::Category::ALL.iter().map(|c| c.slug()).collect();
+            eprintln!("termpaper: unknown category '{s}'. Categories: {}", slugs.join(", "));
+            std::process::exit(2);
+        })
+    });
+    // one write: piping into `head` shouldn't panic on SIGPIPE
+    let mut out = String::new();
+    for cat in scene::Category::ALL {
+        if only.is_some_and(|c| c != cat) {
+            continue;
+        }
+        let group: Vec<_> = scene::entries().filter(|e| e.category() == cat).collect();
+        if group.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n{} ({})\n", cat.label(), group.len()));
+        for e in group {
+            out.push_str(&format!("  {:<14} {}\n", e.name(), e.desc()));
+        }
+    }
+    use std::io::Write;
+    let _ = std::io::stdout().write_all(out.as_bytes());
 }
 
 /// Fallback quality profile when neither CLI nor config sets one.
@@ -146,65 +843,90 @@ fn platform_default_pixels() -> Pixels {
 }
 
 fn main() -> std::io::Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     // termpaper is a color-art program: color output is the entire point.
     // crossterm honors NO_COLOR by stripping all colors, which would render
     // every scene as blank gray blocks — explicitly re-enable colors.
     crossterm::style::Colored::set_ansi_color_disabled(false);
 
-    if args.instances {
-        let list = link::list_all_instances();
-        if list.is_empty() {
-            println!("no live termpaper instances");
-        }
-        for i in &list {
-            println!(
-                "pid {:<8} group {:<10} scene {:<12} up {}s",
-                i.pid,
-                i.group,
-                i.scene,
-                link::uptime_secs(i.started_at)
-            );
-        }
-        return Ok(());
-    }
-
-    if let Some(scene) = &args.switch {
-        if scene::create(scene, &Default::default(), entropy_rng()).is_none() {
-            eprintln!("termpaper: unknown scene '{scene}'. See --list.");
-            std::process::exit(2);
-        }
-        let seed: u64 = rand::rng().random();
-        let t0 = link::epoch_now_ms();
-        if args.all_groups {
-            link::publish_remote_all_groups(scene, seed, t0)?;
-            println!("published switch to '{scene}' (all groups)");
+    // the old flags map onto the subcommands (same precedence as before)
+    let command = args.command.take().or_else(|| {
+        if args.instances {
+            Some(Command::Instances)
+        } else if let Some(scene) = args.switch.clone() {
+            Some(Command::Switch { scene, group: None, all: args.all_groups })
+        } else if args.list {
+            Some(Command::List { category: None, json: false })
         } else {
-            let group = args
-                .group
-                .as_deref()
-                .map(link::sanitize_group)
-                .unwrap_or_else(|| "default".into());
-            link::publish_remote(scene, seed, t0, &group)?;
-            println!("published switch to '{scene}' (group {group})");
+            None
         }
-        return Ok(());
-    }
-
-    if args.list {
-        // one write: piping into `head` shouldn't panic on SIGPIPE
-        let out: String = scene::catalog()
-            .iter()
-            .map(|(name, desc)| format!("{name:<12} {desc}\n"))
-            .collect();
-        use std::io::Write;
-        let _ = std::io::stdout().write_all(out.as_bytes());
-        return Ok(());
+    });
+    match command {
+        Some(Command::Instances) => {
+            print_instances();
+            return Ok(());
+        }
+        Some(Command::Switch { scene, group, all }) => {
+            // `termpaper --group G switch X` works as well as `switch X --group G`
+            let group = group.or_else(|| args.group.clone());
+            return switch_remote(&scene, group.as_deref(), all, &args);
+        }
+        Some(Command::List { category, json: false }) => {
+            print_list(category.as_deref());
+            return Ok(());
+        }
+        Some(Command::List { category, json: true }) => {
+            print_list_json(category.as_deref());
+            return Ok(());
+        }
+        Some(Command::Theme { action }) => {
+            return theme_command(action, &args);
+        }
+        Some(Command::Desk) => {
+            let cfg = config::load();
+            let group = args.group.clone().or(cfg.group.clone()).map(|g| link::sanitize_group(&g))
+                .unwrap_or_else(|| "default".into());
+            print_desk(&group);
+            return Ok(());
+        }
+        Some(Command::Calibrate) => {
+            let cfg = config::load();
+            let group = args.group.clone().or(cfg.group.clone()).map(|g| link::sanitize_group(&g))
+                .unwrap_or_else(|| "default".into());
+            return termpaper::calibrate::run_standalone(&group);
+        }
+        Some(Command::Wall { action: WallCmd::Down }) => {
+            let n = termpaper::launch::wall_down()?;
+            println!("closed {n} wall terminal(s)");
+            return Ok(());
+        }
+        Some(Command::Wall { action: WallCmd::Up { dry_run, font, monitor, extra } }) => {
+            let Some(mons) = termpaper::hypr::monitors() else {
+                eprintln!("termpaper: `wall up` needs Hyprland");
+                std::process::exit(1);
+            };
+            let desk = termpaper::desk::Desk::from_hypr(&mons, &termpaper::desk::load_desk());
+            let group = args.group.clone().map(|g| link::sanitize_group(&g)).unwrap_or_else(|| "wallpaper".into());
+            let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "termpaper".into());
+            let plans = termpaper::launch::plan_wall_up(&desk, &exe, font, None, &group, &monitor, &extra);
+            let launched = termpaper::launch::run_wall_up(&plans, dry_run)?;
+            for p in &plans {
+                let state = if launched.contains(p) { if dry_run { "would start" } else { "started" } } else { "already running" };
+                println!("{:<10} {:>5.2} pt  {state}", p.monitor, p.font_pt);
+                if dry_run {
+                    println!("  hyprctl dispatch '{}'", p.lua_dispatch());
+                }
+            }
+            return Ok(());
+        }
+        None => {}
     }
 
     let cfg = config::load();
-    let names = scene::names();
+    let names = scene::all_names();
+    // which terminal this is: 24-bit colour and a frame rate it can take
+    let caps = termpaper::term_caps::detect();
 
     let detail = args
         .detail
@@ -215,14 +937,9 @@ fn main() -> std::io::Result<()> {
     let scene_name = args
         .scene
         .clone()
-        .or_else(|| cfg.scene.clone())
-        .unwrap_or_else(|| "rain".to_string());
-    let probe = SceneOptions {
-        theme: None,
-        detail,
-        text_scale: None,
-    };
-    if scene::create(&scene_name, &probe, entropy_rng()).is_none() {
+        .or_else(|| launch_scene(&cfg))
+        .unwrap_or_else(|| config::DEFAULT_SCENE.to_string());
+    if !scene::exists(&scene_name) {
         eprintln!(
             "termpaper: unknown scene '{scene_name}'. Available: {}",
             names.join(", ")
@@ -236,24 +953,28 @@ fn main() -> std::io::Result<()> {
         .and_then(Pixels::parse)
         .unwrap_or_else(platform_default_pixels);
     let keymap = config::KeyMap::new(&cfg);
-    let theme = args
-        .theme
-        .clone()
+    let themes = termpaper::theme::Store::load();
+    let (variant_arg, cli_theme) = resolve_theme_args(&args, &scene_name, &themes);
+    let theme = variant_arg
         .or_else(|| cfg.themes.get(&scene_name).cloned())
         .or_else(|| cfg.theme.clone());
     let text_scale = args.text_scale.or(cfg.text_scale);
-    let filters = if args.filter.is_empty() {
-        cfg.filters.clone()
-    } else {
-        args.filter.clone()
+    // grade, palette and effects; `--filter` replaces the effect stack
+    let (mut look, look_theme) = match cli_theme {
+        Some(e) => (e.theme.look.clone(), Some(e.slug.clone())),
+        None => (config::look_of(&cfg), cfg.look_theme.clone()),
     };
-    let fps = args.fps.or(cfg.fps).unwrap_or(60).clamp(1, 240);
-    let idle_fps = args.idle_fps.or(cfg.idle_fps).map(|f| f.clamp(1, 240));
+    if !args.filter.is_empty() {
+        look.effects.stack = args.filter.clone();
+    }
+    let fps = args.fps.or(cfg.fps).unwrap_or(caps.default_fps).clamp(1, 240);
+    let mut display = config::display_of(&cfg);
+    if let Some(f) = args.idle_fps {
+        display.unfocused = if f <= 20 { termpaper::prefs::Unfocused::Fps15 } else { termpaper::prefs::Unfocused::Fps30 };
+    }
+    let playback = cfg.playback.clone();
     let speed = args.speed.or(cfg.speed).unwrap_or(1.0);
     let cycle = args.cycle.or(cfg.cycle).filter(|c| *c > 0.0);
-    let hue_shift = cfg.hue_shift.unwrap_or(0.0);
-    let saturation = cfg.saturation.unwrap_or(1.0);
-    let contrast = cfg.contrast.unwrap_or(1.0);
     let link_enabled = if args.no_link {
         false
     } else if args.link {
@@ -267,124 +988,910 @@ fn main() -> std::io::Result<()> {
         .or(cfg.group.clone())
         .map(|g| link::sanitize_group(&g))
         .unwrap_or_else(|| "default".into());
-    let cfg_gpu = cfg.gpu.unwrap_or(false);
+    let renderer = args.renderer.unwrap_or_else(|| {
+        if args.gpu { termpaper::engine::Renderer::Gpu }
+        else { cfg.renderer.unwrap_or_else(|| match cfg.gpu {
+            Some(true) => termpaper::engine::Renderer::Gpu,
+            Some(false) => termpaper::engine::Renderer::Cpu,
+            None => termpaper::engine::Renderer::Auto,
+        }) }
+    });
+    let sync_look = cfg.sync_look.unwrap_or(true);
+    let pad = args
+        .pad
+        .as_deref()
+        .and_then(config::PadSpec::parse)
+        .or_else(|| cfg.pad.clone())
+        // layout px: Hyprland geometry is logical, and so are points
+        .map(|p| p.to_px(1.0))
+        .unwrap_or((0.0, 0.0));
     let settings = Settings {
         link_enabled,
         link_group,
-        wall_spec: if args.no_wall { None } else { args.wall.clone() },
+        wall_spec: if args.no_wall { None } else { args.wall.clone().or_else(|| cfg.wall_grid.clone()) },
+        wall_enabled: !args.no_wall && cfg.wall.unwrap_or(true),
+        cli_no_link: args.no_link,
+        cli_group: args.group.as_deref().map(link::sanitize_group),
+        cli_no_wall: args.no_wall,
         smooth: cfg.smooth.unwrap_or(0.3),
         dim: cfg.dim.unwrap_or(1.0),
         fade: cfg.fade.unwrap_or(0.25),
         clock: cfg.clock.unwrap_or(true),
-        pad: args.pad.or(cfg.pad).unwrap_or(0),
+        pad,
+        placement: cfg.placement.unwrap_or_default(),
+        hysteresis_override: cfg.hysteresis,
+        cycle_scope: cfg.cycle_scope.as_deref().map(CycleScope::parse).unwrap_or_default(),
         cfg,
         keymap,
         text_scale,
         theme,
         detail,
         pixels,
-        filters,
+        look: termpaper::look::Baked::new(look),
+        look_theme,
+        look_preview: None,
+        theme_rows: theme_rows(&themes, &[]),
+        gallery: Vec::new(),
+        themes,
         fps,
-        idle_fps,
         speed,
         cycle,
-        hue_shift,
-        saturation,
-        contrast,
         screensaver: args.screensaver,
-        truecolor: detect_truecolor() && !args.no_truecolor,
-        gpu: args.gpu || cfg_gpu,
+        truecolor: Settings::truecolor_for(display.colors, caps.truecolor, args.no_truecolor),
+        term_truecolor: caps.truecolor,
+        cli_no_truecolor: args.no_truecolor,
+        default_fps: caps.default_fps,
+        renderer,
+        on_battery: termpaper::platform::power_source() == termpaper::platform::Power::Battery,
+        fps_cap: None,
+        terminal_name: caps.terminal.name(),
+        cli_wall_spec: args.wall.clone(),
+        pad_at_start: pad,
+        sync_look,
+        bezel_mm: termpaper::desk::load_desk().bezel_mm as f32,
+        hypr: termpaper::hypr::present(),
+        paused: false,
+        first_run: !config::config_path().is_some_and(|p| p.exists()),
+        playback,
+        display,
     };
 
-    let mut terminal = ratatui::init();
+    // 1 ms timed waits on Windows (frame pacing); a no-op elsewhere
+    let _timer = termpaper::platform::TimerResolution::raise();
+    let (mut terminal, meter) = init_terminal()?;
     terminal.hide_cursor()?;
     // focus reporting lets unfocused instances skip the pacing spin (and
-    // honor --idle-fps); terminals without support just never send events
-    let _ = crossterm::execute!(std::io::stdout(), event::EnableFocusChange);
-    let result = run(&mut terminal, &scene_name, settings);
-    let _ = crossterm::execute!(std::io::stdout(), event::DisableFocusChange);
-    ratatui::restore();
+    // honor --idle-fps); terminals without support just never send events.
+    // The mouse drives the menu (click, drag sliders, scroll) unless
+    // Display → Mouse leaves it to the terminal.
+    let _ = crossterm::execute!(terminal.backend_mut(), event::EnableFocusChange, event::EnableBracketedPaste);
+    if settings.display.mouse {
+        let _ = crossterm::execute!(terminal.backend_mut(), event::EnableMouseCapture);
+    }
+    let result = run(&mut terminal, &scene_name, settings, meter);
+    let _ = crossterm::execute!(terminal.backend_mut(), event::DisableFocusChange);
+    restore_terminal();
     result
+}
+
+/// The terminal every frame is drawn through. Output is block-buffered: a
+/// frame is hundreds of KB of SGR sequences, and the line-buffered `Stdout`
+/// that `ratatui::init` uses would split it into hundreds of writes the
+/// terminal can render half-way through (tearing).
+type Term = ratatui::Terminal<
+    ratatui::backend::CrosstermBackend<std::io::BufWriter<termpaper::pace::Meter<std::io::Stdout>>>,
+>;
+
+/// Frame output buffer. Big enough for a full braille frame of a large
+/// terminal, so a frame normally leaves in one write.
+const OUT_BUFFER: usize = 1 << 20;
+
+/// `ratatui::init` with a buffered writer: raw mode, alternate screen, and a
+/// panic hook that restores the terminal before the message prints.
+fn init_terminal() -> std::io::Result<(Term, termpaper::pace::Reading)> {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        hook(info);
+    }));
+    crossterm::terminal::enable_raw_mode()?;
+    crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
+    // metered: Adapt FPS and the performance readout see what the terminal
+    // took and how long it blocked
+    let (meter, reading) = termpaper::pace::Meter::new(std::io::stdout());
+    let out = std::io::BufWriter::with_capacity(OUT_BUFFER, meter);
+    Ok((ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(out))?, reading))
+}
+
+fn restore_terminal() {
+    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::DisableMouseCapture,
+        crossterm::event::DisableBracketedPaste,
+        crossterm::terminal::LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
 }
 
 struct Settings {
     link_enabled: bool,
     link_group: String,
     wall_spec: Option<String>,
+    /// automatic video wall from linked peers' geometry (false = --no-wall
+    /// or `wall = false`: local canvas, geometry hidden from peers)
+    wall_enabled: bool,
+    /// launch-time isolation flags; the `0` reset must not undo them
+    cli_no_link: bool,
+    cli_group: Option<String>,
+    cli_no_wall: bool,
     smooth: f32,
     dim: f32,
     fade: f32,
     clock: bool,
-    pad: i32,
+    /// terminal padding in layout px (x, y)
+    pad: (f32, f32),
+    /// where the terminal puts its leftover strip
+    placement: wall::Placement,
+    /// `hysteresis` from the config: overrides what Output picks for
+    /// Studio scenes (levels; 0 = off)
+    hysteresis_override: Option<u8>,
     cfg: config::Config,
     theme: Option<String>,
     text_scale: Option<u32>,
     keymap: config::KeyMap,
     detail: Detail,
     pixels: Pixels,
-    filters: Vec<String>,
+    /// grade, palette and effect stack, with its lookup table
+    look: termpaper::look::Baked,
+    /// the theme the look came from (a slug), if any
+    look_theme: Option<String>,
+    /// while the Themes page previews a look: the real one, to go back to
+    look_preview: Option<(termpaper::look::Baked, Option<String>)>,
+    /// every theme (built in and yours), and the rows the menu shows
+    themes: termpaper::theme::Store,
+    theme_rows: std::sync::Arc<Vec<menu::themes::ThemeRow>>,
+    /// themes fetched from the gallery (`g` on the Themes page), by id: the
+    /// Gallery shelf, installed into `themes` when picked
+    gallery: Vec<(String, termpaper::theme::Theme)>,
     fps: u32,
-    /// fps cap applied while unfocused (None = no throttle)
-    idle_fps: Option<u32>,
     speed: f32,
     cycle: Option<f64>,
-    hue_shift: f32,
-    saturation: f32,
-    contrast: f32,
+    /// which scenes `cycle` rotates through
+    cycle_scope: CycleScope,
     screensaver: bool,
+    /// 24-bit colour out: from Colours, the terminal, and --no-truecolor
     truecolor: bool,
-    gpu: bool,
+    /// the terminal says it shows 24-bit colour
+    term_truecolor: bool,
+    cli_no_truecolor: bool,
+    /// the terminal's frame-rate default (a config value equal to it is not
+    /// written back)
+    default_fps: u32,
+    renderer: termpaper::engine::Renderer,
+    /// order, transition style, time of day, what opens on launch
+    playback: termpaper::prefs::PlaybackPrefs,
+    /// colours, power, overlays, night dimming…
+    display: termpaper::prefs::DisplayPrefs,
+    /// running on battery power (polled)
+    on_battery: bool,
+    /// Adapt FPS: the rate the terminal is keeping up with, when lower
+    /// than asked for
+    fps_cap: Option<u32>,
+    /// the emulator's name (the terminal check says it)
+    terminal_name: &'static str,
+    /// `--wall` as given: a launch-only grid the config keeps out of
+    cli_wall_spec: Option<String>,
+    /// padding when the pane started (the config's form is kept unless
+    /// the menu changes it)
+    pad_at_start: (f32, f32),
+    /// take the group's look (Wall → Sync look)
+    sync_look: bool,
+    /// the desk's bezel width, mm
+    bezel_mm: f32,
+    /// running under Hyprland
+    hypr: bool,
+    /// the picture is paused (the menu's Pause the wall row)
+    paused: bool,
+    /// no config file yet: a fresh install gets the welcome
+    first_run: bool,
 }
 
-/// Snapshot the current runtime settings for broadcast.
+impl Settings {
+    /// 24-bit colour out, for Colours and what the terminal says.
+    fn truecolor_for(colors: termpaper::prefs::Colors, term: bool, cli_no: bool) -> bool {
+        match colors {
+            termpaper::prefs::Colors::Auto => term && !cli_no,
+            termpaper::prefs::Colors::Truecolor => true,
+            termpaper::prefs::Colors::Ansi256 => false,
+        }
+    }
+
+    /// Battery saving is on right now.
+    fn saving_power(&self) -> bool {
+        self.on_battery && self.display.battery == termpaper::prefs::Battery::Save
+    }
+
+    /// The renderer's GPU should be the integrated one.
+    fn low_power_gpu(&self) -> bool {
+        match self.display.gpu {
+            termpaper::prefs::GpuChoice::Integrated => true,
+            termpaper::prefs::GpuChoice::Discrete => false,
+            termpaper::prefs::GpuChoice::Auto => self.saving_power(),
+        }
+    }
+}
+
+/// The terminal's cell size in layout px from its reported pixel size
+/// (TIOCGWINSZ), divided by the monitor scale when the compositor tells us.
+fn measure_cell_px(geo: Option<&wall::GeoWatcher>) -> Option<(f32, f32)> {
+    let ws = crossterm::terminal::window_size().ok()?;
+    wall::measure_cell(
+        ws.columns as usize,
+        ws.rows as usize,
+        ws.width,
+        ws.height,
+        geo.and_then(|w| w.latest_scale()),
+        geo.and_then(|w| w.latest()),
+    )
+}
+
+/// The frame-rate cap while saving power on battery.
+const BATTERY_FPS: u32 = 30;
+
 /// How long before the frame deadline to stop sleeping and busy-wait.
 /// Sized from `examples/pace_bench.rs` — see the frame loop for the tradeoff.
 const SPIN_TAIL: Duration = Duration::from_micros(100);
 
-/// Largest single simulation step. Bounds physics after a stall.
-const MAX_STEP: f32 = 1.0 / 30.0;
-/// Most catch-up steps per frame, so repaying a hitch never starves render.
-const MAX_CATCHUP: usize = 4;
-/// Debt past this is written off: returning from suspend should not simulate
-/// minutes of scene time to catch up.
-const MAX_DEBT: f32 = 1.5;
-
-/// Linked-switch fast-forward: cap the catch-up target at 30s of sim time
-/// and spend it across frames under a strict per-frame budget, so adopting
-/// a peer's (seed, t0) never freezes a frame.
-const FF_MAX_STEPS: usize = 1800;
-const FF_STEPS_PER_FRAME: usize = 90;
-const FF_FRAME_BUDGET: Duration = Duration::from_millis(2);
-
-/// Spend owed wall time as bounded simulation steps, draining `debt`.
-///
-/// Returns the per-step dt values (already speed-scaled) and how many are live.
-/// Always at least one step so the frame still redraws when nothing is owed.
-fn plan_steps(debt: &mut f32, speed: f32) -> ([f32; MAX_CATCHUP], usize) {
-    let mut step_dt = [0.0f32; MAX_CATCHUP];
-    let spend = debt.min(MAX_CATCHUP as f32 * MAX_STEP);
-    if spend <= 1e-6 {
-        // paused, or nothing owed yet — still redraw the current state
-        return (step_dt, 1);
+/// Frame period for a scene: Classic scenes snap to a divisor of their
+/// 60 Hz tick; Studio scenes use continuous time, so any rate works (capped
+/// by `shader_fps`). Either way the deadlines sit on the anchor's slot grid.
+fn frame_period_ms(settings: &Settings, focused: bool, scene_name: &str) -> f64 {
+    let mut fps = settings.fps;
+    // unfocused (a pause holds the frame elsewhere), on battery, and what
+    // the terminal is keeping up with
+    if let Some(f) = settings.display.unfocused_fps().filter(|_| !focused) {
+        fps = fps.min(f.max(1));
     }
-    // split the owed time into EQUAL steps rather than MAX_STEP chunks plus
-    // a small remainder: verlet velocity is displacement-per-previous-step,
-    // so a 1/30 step followed by a 1/300 remainder mis-scales it 10x for a
-    // step — a visible speed pulse in every verlet scene after a hitch
-    let n = ((spend / MAX_STEP).ceil() as usize).clamp(1, MAX_CATCHUP);
-    let s = spend / n as f32;
-    for slot in step_dt.iter_mut().take(n) {
-        *slot = s * speed;
+    if settings.saving_power() {
+        fps = fps.min(BATTERY_FPS);
     }
-    *debt -= spend;
-    (step_dt, n)
+    if let Some(cap) = settings.fps_cap {
+        fps = fps.min(cap);
+    }
+    if scene::lookup(scene_name).is_some_and(|e| e.needs_gpu()) {
+        fps = fps.min(settings.display.studio_fps);
+    } else {
+        fps = termpaper::sync::classic_fps(fps);
+    }
+    1000.0 / fps.max(1) as f64
 }
 
-fn settings_msg(settings: &Settings, opts: &SceneOptions, quick: &Option<String>) -> link::SettingsMsg {
+/// The appearance settings peers mirror. Sim settings (speed, detail,
+/// pixels, text scale, theme) travel in the anchor instead: any change to
+/// them is picked up by `sync_sim` and published as a new anchor.
+fn settings_msg(settings: &Settings, _opts: &SceneOptions, quick: &Option<String>) -> link::SettingsMsg {
+    let look = settings.look.get();
     link::SettingsMsg {
-        pixels: settings.pixels.name().to_string(),
+        // the basics older binaries understand, mirrored from the look
+        filters: look.effects.stack.clone(),
+        fps: settings.fps,
+        smooth: settings.smooth,
+        dim: settings.dim,
+        fade: settings.fade,
+        clock: settings.clock,
+        quick: quick.clone(),
+        hue_shift: look.grade.hue,
+        saturation: look.grade.saturation,
+        contrast: look.grade.contrast,
+        look: Some(look.clone()),
+        look_theme: settings.look_theme.clone(),
+        look_only: false,
+        transition: Some(settings.playback.transition),
+        display: Some(settings.display.clone()),
+        look_shared: settings.sync_look,
+    }
+}
+
+/// Session-only apply of a peer's appearance settings.
+fn apply_appearance(
+    m: link::SettingsMsg,
+    settings: &mut Settings,
+    transition: &mut transition::Transition,
+    quick_filter: &mut Option<String>,
+) {
+    // a pane with a look of its own neither gives nor takes one
+    let take_look = settings.sync_look && m.look_shared;
+    // `termpaper theme apply`: the look and nothing else
+    if m.look_only && !settings.sync_look {
+        return;
+    }
+    if m.look_only {
+        if let Some(l) = m.look {
+            settings.look.set(l);
+            settings.look_preview = None;
+            settings.look_theme = m.look_theme;
+        }
+        return;
+    }
+    let from_new_peer = m.look.is_some();
+    if take_look {
+        let look = match m.look {
+            Some(l) => l,
+            // an older binary only speaks the basics: keep the rest of ours
+            None => {
+                let mut l = settings.look.get().clone();
+                l.effects.stack = m.filters;
+                l.grade.hue = m.hue_shift;
+                l.grade.saturation = m.saturation;
+                l.grade.contrast = m.contrast;
+                l
+            }
+        };
+        settings.look.set(look);
+        // a peer's own preview never travels, so this is a real change: any
+        // preview here is superseded
+        settings.look_preview = None;
+        if from_new_peer {
+            settings.look_theme = m.look_theme;
+        }
+    }
+    if let Some(t) = m.transition {
+        settings.playback.transition = t;
+    }
+    if let Some(d) = &m.display {
+        settings.display.adopt_shared(d);
+    }
+    settings.fps = m.fps.clamp(1, 240);
+    settings.smooth = m.smooth;
+    settings.dim = m.dim;
+    settings.fade = m.fade;
+    settings.clock = m.clock;
+    transition.set_fade_secs(m.fade);
+    *quick_filter = m.quick;
+}
+
+/// Grace before a published switch takes effect, on top of the fade: time
+/// for every peer's per-frame poll to see the anchor before its fade-out
+/// has to start, so all panes fade and swap together.
+const SWITCH_MARGIN_MS: u64 = 120;
+
+/// What the pane simulates now, and what a scheduled switch will swap in.
+struct SimState {
+    /// the anchor on screen: the group's, or a local one (unlinked/--cycle)
+    cur: link::Anchor,
+    /// `cur` is the group's anchor
+    synced: bool,
+    /// anchor to swap to at its `t0_ms`, and whether it is the group's
+    next: Option<(link::Anchor, bool)>,
+}
+
+impl SimState {
+    /// The anchor the pane is running or about to run: what incoming
+    /// anchors and local edits are compared against.
+    fn target(&self) -> &link::Anchor {
+        self.next.as_ref().map(|n| &n.0).unwrap_or(&self.cur)
+    }
+
+    fn target_synced(&self) -> bool {
+        self.next.as_ref().map(|n| n.1).unwrap_or(self.synced)
+    }
+
+    /// Replace the timing (t0/pause) of the target anchor, keeping its
+    /// simulation: a retime never rebuilds.
+    fn retime(&mut self, a: &link::Anchor, transition: &mut transition::Transition, names: &[&str]) {
+        match &mut self.next {
+            Some((n, _)) => {
+                n.t0_ms = a.t0_ms;
+                n.paused_at_ms = a.paused_at_ms;
+                n.stamp = a.stamp;
+                if let Some(i) = names.iter().position(|s| *s == n.scene) {
+                    transition.schedule(i, n.t0_ms);
+                }
+            }
+            None => {
+                self.cur.t0_ms = a.t0_ms;
+                self.cur.paused_at_ms = a.paused_at_ms;
+                self.cur.stamp = a.stamp;
+            }
+        }
+    }
+}
+
+/// An anchor for `scene` carrying the pane's current sim settings.
+fn anchor_from(settings: &Settings, opts: &SceneOptions, scene: &str, seed: u64, t0_ms: u64) -> link::Anchor {
+    link::Anchor {
+        stamp: link::Stamp::default(),
+        scene: scene.to_string(),
+        theme: opts.theme.clone(),
+        seed,
+        t0_ms,
+        paused_at_ms: None,
+        speed: settings.speed,
         detail: opts.detail.name().to_string(),
-        filters: settings.filters.clone(),
+        pixels: settings.pixels.name().to_string(),
+        text_scale: opts.text_scale,
+        proto: link::PROTO,
+    }
+}
+
+/// Mirror an anchor's sim settings into the local settings (session only),
+/// so the pane's desired state matches what it runs.
+fn adopt_settings(a: &link::Anchor, settings: &mut Settings, opts: &mut SceneOptions) {
+    opts.theme = a.theme.clone();
+    if let Some(d) = Detail::parse(&a.detail) {
+        opts.detail = d;
+    }
+    opts.text_scale = a.text_scale;
+    settings.text_scale = a.text_scale;
+    settings.speed = a.speed;
+    if let Some(p) = Pixels::parse(&a.pixels) {
+        settings.pixels = p;
+        opts.pixels = p;
+    }
+}
+
+/// Start a switch to `a`: it takes effect after the fade (plus a grace
+/// period when linked, so peers fade out with us), published to the group
+/// when `publish` and there is one.
+fn begin_switch(
+    st: &mut SimState,
+    guard: &mut Option<link::Guard>,
+    transition: &mut transition::Transition,
+    names: &[&str],
+    a: link::Anchor,
+    publish: bool,
+) {
+    begin_switch_paused(st, guard, transition, names, a, publish, false);
+}
+
+/// `begin_switch`, optionally keeping a paused anchor paused (frozen on the
+/// new start): a re-anchor must not unpause a wall the user paused.
+fn begin_switch_paused(
+    st: &mut SimState,
+    guard: &mut Option<link::Guard>,
+    transition: &mut transition::Transition,
+    names: &[&str],
+    mut a: link::Anchor,
+    publish: bool,
+    keep_pause: bool,
+) {
+    let linked = publish && guard.is_some();
+    a.t0_ms = link::epoch_now_ms() + transition.fade_ms() + if linked { SWITCH_MARGIN_MS } else { 0 };
+    a.paused_at_ms = (keep_pause && a.paused_at_ms.is_some()).then_some(a.t0_ms);
+    if let (true, Some(g)) = (linked, guard.as_mut()) {
+        g.publish_anchor(&mut a);
+    }
+    if let Some(i) = names.iter().position(|n| *n == a.scene) {
+        transition.schedule(i, a.t0_ms);
+        st.next = Some((a, linked));
+    }
+}
+
+/// Apply an anchor another instance published: a retime moves the clock,
+/// anything else schedules a switch at the anchor's t0 (immediately, when
+/// that already passed).
+fn receive_anchor(
+    st: &mut SimState,
+    a: link::Anchor,
+    transition: &mut transition::Transition,
+    names: &[&str],
+    settings: &mut Settings,
+    opts: &mut SceneOptions,
+) {
+    if !names.contains(&a.scene.as_str()) {
+        return; // a scene this binary lacks: keep what we have
+    }
+    match link::classify(st.target(), &a) {
+        link::AnchorChange::Same => {}
+        link::AnchorChange::Retime => st.retime(&a, transition, names),
+        link::AnchorChange::Switch => {
+            adopt_settings(&a, settings, opts);
+            if let Some(i) = names.iter().position(|n| *n == a.scene) {
+                transition.schedule(i, a.t0_ms);
+            }
+            st.next = Some((a, true));
+            return;
+        }
+    }
+    // a retime of the group's anchor makes a locally cycling pane rejoin
+    match &mut st.next {
+        Some((_, s)) => *s = true,
+        None => st.synced = true,
+    }
+}
+
+/// Local edits to sim settings (menu, keys, reset) show up as a mismatch
+/// between the settings and the target anchor: publish that as a switch.
+fn sync_sim(
+    st: &mut SimState,
+    guard: &mut Option<link::Guard>,
+    transition: &mut transition::Transition,
+    names: &[&str],
+    settings: &Settings,
+    opts: &SceneOptions,
+) {
+    let t = st.target();
+    let desired = anchor_from(settings, opts, &t.scene, t.seed, t.t0_ms);
+    if !desired.same_sim(t) {
+        begin_switch(st, guard, transition, names, desired, true);
+    }
+}
+
+/// A user-initiated switch to scene `i` with its remembered theme,
+/// published to the group.
+fn switch_scene(
+    i: usize,
+    st: &mut SimState,
+    guard: &mut Option<link::Guard>,
+    transition: &mut transition::Transition,
+    names: &[&str],
+    settings: &Settings,
+    opts: &mut SceneOptions,
+) {
+    opts.theme = settings.cfg.themes.get(names[i]).cloned().or_else(|| settings.theme.clone());
+    let a = anchor_from(settings, opts, names[i], rand::rng().random(), 0);
+    begin_switch(st, guard, transition, names, a, true);
+}
+
+/// The lowest live pid running the group's anchor leads: it answers
+/// re-anchor requests and retimes the group after a suspend.
+fn is_leader(peers: &[link::InstanceInfo], synced: bool) -> bool {
+    let me = std::process::id();
+    let lowest = peers
+        .iter()
+        .filter(|i| i.synced)
+        .map(|i| i.pid)
+        .chain(synced.then_some(me))
+        .min();
+    lowest == Some(me)
+}
+
+/// Join the (new) group: adopt its anchor, or publish ours when it has none.
+fn join_group(
+    st: &mut SimState,
+    guard: &mut Option<link::Guard>,
+    transition: &mut transition::Transition,
+    names: &[&str],
+    settings: &mut Settings,
+    opts: &mut SceneOptions,
+) {
+    let Some(g) = guard.as_mut() else {
+        st.synced = false;
+        return;
+    };
+    match g.latest_anchor(st.target()) {
+        Some(a) => receive_anchor(st, a, transition, names, settings, opts),
+        None => {
+            if st.next.is_none() {
+                g.publish_anchor(&mut st.cur);
+                st.synced = true;
+            } else if let Some((n, s)) = &mut st.next {
+                g.publish_anchor(n);
+                *s = true;
+            }
+        }
+    }
+}
+
+/// Realtime jumps beyond this relative to the monotonic clock are a system
+/// suspend: the anchor is retimed so the scene resumes where it stopped.
+const SUSPEND_JUMP_MS: i64 = 5_000;
+
+/// A rebuilt simulation estimated to need longer than this to replay up to
+/// the anchor's clock asks for a fresh anchor instead.
+const REANCHOR_ETA_MS: u32 = 3_000;
+
+/// Merge current runtime settings into the stored config and save it. Only
+/// values that differ from the defaults are written, floats rounded to two
+/// decimals (see `config::store`). Callers go through `SaveTimer` so rapid
+/// changes coalesce into one write.
+fn persist(settings: &mut Settings, scene_name: &str, theme: Option<&str>, detail: Detail) {
+    // --no-link / --group / --no-wall isolate one launch: while the live
+    // value is still the one the flag forced, keep what the config had
+    let link = if settings.cli_no_link && !settings.link_enabled {
+        settings.cfg.link.unwrap_or(config::DEFAULT_LINK)
+    } else {
+        settings.link_enabled
+    };
+    let group = if settings.cli_group.as_deref() == Some(settings.link_group.as_str()) {
+        settings.cfg.group.clone().unwrap_or_else(|| config::DEFAULT_GROUP.into())
+    } else {
+        settings.link_group.clone()
+    };
+    let wall = if settings.cli_no_wall && !settings.wall_enabled {
+        settings.cfg.wall.unwrap_or(true)
+    } else {
+        settings.wall_enabled
+    };
+    let live = config::Live {
+        scene: scene_name,
+        theme,
+        pixels: settings.pixels.name(),
+        default_pixels: platform_default_pixels().name(),
+        detail: detail.name(),
+        default_detail: platform_default_detail().name(),
+        // a preview is only on loan: the look it replaced is what counts
+        look: settings.look_preview.as_ref().map_or(settings.look.get(), |(o, _)| o.get()),
+        look_theme: settings.look_preview.as_ref().map_or(settings.look_theme.as_deref(), |(_, t)| t.as_deref()),
+        text_scale: settings.text_scale,
+        fps: settings.fps,
+        default_fps: settings.default_fps,
+        speed: settings.speed,
+        smooth: settings.smooth,
+        dim: settings.dim,
+        fade: settings.fade,
+        clock: settings.clock,
+        cycle: settings.cycle,
+        cycle_scope: settings.cycle_scope,
+        renderer: settings.renderer,
+        link,
+        group: &group,
+        wall,
+        playback: &settings.playback,
+        display: &settings.display,
+    };
+    config::store(&mut settings.cfg, &live);
+    // the Wall page's keys; a launch-only --wall grid stays out
+    if settings.wall_spec != settings.cli_wall_spec || settings.cli_wall_spec.is_none() {
+        settings.cfg.wall_grid = settings.wall_spec.clone();
+    }
+    if settings.pad != settings.pad_at_start {
+        let p = config::round2(settings.pad.0) as f64;
+        settings.cfg.pad = (p > 0.0).then_some(config::PadSpec::One(config::PadLen::Px(p)));
+    }
+    settings.cfg.placement = (settings.placement != wall::Placement::TopLeft).then_some(settings.placement);
+    settings.cfg.sync_look = (!settings.sync_look).then_some(false);
+    if let Err(e) = config::save(&settings.cfg) {
+        eprintln!("termpaper: could not save config: {e}");
+    }
+}
+
+/// How many changes `u` can step back through.
+const UNDO_DEPTH: usize = 64;
+
+/// Repeats of one kind of change closer together than this undo as one.
+const UNDO_BURST: Duration = Duration::from_millis(900);
+
+/// The settings a menu change can touch, for undo.
+struct Snapshot {
+    look: termpaper::look::Look,
+    look_theme: Option<String>,
+    dim: f32,
+    smooth: f32,
+    fade: f32,
+    fps: u32,
+    speed: f32,
+    pixels: Pixels,
+    detail: Detail,
+    theme: Option<String>,
+    text_scale: Option<u32>,
+    clock: bool,
+    cycle: Option<f64>,
+    cycle_scope: CycleScope,
+    renderer: termpaper::engine::Renderer,
+    playback: termpaper::prefs::PlaybackPrefs,
+    display: termpaper::prefs::DisplayPrefs,
+}
+
+impl Snapshot {
+    fn take(s: &Settings, opts: &SceneOptions) -> Self {
+        // the real look, never a Themes-page preview
+        let (look, look_theme) = match &s.look_preview {
+            Some((orig, theme)) => (orig.get().clone(), theme.clone()),
+            None => (s.look.get().clone(), s.look_theme.clone()),
+        };
+        Snapshot {
+            look,
+            look_theme,
+            dim: s.dim,
+            smooth: s.smooth,
+            fade: s.fade,
+            fps: s.fps,
+            speed: s.speed,
+            pixels: s.pixels,
+            detail: opts.detail,
+            theme: opts.theme.clone(),
+            text_scale: s.text_scale,
+            clock: s.clock,
+            cycle: s.cycle,
+            cycle_scope: s.cycle_scope,
+            renderer: s.renderer,
+            playback: s.playback.clone(),
+            display: s.display.clone(),
+        }
+    }
+
+    /// Put everything back. Sim settings (variant, detail, pixels, speed,
+    /// text size) then reach the group through `sync_sim` like any edit.
+    fn restore(self, s: &mut Settings, opts: &mut SceneOptions, transition: &mut transition::Transition) {
+        s.look_preview = None;
+        s.look.set(self.look);
+        s.look_theme = self.look_theme;
+        s.dim = self.dim;
+        s.smooth = self.smooth;
+        s.fade = self.fade;
+        transition.set_fade_secs(self.fade);
+        s.fps = self.fps;
+        s.speed = self.speed;
+        s.pixels = self.pixels;
+        opts.detail = self.detail;
+        opts.theme = self.theme;
+        s.text_scale = self.text_scale;
+        opts.text_scale = self.text_scale;
+        s.clock = self.clock;
+        s.cycle = self.cycle;
+        s.cycle_scope = self.cycle_scope;
+        s.renderer = self.renderer;
+        s.playback = self.playback;
+        s.display = self.display;
+        s.truecolor = Settings::truecolor_for(s.display.colors, s.term_truecolor, s.cli_no_truecolor);
+    }
+}
+
+/// What a browser preview replaced: restored when the preview is dropped,
+/// forgotten when it is kept.
+struct PreviewOrigin {
+    idx: usize,
+    theme: Option<String>,
+    /// the anchor the original scene was running on, and whether it was
+    /// the group's
+    anchor: link::Anchor,
+    synced: bool,
+    /// scene being previewed now
+    showing: usize,
+}
+
+/// The scene the config should remember. A preview is only on loan, so the
+/// scene it replaced (with that scene's theme) is what counts.
+fn remembered_scene<'a>(
+    preview: &'a Option<PreviewOrigin>,
+    names: &[&'static str],
+    idx: usize,
+    opts: &'a SceneOptions,
+) -> (&'static str, Option<&'a str>) {
+    match preview {
+        Some(p) => (names[p.idx], p.theme.as_deref()),
+        None => (names[idx], opts.theme.as_deref()),
+    }
+}
+
+/// The Themes page's rows: the neutral theme, then yours, then the built-in
+/// categories. Swatches are worked out here once: a theme's palette, or
+/// reference colours run through its grade.
+fn theme_rows(store: &termpaper::theme::Store, gallery: &[(String, termpaper::theme::Theme)]) -> std::sync::Arc<Vec<menu::themes::ThemeRow>> {
+    let mut rows = menu::themes::rows(store);
+    rows.extend(menu::themes::gallery_rows(gallery));
+    std::sync::Arc::new(rows)
+}
+
+/// A Gallery shelf row's theme (`gallery:<id>`), while it is not installed.
+fn gallery_theme<'a>(settings: &'a Settings, slug: &str) -> Option<&'a termpaper::theme::Theme> {
+    let id = slug.strip_prefix(menu::themes::GALLERY_PREFIX)?;
+    settings.gallery.iter().find(|(i, _)| i == id).map(|(_, t)| t)
+}
+
+/// What a gallery request running in the background came back with.
+#[cfg(feature = "net")]
+enum GalleryReply {
+    /// the Gallery shelf: each theme with its id
+    List(Result<Vec<(String, termpaper::theme::Theme)>, String>),
+    /// one theme, from a pasted link: install it and wear it
+    One(Result<(String, termpaper::theme::Theme), String>),
+}
+
+/// Ask the gallery in the background; the answer arrives on `tx`. The
+/// shelf holds the most installed themes and the newest, once each.
+#[cfg(feature = "net")]
+fn gallery_fetch(base: String, tx: std::sync::mpsc::Sender<GalleryReply>) {
+    use termpaper::gallery;
+    std::thread::spawn(move || {
+        let popular = gallery::list(&base, "", None, true, 0);
+        let newest = gallery::list(&base, "", None, false, 0);
+        let reply = match (popular, newest) {
+            (Err(e), _) => Err(e),
+            (Ok((a, _)), b) => {
+                let mut seen = std::collections::HashSet::new();
+                let all = a.into_iter().chain(b.map(|(l, _)| l).unwrap_or_default());
+                Ok(all
+                    .filter(|l| !l.builtin && seen.insert(l.id.clone()))
+                    .filter_map(|l| l.theme().ok().map(|t| (l.id, t)))
+                    .collect())
+            }
+        };
+        let _ = tx.send(GalleryReply::List(reply));
+    });
+}
+
+/// Fetch one theme by a pasted link, in the background.
+#[cfg(feature = "net")]
+fn gallery_fetch_one(base: String, id: String, tx: std::sync::mpsc::Sender<GalleryReply>) {
+    std::thread::spawn(move || {
+        let r = termpaper::gallery::fetch(&base, &id).and_then(|l| {
+            let t = l.theme()?;
+            if l.builtin {
+                return Err(format!("{} comes with termpaper: it is on this page", t.name));
+            }
+            Ok((l.id, t))
+        });
+        let _ = tx.send(GalleryReply::One(r));
+    });
+}
+
+/// Count an install from the Themes page (best effort, in the background).
+#[cfg(feature = "net")]
+fn gallery_count(base: String, id: String) {
+    std::thread::spawn(move || termpaper::gallery::count_install(&base, &id));
+}
+
+/// Wear a theme: its look (and brightness hint) replaces this pane's,
+/// ending any preview. The caller publishes and saves. None when the theme
+/// is gone.
+fn apply_theme(slug: &str, settings: &mut Settings) -> Option<termpaper::theme::Theme> {
+    let t = settings.themes.get(slug)?.theme.clone();
+    settings.look_preview = None;
+    settings.look.set(t.look.clone());
+    settings.look_theme = Some(slug.to_string());
+    if let Some(dim) = t.display.as_ref().and_then(|d| d.dim) {
+        settings.dim = dim;
+    }
+    Some(t)
+}
+
+/// Who a theme made here is by: your login name, else "you".
+fn theme_author() -> String {
+    ["USER", "USERNAME", "LOGNAME"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+        .unwrap_or_else(|| "you".into())
+        .chars()
+        .take(termpaper::theme::MAX_AUTHOR)
+        .collect()
+}
+
+/// Copy text to the clipboard through the terminal (OSC 52): works in
+/// kitty, WezTerm, Ghostty, iTerm2, Windows Terminal, foot and over ssh.
+fn osc52_copy(text: &str) {
+    use std::io::Write;
+    let b64 = {
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let bytes = text.as_bytes();
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+            let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(T[((n >> (18 - 6 * i)) & 63) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    };
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]52;c;{b64}\x07");
+    let _ = out.flush();
+}
+
+/// Snapshot what the menu shows and adjusts. The status lines and instance
+/// list only matter for drawing; key handling passes empties.
+fn menu_ctx(
+    settings: &Settings,
+    opts: &SceneOptions,
+    scene_name: &'static str,
+    renderer_status: String,
+    wall_status: String,
+    instances: Vec<String>,
+) -> MenuCtx {
+    MenuCtx {
+        gpu: menu::gpu_state(&renderer_status, cfg!(feature = "gpu"), settings.renderer),
+        renderer_status,
+        wall_status,
+        scene_name,
+        pixels: settings.pixels,
+        detail: opts.detail,
         theme: opts.theme.clone(),
         text_scale: settings.text_scale,
         speed: settings.speed,
@@ -393,54 +1900,42 @@ fn settings_msg(settings: &Settings, opts: &SceneOptions, quick: &Option<String>
         dim: settings.dim,
         fade: settings.fade,
         clock: settings.clock,
-        quick: quick.clone(),
-        hue_shift: settings.hue_shift,
-        saturation: settings.saturation,
-        contrast: settings.contrast,
-    }
-}
-
-/// Merge current runtime settings into the stored config and save it.
-fn persist(settings: &mut Settings, scene_name: &str, opts: &SceneOptions) {
-    let cfg = &mut settings.cfg;
-    cfg.scene = Some(scene_name.to_string());
-    cfg.pixels = Some(settings.pixels.name().to_string());
-    cfg.detail = Some(opts.detail.name().to_string());
-    cfg.filters = settings.filters.clone();
-    cfg.text_scale = settings.text_scale;
-    cfg.smooth = Some(settings.smooth);
-    cfg.dim = Some(settings.dim);
-    cfg.fade = Some(settings.fade);
-    cfg.clock = Some(settings.clock);
-    cfg.cycle = settings.cycle;
-    cfg.fps = Some(settings.fps);
-    cfg.speed = Some(settings.speed);
-    cfg.hue_shift = if settings.hue_shift < 0.5 {
-        None
-    } else {
-        Some(settings.hue_shift)
-    };
-    cfg.saturation = if (settings.saturation - 1.0).abs() < 0.02 {
-        None
-    } else {
-        Some(settings.saturation)
-    };
-    cfg.contrast = if (settings.contrast - 1.0).abs() < 0.02 {
-        None
-    } else {
-        Some(settings.contrast)
-    };
-    cfg.link = if settings.link_enabled { None } else { Some(false) };
-    cfg.group = if settings.link_group == "default" {
-        None
-    } else {
-        Some(settings.link_group.clone())
-    };
-    if let Some(t) = &opts.theme {
-        cfg.themes.insert(scene_name.to_string(), t.clone());
-    }
-    if let Err(e) = config::save(cfg) {
-        eprintln!("termpaper: could not save config: {e}");
+        cycle: settings.cycle,
+        cycle_scope: settings.cycle_scope,
+        look: settings.look.get().clone(),
+        renderer: settings.renderer,
+        link_enabled: settings.link_enabled,
+        link_group: settings.link_group.clone(),
+        wall_enabled: settings.wall_enabled,
+        truecolor: settings.truecolor,
+        favorites: settings.cfg.favorites.clone(),
+        recents: settings.cfg.recents.clone(),
+        scene_themes: settings.cfg.themes.clone(),
+        themes: settings.theme_rows.clone(),
+        active_theme: settings.look_theme.clone(),
+        playback: settings.playback.clone(),
+        display: settings.display.clone(),
+        term_truecolor: settings.term_truecolor && !settings.cli_no_truecolor,
+        wall: wall_prefs(settings),
+        hypr: settings.hypr,
+        paused: settings.paused,
+        theme_modified: settings.look_theme.as_deref().and_then(|t| settings.themes.get(t)).is_some_and(|e| {
+            let real = settings.look_preview.as_ref().map_or(settings.look.get(), |(o, _)| o.get());
+            e.theme.look != *real
+        }),
+        key_display: config::ACTIONS
+            .iter()
+            .map(|&a| {
+                let k = settings
+                    .cfg
+                    .keys
+                    .get(a)
+                    .cloned()
+                    .unwrap_or_else(|| config::default_key(a).to_string());
+                (a.to_string(), k)
+            })
+            .collect(),
+        instances,
     }
 }
 
@@ -449,15 +1944,27 @@ fn reset_link_guard(
     enabled: bool,
     group: &str,
     scene: &str,
-    pad: (i32, i32),
+    pad: (f32, f32),
 ) {
     *guard = None;
     if enabled {
         *guard = link::Guard::new(scene, group).map(|mut g| {
-            g.set_pad(pad);
+            // placement and cell size follow with the next wall refresh
+            g.set_layout(pad, wall::Placement::default(), None);
             g
         });
     }
+}
+
+/// Link settings the `0` reset restores. `--no-link` and `--group` are
+/// launch-time isolation decisions (a solo art piece on one monitor), so a
+/// reset never re-enables linking or rejoins the default group on such an
+/// instance.
+fn link_defaults(cli_no_link: bool, cli_group: Option<&str>) -> (bool, String) {
+    (
+        config::DEFAULT_LINK && !cli_no_link,
+        cli_group.unwrap_or(config::DEFAULT_GROUP).to_string(),
+    )
 }
 
 fn apply_defaults(
@@ -467,27 +1974,32 @@ fn apply_defaults(
     transition: &mut transition::Transition,
     guard: &mut Option<link::Guard>,
     quick_filter: &mut Option<String>,
-    current: &mut Box<dyn scene::Scene>,
 ) {
     config::reset_stored_defaults(&mut settings.cfg, scene_name);
 
     settings.pixels = platform_default_pixels();
     settings.detail = platform_default_detail();
     settings.theme = None;
-    settings.filters.clear();
+    settings.look.set(termpaper::look::Look::default());
+    settings.look_theme = None;
+    settings.look_preview = None;
     settings.text_scale = None;
-    settings.fps = config::DEFAULT_FPS;
+    settings.fps = settings.default_fps;
     settings.speed = config::DEFAULT_SPEED;
     settings.smooth = config::DEFAULT_SMOOTH;
     settings.dim = config::DEFAULT_DIM;
     settings.fade = config::DEFAULT_FADE;
     settings.clock = config::DEFAULT_CLOCK;
     settings.cycle = None;
-    settings.hue_shift = 0.0;
-    settings.saturation = 1.0;
-    settings.contrast = 1.0;
-    settings.link_enabled = config::DEFAULT_LINK;
-    settings.link_group = config::DEFAULT_GROUP.into();
+    settings.cycle_scope = CycleScope::All;
+    settings.playback = Default::default();
+    settings.display = Default::default();
+    settings.fps_cap = None;
+    settings.truecolor = Settings::truecolor_for(settings.display.colors, settings.term_truecolor, settings.cli_no_truecolor);
+    let (link_enabled, link_group) = link_defaults(settings.cli_no_link, settings.cli_group.as_deref());
+    settings.link_enabled = link_enabled;
+    settings.link_group = link_group;
+    settings.wall_enabled = !settings.cli_no_wall;
 
     opts.detail = settings.detail;
     opts.theme = None;
@@ -495,55 +2007,59 @@ fn apply_defaults(
     *quick_filter = None;
 
     transition.set_fade_secs(settings.fade);
-    *current = scene::create(scene_name, opts, entropy_rng()).expect("registry");
     reset_link_guard(
         guard,
         settings.link_enabled,
         &settings.link_group,
         scene_name,
-        (settings.pad, settings.pad),
+        settings.pad,
     );
 }
 
 fn run(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut Term,
     start_scene: &str,
     mut settings: Settings,
+    meter: termpaper::pace::Reading,
 ) -> std::io::Result<()> {
-    let names = scene::names();
+    let names = scene::all_names();
+    // the terminal's true cell size (layout px), when it reports one
+    let mut cell_px: Option<(f32, f32)> = None;
+    let mut cell_grid = (0usize, 0usize);
     let mut guard = if settings.link_enabled {
         link::Guard::new(start_scene, &settings.link_group).map(|mut g| {
-            g.set_pad((settings.pad, settings.pad));
+            g.set_layout(settings.pad, settings.placement, cell_px);
             g
         })
     } else {
         None
     };
-    // start the stamp at launch time so a leftover control.json from an
-    // older session can't override the scene chosen on the command line;
-    // the 15s heartbeat re-publish converges the group soon after anyway
-    let mut control_stamp = link::Stamp {
-        epoch: link::epoch_now_ms(),
-        seq: 0,
-        from_pid: 0,
-    };
-    // artwork sync: (seed, t0_ms) for the next scene creation, if any
-    let mut sync_params: Option<(u64, u64)> = None;
-    // sync params of the scene currently on screen — lets receivers skip
-    // identical re-publishes (heartbeat/duplicates) without a visible
-    // restart, and lets the leader re-publish the exact same sim state
-    let mut cur_sync: Option<(u64, u64)> = None;
+    // legacy control.json: only older binaries still speak through it
+    let mut control_stamp = link::Stamp::default();
     let mut menu = Menu::new();
-    let mut color_open = false;
-    let mut color_param = color_wheel::Param::Hue;
+    // menu effects queue here and apply at the top of the next frame
+    let mut pending_fx: Vec<Effect> = Vec::new();
+    // the gallery runs in the background: answers come back here
+    #[cfg(feature = "net")]
+    let (gallery_tx, gallery_rx) = std::sync::mpsc::channel::<GalleryReply>();
+    #[cfg(feature = "net")]
+    let mut gallery_busy = false;
+    // set while the browser previews a scene on this pane only
+    let mut preview: Option<PreviewOrigin> = None;
+    let mut save = config::SaveTimer::default();
+    // settings as they were before each change the menu made (`u` undoes)
+    let mut undo: Vec<Snapshot> = Vec::new();
+    let mut undo_last: Option<(std::mem::Discriminant<Effect>, Instant)> = None;
+    // the colour studio (c, or the menu's Colour studio… and Palette rows)
+    let mut studio = studio::Studio::new();
     let mut opts = SceneOptions {
         theme: settings.theme.clone(),
         detail: settings.detail,
         text_scale: settings.text_scale,
+        pixels: settings.pixels,
     };
     let mut transition = transition::Transition::new();
     transition.set_fade_secs(settings.fade);
-    let mut paused = false;
     // terminals that report focus keep this current; ones that don't never
     // send the events, so it stays true and nothing changes for them
     let mut focused = true;
@@ -552,48 +2068,73 @@ fn run(
         .iter()
         .position(|n| *n == start_scene)
         .unwrap_or(0);
-    let mut current = scene::create(names[idx], &opts, entropy_rng()).expect("validated");
-    let mut canvas = canvas::Canvas::new(1, 1);
-    let mut prev_canvas = canvas::Canvas::new(1, 1);
-    // linked-switch fast-forward state: steps still owed, and a persistent
-    // scratch canvas the catch-up updates render into (never shown)
-    let mut ff_remaining = 0usize;
-    let mut ff_scratch = canvas::Canvas::new(1, 1);
-    // Scratch for the CPU fallback while the GPU pipeline is filling. The
-    // fallback must not run in `canvas`: `canvas` holds the raw scene output
-    // that the next GPU submit uploads, and filtering it in place would apply
-    // the chain twice.
-    #[cfg(feature = "gpu")]
-    let mut cpu_scratch = canvas::Canvas::new(1, 1);
-    #[cfg(not(feature = "gpu"))]
-    if settings.gpu {
-        eprintln!(
-            "termpaper: --gpu ignored — this build has no GPU backend \
-             (rebuild with `cargo install termpaper --features gpu`)"
-        );
-    }
-    #[cfg(feature = "gpu")]
-    let mut gpu = if settings.gpu {
-        // dimensions are set by the first `resize` inside the frame loop
-        let g = termpaper::gpu::Gpu::new(1, 1, 1);
-        if g.is_none() {
-            eprintln!("termpaper: --gpu requested but no usable Vulkan device; staying on the CPU");
-        }
-        g
-    } else {
-        None
+    // The simulation anchor: a local one from the launch settings, replaced
+    // by the group's when there is one (Guard::new reaped dead sessions, so
+    // anchor.json belongs to a living group). Otherwise ours becomes it.
+    let mut st = SimState {
+        cur: anchor_from(&settings, &opts, names[idx], rand::rng().random(), link::epoch_now_ms()),
+        synced: false,
+        next: None,
     };
+    if let Some(g) = &mut guard {
+        match g.latest_anchor(&st.cur) {
+            Some(a) if names.contains(&a.scene.as_str()) => {
+                adopt_settings(&a, &mut settings, &mut opts);
+                idx = names.iter().position(|n| *n == a.scene).unwrap_or(idx);
+                st.cur = a;
+                st.synced = true;
+            }
+            // the group runs a scene this build lacks: show ours locally and
+            // leave the group's anchor alone (as `receive_anchor` does)
+            Some(_) => {}
+            None => {
+                g.publish_anchor(&mut st.cur);
+                st.synced = true;
+            }
+        }
+        g.set_scene(names[idx]);
+    }
+    let mut worker = termpaper::engine::Worker::with_power(settings.renderer, settings.low_power_gpu());
+    let mut rendered: Option<termpaper::engine::Frame> = None;
+    // backend status while no frame is coming (a Studio shader compiling)
+    let mut worker_status: Option<String> = None;
+    // the shared epoch clock and the anchor's slot grid frames are paced on;
+    // also detects a suspend (realtime jumping ahead of the monotonic clock)
+    let mut clock = termpaper::sync::FrameClock::new();
+    // how many slots ahead of display each frame is requested
+    let mut lead = termpaper::sync::Lead::new();
+    // origin of the slot grid the lead's outstanding requests refer to
+    let mut grid_origin = st.cur.t0_ms;
+    // the anchor this pane asked the leader to replace (catch-up too long)
+    let mut reanchor_wanted: Option<link::Stamp> = None;
+    // bumped whenever the wall layout moves this pane's window
+    let mut view_rev = 0u64;
     let mut wall_layout: Option<wall::WallLayout> = None;
     let mut wall_refresh = Instant::now() - Duration::from_secs(10);
-    // compositor geometry arrives from a background thread — spawning
     // hyprctl inside the frame loop stalls the frame it lands on
-    let geo_watcher = if settings.link_enabled || settings.wall_spec.is_some() {
+    let hypr_ok = termpaper::hypr::present() && termpaper::hypr::monitors().is_some();
+    let mut geo_watcher = if hypr_ok && ((settings.link_enabled && settings.wall_enabled) || settings.wall_spec.is_some()) {
         Some(wall::GeoWatcher::spawn())
     } else {
         None
     };
+    // The physical wall plan (Hyprland): one leader computes it for the
+    // whole group from the desk model and every pane adopts it — portrait
+    // and landscape monitors line up in millimetres. The cell-count layout
+    // stays as the fallback everywhere else.
+    let mut planner: Option<termpaper::wallplan::Planner> = None;
+    let mut plan_watcher: Option<termpaper::wallplan::PlanWatcher> = None;
+    let mut calib_watcher: Option<termpaper::calibrate::Watcher> = None;
+    let mut wall_plan: Option<termpaper::wallplan::WallPlan> = None;
+    let mut plan_group = String::new();
+    // resampling buffer for Classic panes whose cells differ from the canvas
+    let mut classic_scratch = termpaper::canvas::Canvas::new(1, 1);
+    // monitors for the calibration pattern, refreshed with the wall
+    let mut calib_monitors: Vec<termpaper::hypr::HyprMonitor> = Vec::new();
+    // this pane drives a calibration opened from the menu
+    let mut calib_ctl: Option<termpaper::calibrate::Controller> = None;
 
-    // one registry snapshot shared by the heartbeat, wall layout, and menu.
+    // one registry snapshot shared by the leader duties, wall layout, and menu.
     // Scanning the registry means readdir + a /proc stat per entry + a file
     // read per peer — doing that every frame with the menu open was the
     // hottest path in the whole loop with many instances up.
@@ -612,49 +2153,813 @@ fn run(
 
     let launch = Instant::now();
     let mut last_switch = Instant::now();
-    let mut last_frame = Instant::now();
-    // un-simulated wall time carried forward (see `plan_steps`)
-    let mut sim_debt = 0.0f32;
-    let mut last_heartbeat = Instant::now();
-    // cached "HH:MM" for the clock overlay (refreshed at most every 10s)
+    // the clock's text and the local time, refreshed once a second (night
+    // dimming and Follow the clock read it too)
     let mut clock_text = String::new();
     let mut clock_stamp = Instant::now() - Duration::from_secs(60);
+    let mut local_now = termpaper::platform::local_time();
+    // when the scene last changed on screen (the scene-name caption)
+    let mut caption_at: Option<Instant> = None;
+    // Adapt FPS, and the performance readout
+    let mut adapter = termpaper::pace::FpsAdapter::new(Instant::now());
+    let mut hud = Hud::default();
+    // Follow the clock: the variant last chosen, for which scene
+    let mut tod_last: Option<(usize, &'static str)> = None;
+    let mut tod_check = Instant::now() - Duration::from_secs(60);
+    // unfocused with Pause: when the hold began
+    let mut held_since: Option<Instant> = None;
+    // Light output on Classic scenes: the cells last sent
+    let mut sent_cells: Vec<ratatui::buffer::Cell> = Vec::new();
+    let power = termpaper::platform::PowerWatcher::spawn();
+    let mut mouse_on = settings.display.mouse;
+    // the terminal check, and the welcome a fresh install opens with (not
+    // in screensaver mode, and not on a pane joining panes already up)
+    let mut check = termpaper::check::Check::default();
+    let mut check_from_menu = false;
+    // what the check found, said once the menu is back
+    let mut check_notice: Option<String> = None;
+    let mut welcome = termpaper::check::Welcome::default();
+    if settings.first_run && !settings.screensaver && link::list_instances_in_group(&settings.link_group).len() <= 1 {
+        welcome.open();
+    }
 
     loop {
         let now = Instant::now();
-        let wall_dt = (now - last_frame).as_secs_f32();
-        // transition fades are cosmetic: clamp and never carry a remainder
-        let raw_dt = wall_dt.min(MAX_STEP);
-        last_frame = now;
 
-        // Scene time is owed against the wall clock. Linked instances agree on
-        // a scene only because each simulates `now - t0` worth of time, so any
-        // time the per-step clamp drops has to be carried forward rather than
-        // discarded — otherwise every frame that overruns MAX_STEP leaves this
-        // pane permanently behind its peers, and the 15s heartbeat won't repair
-        // it (peers already holding this (seed, t0) skip the rebuild).
-        let (step_dt, n_steps) = if paused {
-            // frozen: accrue nothing and spend nothing, but still redraw. Note
-            // debt left over from a hitch must not be drained here either, or
-            // the scene would keep creeping forward while paused.
-            ([0.0f32; MAX_CATCHUP], 1)
-        } else {
-            sim_debt = (sim_debt + wall_dt).min(MAX_DEBT);
-            plan_steps(&mut sim_debt, settings.speed)
-        };
-        let fps_target = match settings.idle_fps {
-            Some(idle) if !focused => settings.fps.min(idle),
-            _ => settings.fps,
-        };
-        let frame_dur = Duration::from_secs_f64(1.0 / fps_target as f64);
+        // System suspend: the realtime clock ran on while the monotonic one
+        // stood still. Move t0 forward by the gap so the scene resumes where
+        // it stopped instead of replaying the whole sleep. The leader
+        // publishes the retime; the others apply the same shift locally
+        // right away and then adopt the leader's (a retime: no rebuild).
+        {
+            let jump = clock.resync(now, termpaper::sync::epoch_now_ms_f64()) as i64;
+            // (a clock stepped backwards is the mirror case: without the
+            // shift a Classic scene would hold still until it caught up)
+            if jump.abs() > SUSPEND_JUMP_MS && !st.target().paused() {
+                let mut a = st.target().clone();
+                a.t0_ms = a.t0_ms.saturating_add_signed(jump);
+                if let (true, Some(g)) = (st.target_synced() && is_leader(&peers.list, true), guard.as_mut()) {
+                    g.publish_anchor(&mut a);
+                }
+                st.retime(&a, &mut transition, &names);
+            }
+        }
 
-        // scene cycling
+        // the gallery answered: the shelf (`g`), or a theme from a pasted link
+        #[cfg(feature = "net")]
+        while let Ok(reply) = gallery_rx.try_recv() {
+            match reply {
+                GalleryReply::List(Ok(list)) => {
+                    gallery_busy = false;
+                    let n = list.len();
+                    settings.gallery = list;
+                    settings.theme_rows = theme_rows(&settings.themes, &settings.gallery);
+                    if let Some((id, _)) = settings.gallery.first() {
+                        menu.focus_theme(&format!("{}{id}", menu::themes::GALLERY_PREFIX), &settings.theme_rows);
+                    }
+                    menu.flash(match n {
+                        0 => "Nothing shared in the gallery yet".to_string(),
+                        n => format!("{n} themes from the gallery · Enter installs one"),
+                    });
+                }
+                GalleryReply::List(Err(e)) => {
+                    gallery_busy = false;
+                    menu.flash(e);
+                }
+                GalleryReply::One(Ok((id, theme))) => {
+                    if !settings.gallery.iter().any(|(i, _)| *i == id) {
+                        settings.gallery.push((id.clone(), theme));
+                    }
+                    settings.theme_rows = theme_rows(&settings.themes, &settings.gallery);
+                    pending_fx.push(Effect::ApplyTheme(format!("{}{id}", menu::themes::GALLERY_PREFIX)));
+                }
+                GalleryReply::One(Err(e)) => menu.flash(e),
+            }
+        }
+
+        // menu: fire the preview timer, then apply what the menu asked for.
+        // Sim settings (theme, detail, pixels, speed, text size) only need
+        // setting: `sync_sim` publishes the difference as a synced switch.
+        if menu.open {
+            let fx = if menu.page == menu::Page::Themes {
+                let ctx = menu_ctx(&settings, &opts, names[idx], String::new(), String::new(), Vec::new());
+                menu.tick_with(now, &ctx)
+            } else {
+                menu.tick(now)
+            };
+            pending_fx.extend(fx);
+        }
+        let mut effects: VecDeque<Effect> = std::mem::take(&mut pending_fx).into();
+        // a page reset is one undo step: the changes it queues take none
+        let mut resetting = false;
+        while let Some(fx) = effects.pop_front() {
+            // one undo step per change, or per burst of the same change (a
+            // held arrow key sweeping a slider undoes in one go)
+            if fx.undoable() && !resetting {
+                let kind = std::mem::discriminant(&fx);
+                let fresh = undo_last.is_none_or(|(k, at)| k != kind || now.saturating_duration_since(at) > UNDO_BURST);
+                if fresh {
+                    undo.push(Snapshot::take(&settings, &opts));
+                    if undo.len() > UNDO_DEPTH {
+                        undo.remove(0);
+                    }
+                }
+                undo_last = Some((kind, now));
+            }
+            match fx {
+                Effect::SwitchScene(name) => {
+                    let Some(i) = names.iter().position(|n| *n == name) else {
+                        continue;
+                    };
+                    menu::browser::push_recent(&mut settings.cfg.recents, name);
+                    save.mark(now);
+                    let kept = preview.take().is_some() && st.next.is_none() && st.cur.scene == name;
+                    if kept {
+                        // the preview becomes the real scene as it is: its
+                        // local anchor turns into the group's, so nothing
+                        // restarts here or on the peers
+                        if let Some(g) = &mut guard {
+                            g.publish_anchor(&mut st.cur);
+                            st.synced = true;
+                        }
+                    } else {
+                        switch_scene(i, &mut st, &mut guard, &mut transition, &names, &settings, &mut opts);
+                    }
+                    last_switch = now;
+                }
+                Effect::Preview(name) => {
+                    let Some(i) = names.iter().position(|n| *n == name) else {
+                        continue;
+                    };
+                    let p = preview.get_or_insert_with(|| PreviewOrigin {
+                        idx,
+                        theme: opts.theme.clone(),
+                        anchor: st.target().clone(),
+                        synced: st.target_synced(),
+                        showing: idx,
+                    });
+                    p.showing = i;
+                    // local only: nothing published; the previewed scene
+                    // shows with its remembered theme
+                    let mut o = opts.clone();
+                    o.theme = settings.cfg.themes.get(names[i]).cloned().or_else(|| settings.theme.clone());
+                    let a = anchor_from(&settings, &o, names[i], rand::rng().random(), 0);
+                    opts.theme = o.theme;
+                    begin_switch(&mut st, &mut guard, &mut transition, &names, a, false);
+                    last_switch = now;
+                }
+                Effect::EndPreview => {
+                    if let Some(p) = preview.take() {
+                        // restore only if the preview is still what runs —
+                        // a peer's switch meanwhile wins
+                        if st.target().scene == names[p.showing] && !st.target_synced() {
+                            if p.synced && guard.is_some() {
+                                // back to whatever the group runs now
+                                join_group(&mut st, &mut guard, &mut transition, &names, &mut settings, &mut opts);
+                            } else {
+                                opts.theme = p.anchor.theme.clone();
+                                begin_switch(&mut st, &mut guard, &mut transition, &names, p.anchor, false);
+                            }
+                            last_switch = now;
+                        }
+                    }
+                }
+                Effect::SetSceneTheme { scene, theme } => {
+                    settings.cfg.themes.insert(scene.to_string(), theme.clone());
+                    save.mark(now);
+                    if let Some(p) = &mut preview {
+                        if names[p.idx] == scene {
+                            p.theme = Some(theme.clone());
+                            p.anchor.theme = Some(theme.clone());
+                        }
+                    }
+                    if scene == st.target().scene {
+                        if preview.is_some() {
+                            // a previewed scene re-themes locally
+                            let mut a = st.target().clone();
+                            a.theme = Some(theme);
+                            opts.theme = a.theme.clone();
+                            begin_switch(&mut st, &mut guard, &mut transition, &names, a, false);
+                        } else {
+                            effects.push_front(Effect::SetTheme(Some(theme)));
+                        }
+                    }
+                }
+                Effect::ToggleFavorite(name) => {
+                    menu::browser::toggle_favorite(&mut settings.cfg.favorites, name);
+                    save.mark(now);
+                }
+                Effect::SetPixels(p) => {
+                    settings.pixels = p;
+                    save.mark(now);
+                }
+                Effect::SetDetail(d) => {
+                    opts.detail = d;
+                    save.mark(now);
+                }
+                Effect::SetTheme(t) => {
+                    opts.theme = t;
+                    save.mark(now);
+                }
+                Effect::SetTextScale(ts) => {
+                    settings.text_scale = ts;
+                    opts.text_scale = ts;
+                    save.mark(now);
+                }
+                Effect::SetSpeed(sp) => {
+                    settings.speed = sp;
+                    save.mark(now);
+                }
+                Effect::SetFps(fps) => {
+                    settings.fps = fps;
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetSmooth(sm) => {
+                    settings.smooth = sm;
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetDim(d) => {
+                    settings.dim = d;
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetFade(fd) => {
+                    settings.fade = fd;
+                    transition.set_fade_secs(fd);
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetClock(c) => {
+                    settings.clock = c;
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetCycle(c) => {
+                    // local-only: rotations don't propagate
+                    settings.cycle = c;
+                    last_switch = now;
+                    save.mark(now);
+                }
+                Effect::SetCycleScope(s) => {
+                    settings.cycle_scope = s;
+                    save.mark(now);
+                }
+                Effect::SetRenderer(r) => {
+                    // a fresh worker picks the backend; the old one winds
+                    // down on its own when dropped
+                    settings.renderer = r;
+                    worker = termpaper::engine::Worker::with_power(r, settings.low_power_gpu());
+                    rendered = None;
+                    worker_status = None;
+                    save.mark(now);
+                }
+                Effect::SetLink(on) => {
+                    settings.link_enabled = on;
+                    reset_link_guard(&mut guard, on, &settings.link_group, names[idx], settings.pad);
+                    join_group(&mut st, &mut guard, &mut transition, &names, &mut settings, &mut opts);
+                    if !on && settings.wall_spec.is_none() {
+                        // the wall refresh stops with linking: drop the crop now
+                        wall_layout = None;
+                    }
+                    save.mark(now);
+                }
+                Effect::SetLinkGroup(g) => {
+                    settings.link_group = g;
+                    reset_link_guard(&mut guard, settings.link_enabled, &settings.link_group, names[idx], settings.pad);
+                    join_group(&mut st, &mut guard, &mut transition, &names, &mut settings, &mut opts);
+                    save.mark(now);
+                }
+                Effect::SetWallPrefs(w) => {
+                    let old = wall_prefs(&settings);
+                    // the layout: automatic, a grid of your own, or off
+                    if (w.mode, w.grid) != (old.mode, old.grid) {
+                        settings.wall_enabled = w.mode != termpaper::prefs::WallMode::Off;
+                        settings.wall_spec = (w.mode == termpaper::prefs::WallMode::Grid).then(|| w.grid_spec());
+                        if settings.wall_enabled && hypr_ok && geo_watcher.is_none() {
+                            geo_watcher = Some(wall::GeoWatcher::spawn());
+                        }
+                        wall_layout = None;
+                        view_rev += 1;
+                    }
+                    if w.pad != old.pad || w.placement != old.placement {
+                        settings.pad = (w.pad, w.pad);
+                        settings.placement = w.placement;
+                    }
+                    if (w.bezel_mm - old.bezel_mm).abs() > 1e-4 {
+                        // the desk file: the wall's planner reads it on its next pass
+                        let mut desk = termpaper::desk::load_desk();
+                        desk.bezel_mm = w.bezel_mm as f64;
+                        match termpaper::desk::save_desk(&desk) {
+                            Ok(()) => settings.bezel_mm = w.bezel_mm,
+                            Err(e) => menu.flash(format!("Could not save the desk: {e}")),
+                        }
+                    }
+                    settings.sync_look = w.sync_look;
+                    // re-lay the wall (and republish geometry) next frame
+                    wall_refresh = Instant::now() - Duration::from_secs(10);
+                    save.mark(now);
+                }
+                Effect::PauseWall => {
+                    // as the pause key: a retime anchor freezes or resumes
+                    // the shared clock
+                    let now_ms = link::epoch_now_ms();
+                    let mut a = st.target().clone();
+                    if a.paused() { a.resume(now_ms) } else { a.pause(now_ms) }
+                    if let (true, Some(g)) = (st.target_synced(), guard.as_mut()) {
+                        g.publish_anchor(&mut a);
+                    }
+                    st.retime(&a, &mut transition, &names);
+                }
+                Effect::WallUp => match termpaper::hypr::monitors().filter(|_| settings.hypr) {
+                    None => menu.flash("Start wall needs Hyprland"),
+                    Some(mons) => {
+                        let desk = termpaper::desk::Desk::from_hypr(&mons, &termpaper::desk::load_desk());
+                        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "termpaper".into());
+                        let plans = termpaper::launch::plan_wall_up(&desk, &exe, 11.0, None, &settings.link_group, &[], &[]);
+                        match termpaper::launch::run_wall_up(&plans, false) {
+                            Ok(started) if started.is_empty() => menu.flash("Every monitor has a pane already"),
+                            Ok(started) => menu.flash(format!("Started {} wall terminal(s) in group {}", started.len(), settings.link_group)),
+                            Err(e) => menu.flash(format!("Could not start the wall: {e}")),
+                        }
+                    }
+                },
+                Effect::WallDown => match termpaper::launch::wall_down() {
+                    Ok(n) => menu.flash(format!("Closed {n} wall terminal(s)")),
+                    Err(e) => menu.flash(format!("Could not stop the wall: {e}")),
+                },
+                Effect::SetLook(l) => {
+                    // an edit made over a preview keeps what it was made on
+                    settings.look_preview = None;
+                    // back to neutral (Reset look) leaves no theme in use,
+                    // unless the theme is the neutral one
+                    let theme_neutral = settings.look_theme.as_deref().and_then(|s| settings.themes.get(s)).map(|e| e.theme.look.is_neutral());
+                    if l.is_neutral() && theme_neutral == Some(false) {
+                        settings.look_theme = None;
+                    }
+                    settings.look.set(l);
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetPlayback(p) => {
+                    let wall_wide = p.transition != settings.playback.transition;
+                    settings.playback = p;
+                    if wall_wide {
+                        if let Some(g) = &mut guard {
+                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                        }
+                    }
+                    // Follow the clock looks again right away
+                    tod_last = None;
+                    tod_check = now - Duration::from_secs(60);
+                    save.mark(now);
+                }
+                Effect::SetDisplay(mut d) => {
+                    d.sanitize();
+                    let old = std::mem::replace(&mut settings.display, d);
+                    let d = settings.display.clone();
+                    settings.truecolor = Settings::truecolor_for(d.colors, settings.term_truecolor, settings.cli_no_truecolor);
+                    if d.mouse != mouse_on {
+                        mouse_on = d.mouse;
+                        let _ = if mouse_on {
+                            crossterm::execute!(terminal.backend_mut(), event::EnableMouseCapture)
+                        } else {
+                            crossterm::execute!(terminal.backend_mut(), event::DisableMouseCapture)
+                        };
+                    }
+                    if !d.adapt_fps {
+                        adapter.reset(now);
+                        settings.fps_cap = None;
+                    }
+                    // a different GPU needs a fresh worker (the old one
+                    // winds down when dropped)
+                    if d.gpu != old.gpu && settings.renderer != termpaper::engine::Renderer::Cpu {
+                        worker = termpaper::engine::Worker::with_power(settings.renderer, settings.low_power_gpu());
+                        rendered = None;
+                        worker_status = None;
+                    }
+                    if d.clock_format != old.clock_format {
+                        clock_text = termpaper::overlay::clock_text(&local_now, d.clock_format);
+                    }
+                    if d.hud != old.hud {
+                        hud = Hud::default();
+                    }
+                    // what a wall shows alike goes to the group
+                    let mut probe = old.clone();
+                    probe.adopt_shared(&d);
+                    if probe != old {
+                        if let Some(g) = &mut guard {
+                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                        }
+                    }
+                    save.mark(now);
+                }
+                Effect::OpenTerminalCheck => {
+                    pending_fx.extend(menu.close());
+                    check.open();
+                    check_from_menu = true;
+                }
+                Effect::OpenMenuAt(page) => {
+                    let ctx = menu_ctx(&settings, &opts, names[idx], String::new(), String::new(), Vec::new());
+                    menu.open(&ctx);
+                    effects.extend(menu.goto(page));
+                    if let Some(n) = check_notice.take() {
+                        menu.flash(n);
+                    }
+                }
+                Effect::Onboarded => {
+                    settings.cfg.onboarded = Some(true);
+                    save.mark(now);
+                }
+                Effect::OpenColorGrade => studio.open_on(studio::Tab::Colour),
+                Effect::OpenPalette => studio.open_on(studio::Tab::Palette),
+                Effect::Undo => {
+                    match undo.pop() {
+                        Some(snap) => {
+                            let renderer_before = settings.renderer;
+                            snap.restore(&mut settings, &mut opts, &mut transition);
+                            if settings.renderer != renderer_before {
+                                worker = termpaper::engine::Worker::with_power(settings.renderer, settings.low_power_gpu());
+                                rendered = None;
+                                worker_status = None;
+                            }
+                            if let Some(g) = &mut guard {
+                                g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                            }
+                            save.mark(now);
+                            menu.flash("Undone");
+                        }
+                        None => menu.flash("Nothing to undo"),
+                    }
+                    undo_last = None;
+                }
+                Effect::ApplyTheme(slug) if menu::themes::is_gallery(&slug) => {
+                    let Some(theme) = gallery_theme(&settings, &slug).cloned() else {
+                        menu.flash("That theme is gone");
+                        continue;
+                    };
+                    // installed once: picking it again wears the copy you have
+                    let code = theme.to_code();
+                    let have = settings
+                        .themes
+                        .entries
+                        .iter()
+                        .find(|e| e.source == termpaper::theme::Source::User && e.theme.to_code() == code)
+                        .map(|e| e.slug.clone());
+                    let fresh = have.is_none();
+                    let real = match have {
+                        Some(s) => s,
+                        None => match settings.themes.save_new(&theme) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                menu.flash(format!("Could not install it: {e}"));
+                                continue;
+                            }
+                        },
+                    };
+                    if fresh {
+                        #[cfg(feature = "net")]
+                        gallery_count(
+                            termpaper::gallery::base_url(settings.cfg.gallery_url.as_deref()),
+                            slug[menu::themes::GALLERY_PREFIX.len()..].to_string(),
+                        );
+                        settings.theme_rows = theme_rows(&settings.themes, &settings.gallery);
+                        // Yours grew a row: stay on the one picked
+                        menu.focus_theme(&slug, &settings.theme_rows);
+                    }
+                    apply_theme(&real, &mut settings);
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                    let by = if theme.author.trim().is_empty() { String::new() } else { format!(" by {}", theme.author.trim()) };
+                    let hint = if theme.scene.is_some() { " · s: its scene" } else { "" };
+                    menu.flash(if fresh {
+                        format!("Installed “{}”{by}: now under Yours{hint}", theme.name)
+                    } else {
+                        format!("Theme: {}{hint}", theme.name)
+                    });
+                }
+                Effect::ApplyTheme(slug) => match apply_theme(&slug, &mut settings) {
+                    Some(t) => {
+                        if let Some(g) = &mut guard {
+                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                        }
+                        save.mark(now);
+                        let hint = if t.scene.is_some() && menu.page == menu::Page::Themes { " · s: its scene" } else { "" };
+                        menu.flash(format!("Theme: {}{hint}", t.name));
+                    }
+                    None => menu.flash("That theme is gone"),
+                },
+                Effect::PreviewLook(l) => {
+                    if settings.look_preview.is_none() {
+                        settings.look_preview = Some((settings.look.clone(), settings.look_theme.clone()));
+                    }
+                    // this pane only: nothing is published or saved
+                    settings.look.set(l);
+                }
+                Effect::EndLookPreview => {
+                    if let Some((orig, theme)) = settings.look_preview.take() {
+                        settings.look = orig;
+                        settings.look_theme = theme;
+                    }
+                }
+                Effect::SaveTheme(name) => {
+                    let look = settings.look_preview.as_ref().map_or(settings.look.get(), |(o, _)| o.get()).clone();
+                    let scene_name = names[idx];
+                    let variant = opts.theme.clone();
+                    let t = termpaper::theme::Theme {
+                        name: name.clone(),
+                        author: theme_author(),
+                        description: format!("Made in termpaper on {}.", scene::lookup(scene_name).map_or(scene_name, |e| e.title())),
+                        tags: vec!["custom".into()],
+                        look,
+                        scene: Some(termpaper::theme::SceneHint { name: scene_name.to_string(), variant }),
+                        ..Default::default()
+                    };
+                    match settings.themes.save_new(&t) {
+                        Ok(slug) => {
+                            settings.theme_rows = theme_rows(&settings.themes, &settings.gallery);
+                            menu.focus_theme(&slug, &settings.theme_rows);
+                            settings.look_theme = Some(slug);
+                            save.mark(now);
+                            menu.flash(format!("Saved “{name}” · c copies its share code"));
+                        }
+                        Err(e) => menu.flash(format!("Could not save: {e}")),
+                    }
+                }
+                Effect::UpdateTheme(slug) => {
+                    let Some(mut t) = settings.themes.get(&slug).map(|e| e.theme.clone()) else {
+                        continue;
+                    };
+                    t.look = settings.look_preview.as_ref().map_or(settings.look.get(), |(o, _)| o.get()).clone();
+                    match settings.themes.update(&slug, &t) {
+                        Ok(()) => {
+                            settings.look_theme = Some(slug);
+                            settings.theme_rows = theme_rows(&settings.themes, &settings.gallery);
+                            save.mark(now);
+                            menu.flash(format!("Updated “{}”", t.name));
+                        }
+                        Err(e) => menu.flash(format!("Could not update: {e}")),
+                    }
+                }
+                Effect::RenameTheme { slug, name } => match settings.themes.rename(&slug, &name) {
+                    Ok(new) => {
+                        settings.theme_rows = theme_rows(&settings.themes, &settings.gallery);
+                        menu.focus_theme(&new, &settings.theme_rows);
+                        if settings.look_theme.as_deref() == Some(slug.as_str()) {
+                            settings.look_theme = Some(new);
+                            save.mark(now);
+                        }
+                        menu.flash(format!("Renamed to “{name}”"));
+                    }
+                    Err(e) => menu.flash(format!("Could not rename: {e}")),
+                },
+                Effect::DeleteTheme(slug) => match settings.themes.delete(&slug) {
+                    Ok(()) => {
+                        if settings.look_theme.as_deref() == Some(slug.as_str()) {
+                            settings.look_theme = None;
+                            save.mark(now);
+                        }
+                        settings.theme_rows = theme_rows(&settings.themes, &settings.gallery);
+                        menu.flash("Deleted");
+                    }
+                    Err(e) => menu.flash(format!("Could not delete: {e}")),
+                },
+                Effect::ShareTheme(slug) if menu::themes::is_gallery(&slug) => {
+                    if let Some(t) = gallery_theme(&settings, &slug) {
+                        let code = t.to_code();
+                        osc52_copy(&code);
+                        menu.flash(format!("Share code copied ({} chars)", code.len()));
+                    }
+                }
+                Effect::ShareTheme(slug) => {
+                    let Some(e) = settings.themes.get(&slug) else {
+                        continue;
+                    };
+                    let mut t = e.theme.clone();
+                    // the theme in use, edited: share what is on screen
+                    let real = settings.look_preview.as_ref().map_or(settings.look.get(), |(o, _)| o.get());
+                    if settings.look_theme.as_deref() == Some(slug.as_str()) && t.look != *real {
+                        t.look = real.clone();
+                        t.name = format!("{} (edited)", t.name).chars().take(termpaper::theme::MAX_NAME).collect();
+                    }
+                    let code = t.to_code();
+                    osc52_copy(&code);
+                    let saved = termpaper::platform::state_dir().and_then(|d| {
+                        std::fs::create_dir_all(&d).ok()?;
+                        let p = d.join("share-code.txt");
+                        std::fs::write(&p, format!("{code}\n")).ok()?;
+                        Some(p)
+                    });
+                    match saved {
+                        Some(p) => menu.flash(format!(
+                            "Share code copied ({} chars) · also in {}",
+                            code.len(),
+                            termpaper::theme_cli::tidy_path(&p)
+                        )),
+                        None => menu.flash(format!("Share code copied ({} chars)", code.len())),
+                    }
+                }
+                Effect::ImportTheme(text) if text.trim().starts_with("https://") || text.trim().starts_with("http://") => {
+                    #[cfg(feature = "net")]
+                    match termpaper::gallery::target(&text) {
+                        Ok(termpaper::gallery::Target::Id { base, id }) => {
+                            let base = base.unwrap_or_else(|| termpaper::gallery::base_url(settings.cfg.gallery_url.as_deref()));
+                            menu.flash(format!("Fetching it from {}…", termpaper::gallery::host(&base)));
+                            gallery_fetch_one(base, id, gallery_tx.clone());
+                        }
+                        Ok(termpaper::gallery::Target::Code(_)) => {}
+                        Err(e) => menu.flash(e),
+                    }
+                    #[cfg(not(feature = "net"))]
+                    menu.flash("This termpaper was built without the gallery: paste the theme's tp1: code instead");
+                }
+                Effect::ImportTheme(text) => {
+                    let parsed = if text.trim_start().starts_with("tp1:") {
+                        termpaper::theme::Theme::from_code(&text)
+                    } else {
+                        let path = std::path::PathBuf::from(text.trim().trim_matches('"'));
+                        std::fs::read_to_string(&path)
+                            .map_err(|e| format!("{}: {e}", path.display()))
+                            .and_then(|t| termpaper::theme::Theme::from_toml(&t))
+                    };
+                    match parsed {
+                        Ok((theme, warnings)) => match settings.themes.save_new(&theme) {
+                            Ok(slug) => {
+                                settings.theme_rows = theme_rows(&settings.themes, &settings.gallery);
+                                menu.focus_theme(&slug, &settings.theme_rows);
+                                // wearing it is one undo step, like applying
+                                undo.push(Snapshot::take(&settings, &opts));
+                                if undo.len() > UNDO_DEPTH {
+                                    undo.remove(0);
+                                }
+                                undo_last = None;
+                                apply_theme(&slug, &mut settings);
+                                if let Some(g) = &mut guard {
+                                    g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                                }
+                                save.mark(now);
+                                let extra = if warnings.is_empty() { String::new() } else { format!(" ({} fixed up)", warnings.len()) };
+                                let hint = if theme.scene.is_some() { " · s: its scene" } else { "" };
+                                menu.flash(format!("Imported “{}”{extra}{hint}", theme.name));
+                            }
+                            Err(e) => menu.flash(format!("Could not save it: {e}")),
+                        },
+                        Err(e) => menu.flash(e),
+                    }
+                }
+                Effect::ResetPage(page) => {
+                    resetting = true;
+                    let fx = match page {
+                        menu::Page::Playback => vec![
+                            Effect::SetSpeed(config::DEFAULT_SPEED),
+                            Effect::SetCycle(None),
+                            Effect::SetCycleScope(CycleScope::All),
+                            Effect::SetFade(config::DEFAULT_FADE),
+                            Effect::SetPlayback(Default::default()),
+                        ],
+                        menu::Page::Display => {
+                            let mut v = vec![
+                                Effect::SetPixels(platform_default_pixels()),
+                                Effect::SetDetail(platform_default_detail()),
+                                Effect::SetSmooth(config::DEFAULT_SMOOTH),
+                                Effect::SetFps(settings.default_fps),
+                                Effect::SetClock(config::DEFAULT_CLOCK),
+                                Effect::SetDisplay(Default::default()),
+                            ];
+                            // a new renderer means a new worker: only when it changes
+                            if settings.renderer != termpaper::engine::Renderer::Auto {
+                                v.push(Effect::SetRenderer(termpaper::engine::Renderer::Auto));
+                            }
+                            v
+                        }
+                        _ => Vec::new(),
+                    };
+                    for f in fx.into_iter().rev() {
+                        effects.push_front(f);
+                    }
+                    menu.flash("Back to how termpaper starts · u undoes it");
+                }
+                Effect::FetchGallery => {
+                    #[cfg(feature = "net")]
+                    {
+                        let base = termpaper::gallery::base_url(settings.cfg.gallery_url.as_deref());
+                        if gallery_busy {
+                            menu.flash(format!("Still waiting for {}…", termpaper::gallery::host(&base)));
+                        } else {
+                            gallery_busy = true;
+                            menu.flash(format!("Asking {} for its themes…", termpaper::gallery::host(&base)));
+                            gallery_fetch(base, gallery_tx.clone());
+                        }
+                    }
+                    #[cfg(not(feature = "net"))]
+                    menu.flash("This termpaper was built without the gallery");
+                }
+                Effect::SceneFromTheme(slug) => {
+                    let hint = settings
+                        .themes
+                        .get(&slug)
+                        .map(|e| &e.theme)
+                        .or_else(|| gallery_theme(&settings, &slug))
+                        .and_then(|t| t.scene.clone());
+                    let Some(hint) = hint else {
+                        continue;
+                    };
+                    let Some(i) = names.iter().position(|n| *n == hint.name) else {
+                        continue;
+                    };
+                    if let Some(v) = &hint.variant {
+                        settings.cfg.themes.insert(hint.name.clone(), v.clone());
+                    }
+                    menu::browser::push_recent(&mut settings.cfg.recents, names[i]);
+                    switch_scene(i, &mut st, &mut guard, &mut transition, &names, &settings, &mut opts);
+                    last_switch = now;
+                    save.mark(now);
+                }
+                // placeholder until the alignment tool lands
+                Effect::OpenCalibration => {
+                    // check first: starting a controller publishes the
+                    // pattern to the whole group
+                    if !settings.link_enabled {
+                        menu.flash("Align monitors: turn Link on first");
+                    } else {
+                        let ctl = link::group_dir(&settings.link_group).and_then(|d| {
+                            let _ = std::fs::create_dir_all(&d);
+                            termpaper::calibrate::Controller::start(d)
+                        });
+                        match ctl {
+                            Some(c) => {
+                                calib_ctl = Some(c);
+                                menu.close();
+                            }
+                            None => menu.flash("Align monitors needs Hyprland"),
+                        }
+                    }
+                }
+            }
+        }
+        // config writes coalesce while the menu or wheel is up; otherwise
+        // (including right after either closes) they go out immediately
+        let write = if menu.open || studio.open { save.due(now) } else { save.take() };
+        if write {
+            let (scene_name, theme) = remembered_scene(&preview, &names, idx, &opts);
+            persist(&mut settings, scene_name, theme, opts.detail);
+        }
+
+        // scene cycling (local: rotations don't propagate)
         if let Some(secs) = settings.cycle {
-            if now.duration_since(last_switch).as_secs_f64() >= secs {
-                sync_params = None; // local cycle: no shared seed
-                cur_sync = None;
-                transition.request((idx + 1) % names.len());
+            if preview.is_none() && now.duration_since(last_switch).as_secs_f64() >= secs {
+                let pick: u64 = rand::rng().random();
+                let mut o = opts.clone();
+                let next = if settings.cycle_scope == CycleScope::Variants {
+                    // the scene stays; its variants take turns
+                    menu::browser::cycle_variant(scene::themes(names[idx]), opts.theme.as_deref(), settings.playback.order, pick).map(|v| {
+                        o.theme = Some(v.to_string());
+                        idx
+                    })
+                } else {
+                    let i = menu::browser::cycle_next(&names, idx, settings.cycle_scope, &settings.cfg.favorites, settings.playback.order, pick);
+                    o.theme = settings.cfg.themes.get(names[i]).cloned().or_else(|| settings.theme.clone());
+                    (i != idx).then_some(i)
+                };
+                if let Some(i) = next {
+                    let a = anchor_from(&settings, &o, names[i], rand::rng().random(), 0);
+                    opts.theme = o.theme;
+                    begin_switch(&mut st, &mut guard, &mut transition, &names, a, false);
+                }
                 last_switch = now;
+            }
+        }
+
+        // Follow the clock: the variant named for this time of day, chosen
+        // by whoever leads the group (a pane alone chooses for itself). It
+        // moves only when the hour's variant changes, so one picked by hand
+        // stays until the next change of time.
+        if settings.playback.time_of_day && preview.is_none() && tod_check.elapsed() >= Duration::from_secs(5) {
+            tod_check = now;
+            let leads = guard.is_none() || !st.synced || is_leader(&peers.list, st.synced);
+            if let Some(v) = termpaper::prefs::variant_for_hour(scene::themes(names[idx]), local_now.hour) {
+                if leads && tod_last != Some((idx, v)) {
+                    tod_last = Some((idx, v));
+                    if opts.theme.as_deref() != Some(v) {
+                        opts.theme = Some(v.to_string());
+                        save.mark(now);
+                    }
+                }
             }
         }
 
@@ -666,12 +2971,15 @@ fn run(
                 peers.fetched = Instant::now();
                 peers.group = settings.link_group.clone();
                 peers.list = link::list_instances_in_group(&settings.link_group);
+                // the lowest pid running the group's anchor leads
+                let leader = peers.list.iter().filter(|i| i.synced).map(|i| i.pid).min();
                 peers.menu_lines = peers
                     .list
                     .iter()
                     .map(|i| {
                         format!(
-                            "pid {:<8} {:<12} up {}s{}",
+                            "{}pid {:<8} {:<12} up {}s{}",
+                            if Some(i.pid) == leader { "★ " } else { "  " },
                             i.pid,
                             i.scene,
                             link::uptime_secs(i.started_at),
@@ -682,31 +2990,18 @@ fn run(
             }
         }
 
-        // sync heartbeat: the lowest-pid live instance re-publishes the
-        // current scene with its ORIGINAL (seed, t0) every 15s — late
-        // joiners adopt it and drifted peers re-align, while in-sync
-        // receivers skip the identical control without a visible restart
+        // instance linking: a stat per channel per frame; a file is only
+        // read and parsed when a publish replaced it
         if let Some(g) = &mut guard {
-            if now.duration_since(last_heartbeat).as_secs() >= 15 {
-                last_heartbeat = now;
-                if let Some((seed, t0)) = cur_sync {
-                    let leader = peers
-                        .list
-                        .iter()
-                        .map(|i| i.pid)
-                        .min()
-                        .map(|m| m == std::process::id())
-                        .unwrap_or(false);
-                    if leader {
-                        g.publish(names[idx], opts.theme.as_deref(), seed, t0);
-                    }
-                }
+            g.heartbeat();
+            if let Some(a) = g.poll_anchor() {
+                receive_anchor(&mut st, a, &mut transition, &names, &mut settings, &mut opts);
+                last_switch = Instant::now();
             }
-        }
-
-        // instance linking: control channel poll — a stat per frame; the
-        // file is only read+parsed when a publish replaced it
-        if let Some(g) = &mut guard {
+            if let Some(m) = g.poll_settings() {
+                apply_appearance(m, &mut settings, &mut transition, &mut quick_filter);
+            }
+            // an older binary in the group speaks through control.json
             if let Some(ctrl) = g.poll_control(control_stamp) {
                 control_stamp = link::Stamp {
                     epoch: ctrl.epoch,
@@ -715,116 +3010,67 @@ fn run(
                 };
                 match ctrl.kind {
                     link::ControlKind::Scene => {
-                        if let Some(i) = names.iter().position(|n| *n == ctrl.scene) {
-                            // identical re-publish (heartbeat/duplicate) —
-                            // already running this exact sim, skip silently
-                            let identical = i == idx && cur_sync == Some((ctrl.seed, ctrl.t0_ms));
-                            if !identical {
-                                if let Some(t) = &ctrl.theme {
-                                    opts.theme = Some(t.clone());
-                                }
-                                sync_params = Some((ctrl.seed, ctrl.t0_ms));
-                                transition.request(i);
-                                last_switch = Instant::now();
-                            }
-                        }
+                        let a = link::Anchor::from_legacy(&ctrl, st.target());
+                        receive_anchor(&mut st, a, &mut transition, &names, &mut settings, &mut opts);
+                        last_switch = Instant::now();
                     }
                     link::ControlKind::Settings => {
-                        // session-only apply: never persisted to config
                         if let Some(m) = ctrl.settings {
-                            if let Some(p) = render::Pixels::parse(&m.pixels) {
-                                settings.pixels = p;
-                            }
-                            settings.filters = m.filters;
-                            settings.speed = m.speed;
-                            settings.fps = m.fps;
-                            settings.smooth = m.smooth;
-                            settings.dim = m.dim;
-                            settings.fade = m.fade;
-                            settings.clock = m.clock;
-                            transition.set_fade_secs(m.fade);
-                            quick_filter = m.quick;
-                            settings.hue_shift = m.hue_shift;
-                            settings.saturation = m.saturation;
-                            settings.contrast = m.contrast;
-                            let mut recreate = false;
-                            if let Some(d) = scene::Detail::parse(&m.detail) {
-                                if d != opts.detail {
-                                    opts.detail = d;
-                                    recreate = true;
-                                }
-                            }
-                            if m.theme != opts.theme {
-                                opts.theme = m.theme;
-                                recreate = true;
-                            }
-                            if m.text_scale != settings.text_scale {
-                                settings.text_scale = m.text_scale;
-                                opts.text_scale = m.text_scale;
-                                recreate = true;
-                            }
-                            if recreate {
-                                transition.request(idx);
-                                sync_params = None;
-                            }
+                            apply_appearance(m, &mut settings, &mut transition, &mut quick_filter);
                         }
                     }
                 }
             }
         }
-
-        // transition: fade out → swap → fade in
-        let (fade, swap) = transition.tick(raw_dt);
-        if let Some(i) = swap {
-            idx = i % names.len();
-            opts.theme = settings
-                .cfg
-                .themes
-                .get(names[idx])
-                .cloned()
-                .or_else(|| settings.theme.clone());
-            // artwork sync: linked switches carry (seed, t0) so every
-            // instance builds the identical simulation
-            let sp = sync_params.take();
-            cur_sync = sp;
-            let rng = match sp {
-                Some((seed, _)) => StdRng::seed_from_u64(seed),
-                None => entropy_rng(),
-            };
-            current = scene::create(names[idx], &opts, rng).expect("registry");
-            ff_remaining = match sp {
-                Some((_, t0)) => {
-                    // fast-forward to the publisher's sim time — but spread
-                    // across frames (see below) instead of freezing this one.
-                    // Cap at 30s of sim: beyond that "approximately synced"
-                    // is indistinguishable for generative art, and peers
-                    // holding the same (seed, t0) skip rebuilds anyway.
-                    let elapsed_ms = link::epoch_now_ms().saturating_sub(t0);
-                    ff_scratch.resize(canvas.width().max(1), canvas.height().max(1));
-                    ((elapsed_ms as f32 / (1000.0 / 60.0)) as usize).min(FF_MAX_STEPS)
-                }
-                None => 0,
-            };
-            if let Some(g) = &mut guard {
-                g.set_scene(names[idx]);
-            }
-            last_switch = now;
+        // local edits to sim settings become a new anchor
+        // a preview is local: its settings must not go out as a switch
+        if preview.is_none() {
+            sync_sim(&mut st, &mut guard, &mut transition, &names, &settings, &opts);
         }
 
-        // spend any owed fast-forward: the scene animates (fast) through
-        // the fade-in and converges within ~20 frames instead of freezing
-        // for up to 200ms at the darkest point of the transition
-        if ff_remaining > 0 {
-            let ff_start = Instant::now();
-            let mut spent = 0usize;
-            while ff_remaining > 0
-                && spent < FF_STEPS_PER_FRAME
-                && ff_start.elapsed() < FF_FRAME_BUDGET
-            {
-                current.update(1.0 / 60.0, &mut ff_scratch);
-                ff_remaining -= 1;
-                spent += 1;
+        // Frame slots: this frame is presented at `slot` of the anchor's
+        // grid (t0 + n·period, the same on every pane) and requests the
+        // frame for `slot + lead`, so what the terminal shows at a slot was
+        // rendered for that slot.
+        let mut period = frame_period_ms(&settings, focused, &st.cur.scene);
+        let mut slot = clock.slot_at(now, st.cur.t0_ms, period);
+        let mut target = slot + lead.lead() as i64;
+
+        // transition: fade out → swap → fade in, on the shared epoch clock,
+        // evaluated for the moment the requested frame will be on screen
+        let shown_at = termpaper::sync::FrameClock::slot_epoch(st.cur.t0_ms, period, target) as u64;
+        let (fade, swap) = transition.tick_at(shown_at);
+        if swap.is_some() {
+            if let Some((a, synced)) = st.next.take() {
+                st.cur = a;
+                st.synced = synced;
             }
+            idx = names.iter().position(|n| *n == st.cur.scene).unwrap_or(idx);
+            reanchor_wanted = None;
+            caption_at = Some(now);
+            if let Some(g) = &mut guard {
+                g.set_scene(names[idx]);
+                g.set_synced(st.synced);
+                g.set_reanchor(None);
+            }
+            last_switch = now;
+            period = frame_period_ms(&settings, focused, &st.cur.scene);
+            slot = clock.slot_at(now, st.cur.t0_ms, period);
+            target = slot + lead.lead() as i64;
+        }
+        if st.cur.t0_ms != grid_origin {
+            // new grid: outstanding requests no longer map onto it
+            grid_origin = st.cur.t0_ms;
+            lead.reset();
+        }
+
+        // the terminal's true cell size, re-measured whenever the grid
+        // changes (and with every wall refresh: the monitor scale may have)
+        let term = terminal.size()?;
+        if (term.width as usize, term.height as usize) != cell_grid {
+            cell_grid = (term.width as usize, term.height as usize);
+            cell_px = measure_cell_px(geo_watcher.as_ref());
+            wall_refresh = Instant::now() - Duration::from_secs(10);
         }
 
         // video wall: refresh layout every 2s from registry geometry
@@ -832,17 +3078,27 @@ fn run(
             && wall_refresh.elapsed() > Duration::from_secs(2)
         {
             wall_refresh = Instant::now();
-            let (cols, rows) = (terminal.size()?.width as usize, terminal.size()?.height as usize);
-            let geo = geo_watcher.as_ref().and_then(|w| w.latest());
+            let (cols, rows) = cell_grid;
+            cell_px = measure_cell_px(geo_watcher.as_ref());
+            // a --no-wall pane publishes no geometry, so peers never fold it
+            // into their wall either
+            let geo = geo_watcher
+                .as_ref()
+                .filter(|_| settings.wall_enabled)
+                .and_then(|w| w.latest());
             if let Some(g) = &mut guard {
                 g.set_geometry(cols, rows, geo.map(|g| (g.x, g.y, g.w, g.h)));
+                g.set_layout(settings.pad, settings.placement, cell_px);
             }
+            let old_layout = wall_layout;
             wall_layout = if let Some(spec) = &settings.wall_spec {
                 wall::manual_layout(spec, cols, rows)
-            } else if settings.link_enabled {
+            } else if settings.link_enabled && settings.wall_enabled {
+                let me = std::process::id();
                 let mut parts: Vec<wall::Participant> = peers
                     .list
                     .iter()
+                    .filter(|i| i.pid != me)
                     .filter_map(|i| {
                         i.geo.map(|(x, y, w, h)| wall::Participant {
                             pid: i.pid,
@@ -850,22 +3106,25 @@ fn run(
                             cols: i.cols.max(1),
                             rows: i.rows.max(1),
                             pad: i.pad,
+                            cell: i.cell,
+                            placement: i.placement,
                         })
                     })
                     .collect();
-                // include ourselves even if hyprctl is unavailable to others
+                // ourselves from fresh local facts (our registry entry can be
+                // two seconds stale), even if hyprctl is unavailable to others
                 if let Some(g) = geo {
-                    if !parts.iter().any(|p| p.pid == std::process::id()) {
-                        parts.push(wall::Participant {
-                            pid: std::process::id(),
-                            geo: g,
-                            cols,
-                            rows,
-                            pad: (settings.pad, settings.pad),
-                        });
-                    }
+                    parts.push(wall::Participant {
+                        pid: me,
+                        geo: g,
+                        cols,
+                        rows,
+                        pad: settings.pad,
+                        cell: cell_px,
+                        placement: settings.placement,
+                    });
                 }
-                wall::compute_layout(parts, std::process::id())
+                wall::compute_layout(parts, me)
             } else {
                 None
             };
@@ -874,222 +3133,363 @@ fn run(
                     wall_layout = None; // guard: virtual area too big, stay local
                 }
             }
+            if wall_layout != old_layout {
+                view_rev += 1;
+            }
+            // physical plan: attach to the group's plan and calibration files
+            let physical = hypr_ok && settings.link_enabled && settings.wall_enabled && settings.wall_spec.is_none();
+            if physical {
+                if plan_watcher.is_none() || plan_group != settings.link_group {
+                    plan_group = settings.link_group.clone();
+                    wall_plan = None;
+                    planner = None;
+                    if let Some(dir) = link::group_dir(&plan_group) {
+                        let group = plan_group.clone();
+                        planner = Some(termpaper::wallplan::Planner::spawn(dir.clone(), std::process::id(), move || panes_of(&group)));
+                        plan_watcher = Some(termpaper::wallplan::PlanWatcher::new(dir.clone()));
+                        calib_watcher = Some(termpaper::calibrate::Watcher::new(dir));
+                    }
+                    view_rev += 1;
+                }
+                if let Some(p) = &planner {
+                    p.set_active(is_leader(&peers.list, st.synced));
+                }
+                calib_monitors = termpaper::hypr::monitors().unwrap_or_default();
+            } else if plan_watcher.is_some() {
+                planner = None;
+                plan_watcher = None;
+                calib_watcher = None;
+                wall_plan = None;
+                view_rev += 1;
+            }
         }
 
-        // clock overlay: one cheap `date` call per 10s, handles TZ/DST
-        if settings.clock && clock_stamp.elapsed() > Duration::from_secs(10) {
+        // clock overlay: local time (TZ and DST from the OS), refreshed at
+        // most once a second
+        if clock_stamp.elapsed() > Duration::from_secs(1) {
             clock_stamp = Instant::now();
-            clock_text = std::process::Command::new("date")
-                .arg("+%H:%M")
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_default();
+            local_now = termpaper::platform::local_time();
+            clock_text = termpaper::overlay::clock_text(&local_now, settings.display.clock_format);
+            settings.on_battery = power.get() == termpaper::platform::Power::Battery;
+        }
+        let night = settings.display.night_factor(local_now.hour);
+        // a cell's height over its width: set by hand (Display → Cell
+        // shape), else measured, else the usual 2
+        let cell_aspect = settings
+            .display
+            .cell_aspect
+            .or_else(|| cell_px.map(|(w, h)| h / w))
+            .unwrap_or(termpaper::engine::DEFAULT_CELL_ASPECT);
+        settings.paused = st.target().paused();
+
+        // a newly published plan, and any calibration in progress
+        if let Some(w) = &mut plan_watcher {
+            if let Some(p) = w.poll() {
+                wall_plan = Some(p);
+                view_rev += 1;
+            }
+        }
+        let calib_state = calib_watcher.as_mut().and_then(|w| w.poll().cloned());
+
+        // unfocused with Pause: hold the picture and keep listening. A
+        // scene of its own resumes where it stopped; one the group runs
+        // carries on, and this pane catches up when it comes back.
+        let hold = !focused
+            && settings.display.unfocused == termpaper::prefs::Unfocused::Pause
+            && !(menu.open || studio.open || welcome.open || check.open);
+        match (hold, held_since) {
+            (true, None) => held_since = Some(now),
+            (false, Some(since)) => {
+                held_since = None;
+                if !st.synced && !st.target().paused() {
+                    let mut a = st.target().clone();
+                    a.t0_ms = a.t0_ms.saturating_add(now.duration_since(since).as_millis() as u64);
+                    st.retime(&a, &mut transition, &names);
+                }
+            }
+            _ => {}
         }
 
-        terminal.draw(|f| {
-            let area = f.area();
-            let (pw, ph) = settings.pixels.cell_size();
-            let (w, h2) = match wall_layout {
-                Some(l) => (l.virtual_w * pw, l.virtual_h * ph),
-                None => (area.width as usize * pw, area.height as usize * ph),
+        // DEC 2026 synchronized output: the terminal holds the old frame
+        // until the end marker, so a frame never shows half-written. The
+        // begin marker rides in the same buffered write as the frame (draw
+        // flushes); terminals without support ignore both.
+        if !hold {
+            crossterm::queue!(terminal.backend_mut(), crossterm::terminal::BeginSynchronizedUpdate)?;
+            // what is on screen comes from the running anchor; `settings` may
+            // already hold the next one's values while a switch is pending
+            let shown_pixels = Pixels::parse(&st.cur.pixels).unwrap_or(settings.pixels);
+            let shown_opts = SceneOptions {
+                theme: st.cur.theme.clone(),
+                detail: Detail::parse(&st.cur.detail).unwrap_or(opts.detail),
+                text_scale: st.cur.text_scale,
+                pixels: shown_pixels,
             };
-            if canvas.width() != w || canvas.height() != h2 {
-                canvas.resize(w, h2);
-            }
-            // usually one step; more only when repaying time lost to a hitch
-            for s in step_dt.iter().take(n_steps) {
-                current.update(*s, &mut canvas);
-            }
-            let t = launch.elapsed().as_secs_f32();
-
-            // The GPU runs the same chain in compute shaders and hands back
-            // finished terminal cells. It is one frame behind by design — the
-            // readback never fences — so the first frame or two after startup
-            // and after every resize still come from the CPU below.
-            #[allow(unused_mut)] // only the GPU branch below ever sets this
-            let mut drawn = false;
-            #[cfg(feature = "gpu")]
-            if let Some(g) = gpu.as_mut() {
-                let (cols, rows) = (area.width as usize, area.height as usize);
-                let crop = match wall_layout {
-                    Some(l) => (l.crop_x * pw, l.crop_y * ph),
-                    None => (0, 0),
+            // the scene clock of the target slot (frozen while the wall is paused)
+            let elapsed_ms = match st.cur.paused_at_ms {
+                Some(at) => at.saturating_sub(st.cur.t0_ms),
+                None => termpaper::sync::slot_elapsed_ms(target, period),
+            };
+            terminal.draw(|f| {
+                let area = f.area();
+                let (pw, ph) = shown_pixels.cell_size();
+                let me = std::process::id();
+                let my_plan = wall_plan.as_ref().and_then(|p| p.pane(me).map(|pp| (p.classic_cells, pp.clone())));
+                let local = (area.width as usize * pw, area.height as usize * ph);
+                // Classic canvas and this pane's window onto it: the physical
+                // plan's shared canvas, else the cell-count wall, else local
+                let (size, crop, classic_map) = if let Some((cells, pp)) = &my_plan {
+                    match pp.classic {
+                        Some((o, stp)) => {
+                            let crop = render::view_is_crop(o, stp, shown_pixels)
+                                .map(|(x, y)| (x.max(0) as usize, y.max(0) as usize))
+                                .unwrap_or((0, 0));
+                            ((cells.0 * pw, cells.1 * ph), crop, Some((o, stp)))
+                        }
+                        None => (local, (0, 0), None),
+                    }
+                } else if let Some(l) = wall_layout {
+                    ((l.virtual_w * pw, l.virtual_h * ph), (l.crop_x * pw, l.crop_y * ph), None)
+                } else {
+                    (local, (0, 0), None)
                 };
-                if termpaper::gpu::Gpu::should_use(w, h2) && cols * rows > 0 {
-                    g.resize(w, h2, cols * rows);
-                    let plan = termpaper::gpu::Plan {
-                        filters: &settings.filters,
-                        quick_filter: quick_filter.as_deref(),
-                        t,
-                        hue_shift: settings.hue_shift,
-                        saturation: settings.saturation,
-                        contrast: settings.contrast,
-                        dim: fade * settings.dim,
-                        smooth: settings.smooth,
-                        pixels: settings.pixels,
-                        cols,
-                        rows,
+                // a styled transition shapes the dim across the wall; a plain
+                // fade (and every style at rest) is a uniform one
+                let mask = termpaper::transition::Mask::new(
+                    settings.playback.transition,
+                    fade,
+                    transition.pending().is_none(),
+                    size.0 as u32,
+                    size.1 as u32,
+                );
+                let dim = if mask.is_some() { settings.dim * night } else { fade * settings.dim * night };
+                let request = termpaper::engine::Request {
+                    generation: 0,
+                    // what is simulated: a change rebuilds (and replays out of sight)
+                    sim: termpaper::engine::SimKey::new(&st.cur.scene, st.cur.seed, shown_opts.clone(), size, st.cur.speed),
+                    // how it is shown: a change keeps the simulation running
+                    view: termpaper::engine::ViewKey {
+                        canvas: size,
+                        grid: (area.width as usize, area.height as usize),
                         crop,
-                    };
-                    g.submit(&canvas, &plan);
-                    if let Some(cells) = g.poll_cells(cols, rows) {
-                        termpaper::gpu::blit(
-                            &cells,
-                            &canvas,
-                            crop,
-                            settings.pixels,
-                            area,
-                            f.buffer_mut(),
-                            settings.truecolor,
-                        );
+                        pixels: shown_pixels,
+                        // the real cell shape: this pane's own when local, one
+                        // shared by every pane in a wall (else the 1:2 default)
+                        cell_aspect: match wall_layout {
+                            Some(l) => l.cell_aspect.unwrap_or(termpaper::engine::DEFAULT_CELL_ASPECT),
+                            None => cell_aspect,
+                        },
+                        rev: view_rev,
+                        comp: my_plan.as_ref().map(|(_, pp)| pp.comp),
+                        classic_map,
+                    },
+                    // a paused anchor freezes elapsed itself: the worker keeps
+                    // replaying up to it (a pane joining a paused wall catches up)
+                    elapsed_ms, paused: false, look: settings.look.clone(),
+                    quick: quick_filter.clone(), dim, mask, smooth: settings.smooth,
+                    budget_ms: settings.display.studio_budget_ms,
+                    prefetch: transition.pending().map(|i| names[i % names.len()].to_string()),
+                    // Studio scenes only: Classic GPU output stays identical to
+                    // the CPU path, which has no hysteresis
+                    hysteresis: if scene::lookup(&st.cur.scene).is_some_and(|e| e.needs_gpu()) {
+                        settings.hysteresis_override.unwrap_or(settings.display.hysteresis().0)
+                    } else {
+                        0
+                    },
+                };
+                if let Some(frame) = worker.submit(request) {
+                    lead.on_frame(frame.elapsed_ms, slot);
+                    rendered = Some(frame);
+                    worker_status = None;
+                }
+                lead.on_submit(elapsed_ms, slot);
+                if let Some(status) = worker.take_status() { worker_status = Some(status); }
+                if rendered.as_ref().is_some_and(|frame| frame.generation != worker.generation()) {
+                    rendered = None;
+                }
+                // calibration: every pane shows the millimetre pattern instead
+                let geo_now = geo_watcher.as_ref().and_then(|w| w.latest());
+                let calib_drawn = match (&calib_state, geo_now) {
+                    (Some(cs), Some(g)) => {
+                        let geom = termpaper::wallplan::PaneGeom {
+                            pid: me,
+                            ancestors: Vec::new(),
+                            cols: area.width,
+                            rows: area.height,
+                            cell: cell_px.map(|(w, h)| (w as f64, h as f64)),
+                            pad: (settings.pad.0 as f64, settings.pad.1 as f64),
+                            centered: settings.placement == wall::Placement::Center,
+                        };
+                        let win = [g.x as f64, g.y as f64, g.w as f64, g.h as f64];
+                        match termpaper::calibrate::pane_pattern(cs, &calib_monitors, win, &geom, Pixels::Half) {
+                            Some((canvas, label)) => {
+                                render::draw_crop(&canvas, 0, 0, area, f.buffer_mut(), settings.truecolor, Pixels::Half);
+                                let w = (label.chars().count() as u16).min(area.width.saturating_sub(2));
+                                f.render_widget(
+                                    Paragraph::new(Text::raw(label)).style(
+                                        Style::new()
+                                            .fg(ratatui::style::Color::Rgb(245, 245, 245))
+                                            .bg(ratatui::style::Color::Rgb(24, 26, 34)),
+                                    ),
+                                    Rect { x: area.x + 1, y: area.y + 2, width: w, height: 1 },
+                                );
+                                true
+                            }
+                            None => false,
+                        }
+                    }
+                    _ => false,
+                };
+                if let Some(c) = calib_ctl.as_ref().filter(|_| calib_drawn || calib_state.is_some()) {
+                    // the controller's instructions along the bottom of this pane
+                    let lines = termpaper::calibrate::help_lines(&c.state);
+                    let h = (lines.len() as u16).min(area.height);
+                    let rect = Rect { x: area.x, y: area.y + area.height.saturating_sub(h), width: area.width, height: h };
+                    f.render_widget(
+                        Paragraph::new(Text::raw(lines.join("\n"))).style(
+                            Style::new().fg(ratatui::style::Color::Rgb(235, 235, 235)).bg(ratatui::style::Color::Rgb(16, 18, 26)),
+                        ),
+                        rect,
+                    );
+                }
+                if let Some(frame) = rendered.as_ref().filter(|_| !calib_drawn) {
+                    #[allow(unused_mut)]
+                    let mut drawn = false;
+                    #[cfg(feature = "gpu")]
+                    if let Some(words) = &frame.cells {
+                        // the frame's own grid: after a resize the last frame
+                        // (same simulation, old view) stays up until the next
+                        let cells = termpaper::gpu::FrameCells {
+                            words, cols: frame.grid.0, rows: frame.grid.1,
+                        };
+                        termpaper::gpu::blit(&cells, &frame.canvas, crop, shown_pixels, area,
+                            f.buffer_mut(), settings.truecolor);
                         drawn = true;
                     }
+                    if !drawn {
+                        match classic_map.filter(|(o, s)| render::view_is_crop(*o, *s, shown_pixels).is_none()) {
+                            // a pane whose cells differ from the shared canvas
+                            Some((o, stp)) => render::draw_view(&frame.canvas, o, stp, area, f.buffer_mut(),
+                                settings.truecolor, shown_pixels, &mut classic_scratch),
+                            None => render::draw_crop(&frame.canvas, crop.0 as i32, crop.1 as i32, area,
+                                f.buffer_mut(), settings.truecolor, shown_pixels),
+                        }
+                    }
                 }
-            }
+                // Light output: Classic scenes skip changes too small to see
+                let classic_hold = settings.display.hysteresis().1;
+                if classic_hold > 0 && !scene::lookup(&st.cur.scene).is_some_and(|e| e.needs_gpu()) {
+                    render::hold_small_changes(f.buffer_mut(), area, &mut sent_cells, classic_hold);
+                }
+                // bottom-left hint, fading out over its last second
+                let hint_age = launch.elapsed().as_secs_f32();
+                if hint_age < 4.0 && !menu.open {
+                    let a = 1.0 - (hint_age - 3.0).clamp(0.0, 1.0);
+                    let g = (90.0 * a) as u8;
+                    if g > 8 {
+                        let hint = format!("? menu · c color grade · ←/→ scene · q quit · {}", names[idx]);
+                        let rect = Rect {
+                            x: area.x,
+                            y: area.y + area.height.saturating_sub(1),
+                            width: area.width.min(hint.len() as u16 + 2),
+                            height: 1,
+                        };
+                        f.render_widget(
+                            Paragraph::new(Text::raw(hint))
+                                .style(Style::new().fg(ratatui::style::Color::Rgb(g, g, g + 10))),
+                            rect,
+                        );
+                    }
+                }
 
-            if !drawn {
-                // The CPU chain. When the GPU owns `canvas` this runs on a copy,
-                // because `canvas` must stay as the raw scene output for the next
-                // submit; otherwise it filters in place as it always has.
-                #[cfg(feature = "gpu")]
-                let work = if gpu.is_some() {
-                    canvas.snapshot_into(&mut cpu_scratch);
-                    &mut cpu_scratch
-                } else {
-                    &mut canvas
-                };
-                #[cfg(not(feature = "gpu"))]
-                let work = &mut canvas;
+                // the clock (dim text, or large frosted digits), as bright as
+                // the picture
+                if settings.clock && !clock_text.is_empty() {
+                    let d = &settings.display;
+                    termpaper::overlay::draw_clock(f.buffer_mut(), area, &clock_text, d.clock_style, d.clock_corner, settings.dim * night);
+                }
+                // the scene's name for a moment after it changes
+                if let Some(at) = caption_at.filter(|_| settings.display.caption && !menu.open) {
+                    let alpha = termpaper::overlay::caption_alpha(at.elapsed().as_secs_f32()) * settings.dim * night;
+                    let title = scene::lookup(&st.cur.scene).map_or(st.cur.scene.as_str(), |e| e.title());
+                    termpaper::overlay::draw_caption(f.buffer_mut(), area, title, st.cur.theme.as_deref(), alpha);
+                }
+                if settings.display.hud && !menu.open {
+                    termpaper::overlay::draw_hud(f.buffer_mut(), area, &hud.lines);
+                }
 
-                filter::apply_all(&settings.filters, work, t);
-                color_grade::apply(
-                    work,
-                    settings.hue_shift,
-                    settings.saturation,
-                    settings.contrast,
-                );
-                if let Some(qf) = &quick_filter {
-                    filter::apply(qf, work, t);
-                }
-                canvas::dim(work, fade * settings.dim);
-                // temporal smoothing (glyph cells excluded inside smooth_blend)
-                if settings.smooth > 0.001 {
-                    work.smooth_blend(&prev_canvas, 1.0 - settings.smooth);
-                    // reuse the snapshot buffer: allocating a fresh canvas every
-                    // frame churned the allocator at the frame rate
-                    work.snapshot_into(&mut prev_canvas);
-                }
-                match wall_layout {
-                    Some(l) => render::draw_crop(
-                        work,
-                        l.crop_x as i32 * pw as i32,
-                        l.crop_y as i32 * ph as i32,
-                        area,
-                        f.buffer_mut(),
-                        settings.truecolor,
-                        settings.pixels,
-                    ),
-                    None => render::draw(work, area, f.buffer_mut(), settings.truecolor, settings.pixels),
-                }
-            }
-
-            // bottom-left hint, fading out over its last second
-            let hint_age = launch.elapsed().as_secs_f32();
-            if hint_age < 4.0 && !menu.open {
-                let a = 1.0 - (hint_age - 3.0).clamp(0.0, 1.0);
-                let g = (90.0 * a) as u8;
-                if g > 8 {
-                    let hint = format!("? menu · c color grade · ←/→ scene · q quit · {}", current.name());
-                    let rect = Rect {
-                        x: area.x,
-                        y: area.y + area.height.saturating_sub(1),
-                        width: area.width.min(hint.len() as u16 + 2),
-                        height: 1,
+                // the menu floats over the live scene (the studio takes its
+                // place while it is up)
+                if menu.open && !studio.open {
+                    let status = worker_status.clone().or_else(|| rendered.as_ref().map(|f| format!("{} · worker {:.1} ms · lead {}", f.backend, f.render_ms, lead.lead())))
+                        .unwrap_or_else(|| "Renderer initializing…".into());
+                    let wall_status = match (my_plan.as_ref(), wall_layout) {
+                        (Some((_, pp)), _) => format!(
+                            "wall: physical plan r{} · {} panes · this one on {}",
+                            wall_plan.as_ref().map(|p| p.rev).unwrap_or(0),
+                            wall_plan.as_ref().map(|p| p.panes.len()).unwrap_or(0),
+                            pp.monitor
+                        ),
+                        (None, Some(l)) => format!("wall: {}x{} cells @ ({},{})", l.virtual_w, l.virtual_h, l.crop_x, l.crop_y),
+                        _ => "wall: local".into(),
                     };
-                    f.render_widget(
-                        Paragraph::new(Text::raw(hint))
-                            .style(Style::new().fg(ratatui::style::Color::Rgb(g, g, g + 10))),
-                        rect,
-                    );
-                }
-            }
-
-            // top-right clock, dim gray scaled by the dim setting
-            if settings.clock && !clock_text.is_empty() {
-                let g = (90.0 * settings.dim) as u8;
-                let b = (100.0 * settings.dim) as u8;
-                if g > 8 {
-                    let rect = Rect {
-                        x: area.x + area.width.saturating_sub(6),
-                        y: area.y,
-                        width: area.width.min(6),
-                        height: 1,
-                    };
-                    f.render_widget(
-                        Paragraph::new(Text::raw(clock_text.clone()))
-                            .alignment(ratatui::layout::Alignment::Right)
-                            .style(Style::new().fg(ratatui::style::Color::Rgb(g, g, b))),
-                        rect,
-                    );
-                }
-            }
-
-            // the menu floats over the live scene
-            if menu.open {
-                let ctx = MenuCtx {
-                    scene_name: names[idx],
-                    scene_idx: idx,
-                    pixels: settings.pixels,
-                    detail: opts.detail,
-                    theme: opts.theme.clone(),
-                    text_scale: settings.text_scale,
-                    speed: settings.speed,
-                    fps: settings.fps,
-                    smooth: settings.smooth,
-                    dim: settings.dim,
-                    fade: settings.fade,
-                    clock: settings.clock,
-                    cycle: settings.cycle,
-                    hue_shift: settings.hue_shift,
-                    saturation: settings.saturation,
-                    contrast: settings.contrast,
-                    link_enabled: settings.link_enabled,
-                    link_group: settings.link_group.clone(),
-                    truecolor: settings.truecolor,
-                    filters: settings.filters.clone(),
-                    instances: if settings.link_enabled {
+                    let instances = if settings.link_enabled {
                         peers.menu_lines.clone()
                     } else {
                         vec!["linking disabled (solo art)".into()]
-                    },
-                    key_display: config::ACTIONS
-                        .iter()
-                        .map(|&a| {
-                            let k = settings
-                                .cfg
-                                .keys
-                                .get(a)
-                                .cloned()
-                                .unwrap_or_else(|| config::default_key(a).to_string());
-                            (a.to_string(), k)
-                        })
-                        .collect(),
-                };
-                menu::view::render(f, area, &menu, &ctx);
+                    };
+                    let ctx = menu_ctx(&settings, &opts, names[idx], status, wall_status, instances);
+                    menu::view::render(f, area, &menu, &ctx);
+                }
+                if studio.open {
+                    // round wheels need the real cell shape
+                    let aspect = cell_aspect;
+                    studio::render(f, area, &studio, settings.look.get(), settings.truecolor, aspect);
+                }
+                if welcome.open {
+                    termpaper::check::render_welcome(f, area, &welcome, &check_ctx(&settings), &welcome_keys(&settings));
+                } else if check.open {
+                    termpaper::check::render(f, area, &check, &check_ctx(&settings));
+                }
+            })?;
+            crossterm::execute!(terminal.backend_mut(), crossterm::terminal::EndSynchronizedUpdate)?;
+            // what reaching the terminal cost: Adapt FPS and the readout
+            let (bytes, busy) = meter.take();
+            if settings.display.adapt_fps && adapter.observe(Instant::now(), busy, settings.fps, menu::FPS_PRESETS) {
+                settings.fps_cap = adapter.cap;
             }
-            if color_open {
-                color_wheel::render(
-                    f,
-                    area,
-                    settings.hue_shift,
-                    settings.saturation,
-                    settings.contrast,
-                    color_param,
-                );
+            if settings.display.hud {
+                hud.frame(now, bytes, busy, rendered.as_ref().map(|f| (f.backend.as_str(), f.render_ms)), settings.fps_cap);
             }
-        })?;
+        }
+
+        // A rebuilt simulation that would need more than a few seconds of
+        // replay to reach the anchor's clock (an hours-old anchor, a wall
+        // resize) asks for a fresh anchor instead: the leader restarts the
+        // scene for the whole group, together, after a fade.
+        if st.next.is_none() && worker.catchup_ms().is_some_and(|eta| eta > REANCHOR_ETA_MS) {
+            match guard.as_mut().filter(|_| st.synced) {
+                Some(g) => {
+                    g.set_reanchor(Some(st.cur.stamp));
+                    reanchor_wanted = Some(st.cur.stamp);
+                }
+                None => {
+                    let mut a = st.cur.clone();
+                    a.seed = rand::rng().random();
+                    begin_switch_paused(&mut st, &mut guard, &mut transition, &names, a, false, true);
+                }
+            }
+        }
+        // the leader answers re-anchor requests for the anchor it runs
+        if st.synced && st.next.is_none() && guard.is_some() && is_leader(&peers.list, true) {
+            let stamp = st.cur.stamp;
+            let wanted = reanchor_wanted == Some(stamp) || peers.list.iter().any(|i| i.reanchor == Some(stamp));
+            if wanted {
+                let mut a = st.cur.clone();
+                a.seed = rand::rng().random();
+                begin_switch_paused(&mut st, &mut guard, &mut transition, &names, a, true, true);
+            }
+        }
 
         // steady pacing: coarse sleep to ~1ms before the deadline, then
         // Sleep (inside the event poll) to just before the deadline, then spin
@@ -1098,13 +3498,24 @@ fn run(
         // and several instances pacing on one machine then starve each other
         // into dropped frames. 100us holds jitter at ~0.025ms — 0.6% of a
         // 240fps frame — for ~1% CPU.
-        let deadline = last_frame + frame_dur;
+        //
+        // The deadline is the next slot of the anchor's grid, not "last frame
+        // + period": every pane with this anchor and rate presents at the same
+        // moments, and a late frame does not push every later one back.
+        let deadline = if hold {
+            Instant::now() + Duration::from_millis(250)
+        } else {
+            clock.slot_instant(grid_origin, period, slot + 1)
+        };
+        let mut events_handled = 0;
         loop {
             let now2 = Instant::now();
-            if now2 >= deadline {
+            // Rendering may already have exhausted the frame budget. Always
+            // poll input anyway; otherwise expensive scenes become inescapable.
+            if events_handled >= 64 {
                 break;
             }
-            let remaining = deadline - now2;
+            let remaining = deadline.saturating_duration_since(now2);
             let coarse = remaining.saturating_sub(SPIN_TAIL);
             let has_event = if coarse.is_zero() {
                 event::poll(Duration::ZERO)?
@@ -1112,6 +3523,7 @@ fn run(
                 event::poll(coarse)?
             };
             if has_event {
+                events_handled += 1;
                 let ev = event::read()?;
                 match ev {
                     Event::FocusGained => {
@@ -1122,66 +3534,117 @@ fn run(
                         focused = false;
                         continue;
                     }
+                    Event::Paste(text) => {
+                        if menu.open && menu.typing() {
+                            menu.paste(&text);
+                            break;
+                        }
+                        continue;
+                    }
+                    Event::Mouse(mouse) => {
+                        let Some(input) = menu::Input::from_mouse(mouse) else {
+                            continue;
+                        };
+                        if welcome.open || check.open {
+                            continue;
+                        }
+                        if studio.open {
+                            pending_fx.extend(studio.handle(input, settings.look.get()));
+                            if !pending_fx.is_empty() || !studio.open {
+                                break;
+                            }
+                        } else if menu.open {
+                            let ctx = menu_ctx(&settings, &opts, names[idx], String::new(), String::new(), Vec::new());
+                            pending_fx.extend(menu.handle(input, &ctx));
+                            if !pending_fx.is_empty() || !menu.open {
+                                break;
+                            }
+                        } else if !studio.open
+                            && matches!(input, menu::Input::Mouse { kind: menu::Mouse::Down, .. })
+                            && !settings.screensaver
+                        {
+                            // a click opens the menu: the way in for mouse users
+                            let ctx = menu_ctx(&settings, &opts, names[idx], String::new(), String::new(), Vec::new());
+                            menu.open(&ctx);
+                            break;
+                        }
+                        continue;
+                    }
                     _ => {}
                 }
                 if let Event::Key(key) = ev {
                 if key.kind == KeyEventKind::Press {
                     let km = &settings.keymap;
 
-                    if color_open {
-                        if key.code == KeyCode::Esc || km.matches("color", key.code) {
-                            color_open = false;
-                            persist(&mut settings, names[idx], &opts);
-                            break;
+                    // a calibration opened from the menu takes every key
+                    if let Some(c) = &mut calib_ctl {
+                        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                        let alt = key.modifiers.contains(KeyModifiers::ALT);
+                        match c.key(key.code, shift, alt) {
+                            termpaper::calibrate::Outcome::Continue => {}
+                            _ => calib_ctl = None,
                         }
-                        if key.code == KeyCode::Tab {
-                            color_param = match color_param {
-                                color_wheel::Param::Hue => color_wheel::Param::Saturation,
-                                color_wheel::Param::Saturation => color_wheel::Param::Contrast,
-                                color_wheel::Param::Contrast => color_wheel::Param::Hue,
-                            };
-                            break;
-                        }
-                        if key.code == KeyCode::Char('0') {
-                            settings.hue_shift = 0.0;
-                            settings.saturation = 1.0;
-                            settings.contrast = 1.0;
-                            if let Some(g) = &mut guard {
-                                g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                            }
-                            break;
-                        }
-                        let fine = match key.code {
-                            KeyCode::Left => Some(-1),
-                            KeyCode::Right => Some(1),
-                            KeyCode::Up => Some(10),
-                            KeyCode::Down => Some(-10),
-                            _ => None,
+                        break;
+                    }
+
+                    // Ctrl-C quits from anywhere, menu or not
+                    let ctrl_c = key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL);
+
+                    // the welcome and the terminal check take every key
+                    if (welcome.open || check.open) && !ctrl_c {
+                        let Some(input) = menu::Input::from_key(key) else {
+                            continue;
                         };
-                        if let Some(steps) = fine {
-                            match color_param {
-                                color_wheel::Param::Hue => {
-                                    settings.hue_shift = color_wheel::step_hue_steps(
-                                        settings.hue_shift,
-                                        steps,
-                                    );
-                                }
-                                color_wheel::Param::Saturation => {
-                                    settings.saturation = color_wheel::step_sat(
-                                        settings.saturation,
-                                        steps as f32 * color_wheel::SAT_STEP,
-                                    );
-                                }
-                                color_wheel::Param::Contrast => {
-                                    settings.contrast = color_wheel::step_contrast(
-                                        settings.contrast,
-                                        steps as f32 * color_wheel::CONTRAST_STEP,
-                                    );
+                        let cctx = check_ctx(&settings);
+                        if welcome.open {
+                            pending_fx.extend(welcome.handle(input, &cctx));
+                        } else {
+                            pending_fx.extend(check.handle(input, &cctx));
+                            // done: back where it was opened, saying what it found
+                            if !check.open && check_from_menu {
+                                check_from_menu = false;
+                                pending_fx.push(Effect::OpenMenuAt(menu::Page::Display));
+                                if check.answers().iter().all(Option::is_some) {
+                                    check_notice = Some(check.summary(&cctx));
                                 }
                             }
-                            if let Some(g) = &mut guard {
-                                g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                            }
+                        }
+                        break;
+                    }
+
+                    // the colour studio takes every key while it is up
+                    if studio.open && !ctrl_c {
+                        if km.matches("color", key.code) && key.code != KeyCode::Char('c') {
+                            studio.open = false;
+                        } else if let Some(input) = menu::Input::from_key(key) {
+                            pending_fx.extend(studio.handle(input, settings.look.get()));
+                        }
+                        if !studio.open {
+                            save.mark(Instant::now());
+                        }
+                        if !pending_fx.is_empty() || !studio.open {
+                            break;
+                        }
+                        continue;
+                    }
+
+                    // (Ctrl-C quits from anywhere, menu or not: `ctrl_c` above)
+
+                    if menu.open && !ctrl_c {
+                        // modal: every key goes to the menu — including `0`,
+                        // so the reset below can't fire from inside it
+                        let remapped_close = !menu.typing()
+                            && key.code != KeyCode::Char('?')
+                            && km.matches("menu", key.code);
+                        if remapped_close {
+                            pending_fx.extend(menu.close());
+                        } else if let Some(input) = menu::Input::from_key(key) {
+                            let ctx = menu_ctx(&settings, &opts, names[idx], String::new(), String::new(), Vec::new());
+                            pending_fx.extend(menu.handle(input, &ctx));
+                        }
+                        // apply before the next key reads a stale snapshot
+                        if !pending_fx.is_empty() || !menu.open {
                             break;
                         }
                         continue;
@@ -1195,9 +3658,11 @@ fn run(
                             &mut transition,
                             &mut guard,
                             &mut quick_filter,
-                            &mut current,
                         );
-                        persist(&mut settings, names[idx], &opts);
+                        save.take();
+                        persist(&mut settings, names[idx], opts.theme.as_deref(), opts.detail);
+                        // the reset may have moved us to the default group
+                        join_group(&mut st, &mut guard, &mut transition, &names, &mut settings, &mut opts);
                         if let Some(g) = &mut guard {
                             g.publish_settings(&settings_msg(
                                 &settings,
@@ -1208,254 +3673,50 @@ fn run(
                         continue;
                     }
 
-                    if menu.open {
-                        // modal: Esc or the menu key closes, rest routes in
-                        if key.code == KeyCode::Esc || km.matches("menu", key.code) {
-                            menu.close();
-                            continue;
-                        }
-                        let input = match key.code {
-                            KeyCode::Up => Some(menu::Input::Up),
-                            KeyCode::Down => Some(menu::Input::Down),
-                            KeyCode::Left => Some(menu::Input::Left),
-                            KeyCode::Right => Some(menu::Input::Right),
-                            KeyCode::Enter => Some(menu::Input::Enter),
-                            _ => None,
-                        };
-                        if let Some(input) = input {
-                            let ctx = MenuCtx {
-                                scene_name: names[idx],
-                                scene_idx: idx,
-                                pixels: settings.pixels,
-                                detail: opts.detail,
-                                theme: opts.theme.clone(),
-                                text_scale: settings.text_scale,
-                                speed: settings.speed,
-                                fps: settings.fps,
-                                smooth: settings.smooth,
-                                dim: settings.dim,
-                                fade: settings.fade,
-                                clock: settings.clock,
-                                cycle: settings.cycle,
-                                hue_shift: settings.hue_shift,
-                                saturation: settings.saturation,
-                                contrast: settings.contrast,
-                                link_enabled: settings.link_enabled,
-                                link_group: settings.link_group.clone(),
-                                truecolor: settings.truecolor,
-                                filters: settings.filters.clone(),
-                                instances: Vec::new(),
-                                key_display: Vec::new(),
-                            };
-                            let effects = menu.handle(input, &ctx);
-                            for fx in effects {
-                                match fx {
-                                    Effect::SwitchScene(i) => {
-                                        let i = i % names.len();
-                                        let seed: u64 = rand::rng().random();
-                                        let t0 = link::epoch_now_ms();
-                                        sync_params = Some((seed, t0));
-                                        transition.request(i);
-                                        if let Some(g) = &mut guard {
-                                            g.publish(names[i], None, seed, t0);
-                                        }
-                                        last_switch = Instant::now();
-                                    }
-                                    Effect::SetPixels(p) => {
-                                        settings.pixels = p;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetDetail(d) => {
-                                        opts.detail = d;
-                                        current = scene::create(names[idx], &opts, entropy_rng())
-                                            .expect("registry");
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetTheme(t) => {
-                                        if let Some(g) = &mut guard {
-                                            let seed: u64 = rand::rng().random();
-                                            let t0 = link::epoch_now_ms();
-                                            sync_params = Some((seed, t0));
-                                            g.publish(names[idx], t.as_deref(), seed, t0);
-                                        }
-                                        opts.theme = t;
-                                        current = scene::create(names[idx], &opts, entropy_rng())
-                                            .expect("registry");
-                                    }
-                                    Effect::SetTextScale(ts) => {
-                                        settings.text_scale = ts;
-                                        opts.text_scale = ts;
-                                        current = scene::create(names[idx], &opts, entropy_rng())
-                                            .expect("registry");
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetSpeed(sp) => {
-                                        settings.speed = sp;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetFps(fps) => {
-                                        settings.fps = fps;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetSmooth(sm) => {
-                                        settings.smooth = sm;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetDim(d) => {
-                                        settings.dim = d;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetFade(fd) => {
-                                        settings.fade = fd;
-                                        transition.set_fade_secs(fd);
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetClock(c) => {
-                                        settings.clock = c;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::SetCycle(c) => {
-                                        // local-only: rotations don't propagate
-                                        settings.cycle = c;
-                                        last_switch = Instant::now();
-                                    }
-                                    Effect::SetHueShift(h) => {
-                                        settings.hue_shift = h;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(
-                                                &settings,
-                                                &opts,
-                                                &quick_filter,
-                                            ));
-                                        }
-                                    }
-                                    Effect::SetSaturation(s) => {
-                                        settings.saturation = s;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(
-                                                &settings,
-                                                &opts,
-                                                &quick_filter,
-                                            ));
-                                        }
-                                    }
-                                    Effect::SetContrast(c) => {
-                                        settings.contrast = c;
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(
-                                                &settings,
-                                                &opts,
-                                                &quick_filter,
-                                            ));
-                                        }
-                                    }
-                                    Effect::SetLink(on) => {
-                                        settings.link_enabled = on;
-                                        reset_link_guard(
-                                            &mut guard,
-                                            on,
-                                            &settings.link_group,
-                                            names[idx],
-                                            (settings.pad, settings.pad),
-                                        );
-                                        persist(&mut settings, names[idx], &opts);
-                                    }
-                                    Effect::SetLinkGroup(g) => {
-                                        settings.link_group = g;
-                                        reset_link_guard(
-                                            &mut guard,
-                                            settings.link_enabled,
-                                            &settings.link_group,
-                                            names[idx],
-                                            (settings.pad, settings.pad),
-                                        );
-                                        persist(&mut settings, names[idx], &opts);
-                                    }
-                                    Effect::ToggleFilter(f) => {
-                                        if let Some(pos) =
-                                            settings.filters.iter().position(|x| *x == f)
-                                        {
-                                            settings.filters.remove(pos);
-                                        } else {
-                                            settings.filters.push(f);
-                                        }
-                                        if let Some(g) = &mut guard {
-                                            g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                                        }
-                                    }
-                                    Effect::Persist => persist(&mut settings, names[idx], &opts),
-                                }
-                            }
-                        }
-                        continue;
-                    }
-
                     let quit = settings.screensaver
                         || km.matches("quit", key.code)
                         || matches!(key.code, KeyCode::Esc)
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL));
+                        || ctrl_c;
                     if quit {
+                        if save.take() {
+                            let (scene_name, theme) = remembered_scene(&preview, &names, idx, &opts);
+                            persist(&mut settings, scene_name, theme, opts.detail);
+                        }
                         return Ok(());
                     }
                     if km.matches("menu", key.code) {
-                        menu.toggle(idx);
+                        let ctx = menu_ctx(&settings, &opts, names[idx], String::new(), String::new(), Vec::new());
+                        menu.open(&ctx);
                         continue;
                     }
                     if km.matches("color", key.code) {
-                        color_open = !color_open;
-                        if color_open {
-                            color_param = color_wheel::Param::Hue;
-                            if settings.hue_shift < 0.5
-                                && (settings.saturation - 1.0).abs() < 0.02
-                                && (settings.contrast - 1.0).abs() < 0.02
-                            {
-                                settings.hue_shift = 45.0;
-                            }
-                        } else {
-                            persist(&mut settings, names[idx], &opts);
-                        }
+                        studio.open_on(studio.tab);
                         continue;
                     }
-                    let mut switch_to = |i: usize, _: &mut usize| {
-                        let i = i % names.len();
-                        // publisher picks the seed + start time; both sides
-                        // will build the scene from them
-                        let seed: u64 = rand::rng().random();
-                        let t0 = link::epoch_now_ms();
-                        sync_params = Some((seed, t0));
-                        transition.request(i);
-                        if let Some(g) = &mut guard {
-                            g.publish(names[i], None, seed, t0);
-                        }
+                    // relative to the scene a pending switch lands on, so
+                    // rapid presses keep stepping
+                    let base = names.iter().position(|n| *n == st.target().scene).unwrap_or(idx);
+                    let mut switch_to = |i: usize| {
+                        // the publisher picks the seed and start time; every
+                        // pane builds the scene from them
+                        switch_scene(i % names.len(), &mut st, &mut guard, &mut transition,
+                            &names, &settings, &mut opts);
                         last_switch = Instant::now();
                     };
                     if km.matches("next", key.code) || key.code == KeyCode::Tab {
-                        let i = (idx + 1) % names.len();
-                        switch_to(i, &mut idx);
+                        switch_to(base + 1);
                     } else if km.matches("prev", key.code) {
-                        let i = (idx + names.len() - 1) % names.len();
-                        switch_to(i, &mut idx);
+                        switch_to(base + names.len() - 1);
                     } else if km.matches("pause", key.code) {
-                        paused = !paused;
+                        // wall-wide: a retime anchor freezes (or resumes) the
+                        // shared clock; the simulation itself is untouched
+                        let now_ms = link::epoch_now_ms();
+                        let mut a = st.target().clone();
+                        if a.paused() { a.resume(now_ms) } else { a.pause(now_ms) }
+                        if let (true, Some(g)) = (st.target_synced(), guard.as_mut()) {
+                            g.publish_anchor(&mut a);
+                        }
+                        st.retime(&a, &mut transition, &names);
                     } else if km.matches("filter_next", key.code) {
                         if quick_filter.as_deref() == Some("smooth-off") {
                             settings.smooth = 0.3;
@@ -1482,7 +3743,6 @@ fn run(
                         }
                     } else if km.matches("detail_next", key.code) {
                         opts.detail = opts.detail.next();
-                        current = scene::create(names[idx], &opts, entropy_rng()).expect("registry");
                         if let Some(g) = &mut guard {
                             g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                         }
@@ -1491,25 +3751,25 @@ fn run(
                         if let Some(g) = &mut guard {
                             g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                         }
-                        persist(&mut settings, names[idx], &opts);
+                        save.mark(Instant::now());
                     } else if km.matches("fps_down", key.code) {
                         settings.fps = menu::fps_step(settings.fps, false);
                         if let Some(g) = &mut guard {
                             g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                         }
-                        persist(&mut settings, names[idx], &opts);
+                        save.mark(Instant::now());
                     } else if km.matches("speed_up", key.code) {
                         settings.speed = menu::speed_step(settings.speed, true);
                         if let Some(g) = &mut guard {
                             g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                         }
-                        persist(&mut settings, names[idx], &opts);
+                        save.mark(Instant::now());
                     } else if km.matches("speed_down", key.code) {
                         settings.speed = menu::speed_step(settings.speed, false);
                         if let Some(g) = &mut guard {
                             g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                         }
-                        persist(&mut settings, names[idx], &opts);
+                        save.mark(Instant::now());
                     }
                 }
                 }
@@ -1533,120 +3793,98 @@ fn run(
 }
 
 #[cfg(test)]
-mod sync_tests {
+mod cli_tests {
     use super::*;
+    use clap::CommandFactory;
 
-    /// A normal frame simulates exactly the wall time that passed.
-    #[test]
-    fn steady_frame_spends_all_its_time() {
-        let mut debt = 1.0 / 120.0;
-        let (dts, n) = plan_steps(&mut debt, 1.0);
-        assert_eq!(n, 1);
-        assert!((dts[0] - 1.0 / 120.0).abs() < 1e-6);
-        assert!(debt < 1e-6, "steady frames must leave nothing owed");
+    fn parse(argv: &[&str]) -> Args {
+        Args::try_parse_from(std::iter::once("termpaper").chain(argv.iter().copied()))
+            .unwrap_or_else(|e| panic!("{argv:?}: {e}"))
     }
 
-    /// The core sync property: over many frames, simulated time tracks wall
-    /// time even when individual frames overrun MAX_STEP. Before the catch-up
-    /// the clamp silently discarded the overrun and the pane fell behind.
     #[test]
-    fn hitches_are_repaid_so_sim_time_tracks_wall_time() {
-        let mut debt = 0.0f32;
-        let mut simulated = 0.0f32;
-        let mut wall = 0.0f32;
-        // 200 good frames at 120fps with a 150ms stall every 20th
-        for i in 0..200 {
-            let frame = if i % 20 == 19 { 0.150 } else { 1.0 / 120.0 };
-            wall += frame;
-            debt = (debt + frame).min(MAX_DEBT);
-            let (dts, n) = plan_steps(&mut debt, 1.0);
-            simulated += dts.iter().take(n).sum::<f32>();
+    fn clap_definition_is_valid() {
+        Args::command().debug_assert();
+    }
+
+    #[test]
+    fn positional_scene_still_works() {
+        let a = parse(&["koi", "--fps", "60"]);
+        assert_eq!(a.scene.as_deref(), Some("koi"));
+        assert!(a.command.is_none());
+        assert_eq!(a.fps, Some(60));
+    }
+
+    #[test]
+    fn subcommands_parse() {
+        match parse(&["list", "--category", "coast"]).command {
+            Some(Command::List { category, json }) => assert_eq!((category.as_deref(), json), (Some("coast"), false)),
+            _ => panic!("expected list"),
         }
-        // whatever is still owed is bounded by one frame's worth of steps
-        let drift = (wall - simulated - debt).abs();
-        assert!(drift < 1e-3, "sim time drifted from wall time by {drift}s");
-        assert!(
-            debt < MAX_CATCHUP as f32 * MAX_STEP,
-            "debt should stay bounded, got {debt}"
-        );
-    }
-
-    /// No single step may exceed MAX_STEP, or a stall would blow up physics.
-    #[test]
-    fn no_single_step_exceeds_the_clamp() {
-        let mut debt = 5.0; // absurd stall
-        let (dts, n) = plan_steps(&mut debt, 1.0);
-        for s in dts.iter().take(n) {
-            assert!(*s <= MAX_STEP + 1e-6, "step {s} exceeds MAX_STEP");
+        assert!(matches!(parse(&["list", "--json"]).command, Some(Command::List { json: true, .. })));
+        assert!(matches!(parse(&["instances"]).command, Some(Command::Instances)));
+        match parse(&["switch", "fire", "--group", "art"]).command {
+            Some(Command::Switch { scene, group, all }) => {
+                assert_eq!((scene.as_str(), group.as_deref(), all), ("fire", Some("art"), false));
+            }
+            _ => panic!("expected switch"),
         }
-        assert_eq!(n, MAX_CATCHUP, "a big stall should use the full budget");
-    }
-
-    /// Debt is capped, so resuming from suspend does not simulate minutes.
-    #[test]
-    fn debt_is_capped_for_suspend() {
-        let mut debt = 0.0f32;
-        debt = (debt + 3600.0).min(MAX_DEBT);
-        assert_eq!(debt, MAX_DEBT);
-        let mut total = 0.0;
-        // draining is bounded: a handful of frames, not an hour of simulation
-        for _ in 0..20 {
-            let (dts, n) = plan_steps(&mut debt, 1.0);
-            total += dts.iter().take(n).sum::<f32>();
+        assert!(matches!(
+            parse(&["switch", "fire", "--all"]).command,
+            Some(Command::Switch { all: true, .. })
+        ));
+        assert!(Args::try_parse_from(["termpaper", "switch", "fire", "--all", "--group", "x"]).is_err());
+        match parse(&["theme", "apply", "nord", "--group", "art"]).command {
+            Some(Command::Theme { action: ThemeCmd::Apply { name, group } }) => {
+                assert_eq!((name.as_str(), group.as_deref()), ("nord", Some("art")));
+            }
+            _ => panic!("expected theme apply"),
         }
-        assert!(total <= MAX_DEBT + 1e-3, "drained {total}s, cap is {MAX_DEBT}");
-        assert!(debt < 1e-6, "cap should fully drain within 20 frames");
+        assert!(matches!(
+            parse(&["theme", "list", "--json"]).command,
+            Some(Command::Theme { action: ThemeCmd::List { json: true } })
+        ));
+        assert!(matches!(
+            parse(&["theme", "import", "-", "--name", "x"]).command,
+            Some(Command::Theme { action: ThemeCmd::Import { .. } })
+        ));
     }
 
-    /// Nothing owed still yields one redraw step (the paused path in the frame
-    /// loop bypasses `plan_steps` entirely so leftover debt is not drained).
     #[test]
-    fn idle_still_yields_a_redraw_step() {
-        let mut debt = 0.0f32;
-        let (dts, n) = plan_steps(&mut debt, 1.0);
-        assert_eq!(n, 1);
-        assert_eq!(dts[0], 0.0);
+    fn theme_means_this_scenes_variant_first_then_a_theme() {
+        let store = termpaper::theme::Store::load_from(None);
+        // hongkong has a "night" variant: --theme night keeps meaning it
+        let (v, t) = resolve_theme_args(&parse(&["hongkong", "--theme", "night"]), "hongkong", &store);
+        assert_eq!((v.as_deref(), t.is_none()), (Some("night"), true));
+        // a theme by slug or by name
+        let (v, t) = resolve_theme_args(&parse(&["--theme", "nord"]), "hongkong", &store);
+        assert_eq!((v, t.map(|e| e.slug.as_str())), (None, Some("nord")));
+        let (_, t) = resolve_theme_args(&parse(&["--theme", "Teal & Orange"]), "hongkong", &store);
+        assert_eq!(t.map(|e| e.slug.as_str()), Some("teal-and-orange"));
+        // both: the variant and the theme
+        let (v, t) = resolve_theme_args(&parse(&["--variant", "night", "--theme", "nord"]), "hongkong", &store);
+        assert_eq!((v.as_deref(), t.map(|e| e.slug.as_str())), (Some("night"), Some("nord")));
+        // a variant only other scenes have still passes (for --cycle)
+        let other = scene::entries().find_map(|e| e.themes().iter().find(|v| !scene::themes("rain").contains(v) && store.find(v).is_none()).copied()).unwrap();
+        let (v, t) = resolve_theme_args(&parse(&["--theme", other]), "rain", &store);
+        assert_eq!((v.as_deref(), t.is_none()), (Some(other), true));
     }
 
-    /// Pausing must not spend debt carried in from a hitch.
     #[test]
-    fn pausing_preserves_outstanding_debt() {
-        let mut debt = 0.5f32;
-        let before = debt;
-        // the loop's paused branch: no accrual, no plan_steps call
-        let (dts, n) = ([0.0f32; MAX_CATCHUP], 1);
-        assert_eq!(n, 1);
-        assert_eq!(dts[0], 0.0);
-        assert_eq!(debt, before, "paused frames must leave debt untouched");
-        // and it is still there to repay on resume
-        let (dts, n) = plan_steps(&mut debt, 1.0);
-        assert!(dts.iter().take(n).sum::<f32>() > 0.0);
-    }
-
-    /// Catch-up steps are equal-sized: a hitch must never emit a big step
-    /// followed by a tiny remainder, or verlet velocity (displacement per
-    /// previous step) mis-scales for one step and the scene visibly pulses.
-    #[test]
-    fn catchup_steps_are_equal_sized() {
-        let mut debt = MAX_STEP + MAX_STEP / 10.0; // just past one step
-        let (dts, n) = plan_steps(&mut debt, 1.0);
-        assert_eq!(n, 2);
-        assert!(
-            (dts[0] - dts[1]).abs() < 1e-6,
-            "steps should be equal, got {} and {}",
-            dts[0],
-            dts[1]
-        );
-        assert!((dts[0] + dts[1] - (MAX_STEP + MAX_STEP / 10.0)).abs() < 1e-6);
-    }
-
-    /// `--speed` scales simulated time without changing the debt accounting.
-    #[test]
-    fn speed_scales_steps_only() {
-        let mut debt = 1.0 / 60.0;
-        let (dts, n) = plan_steps(&mut debt, 4.0);
-        assert_eq!(n, 1);
-        assert!((dts[0] - 4.0 / 60.0).abs() < 1e-6);
-        assert!(debt < 1e-6);
+    fn old_flags_are_hidden_aliases() {
+        let a = parse(&["--list"]);
+        assert!(a.list && a.command.is_none());
+        let a = parse(&["--switch", "fire", "--all-groups"]);
+        assert_eq!(a.switch.as_deref(), Some("fire"));
+        assert!(a.all_groups);
+        assert!(parse(&["--instances"]).instances);
+        assert!(parse(&["--gpu"]).gpu);
+        let help = Args::command().render_long_help().to_string();
+        for hidden in ["--list", "--instances", "--switch", "--all-groups", "--gpu"] {
+            assert!(!help.contains(hidden), "{hidden} should be hidden from --help");
+        }
+        for heading in ["Scene:", "Look:", "Performance:", "Linking & wall:"] {
+            assert!(help.contains(heading), "missing heading {heading}\n{help}");
+        }
     }
 }

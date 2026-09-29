@@ -1,0 +1,20 @@
+format = 1
+name = "Golden Hour"
+author = "termpaper"
+description = "The last warm light of the day: amber highlights and a soft film glow."
+tags = ["cinematic", "warm"]
+
+[grade]
+exposure = 0.1
+temperature = 0.45
+tint = 0.05
+vibrance = 0.25
+highlights = { hue = 35.0, amount = 0.5 }
+
+[effects]
+stack = ["halation"]
+halation = 0.6
+
+[scene]
+name = "mesa"
+variant = "sunset"

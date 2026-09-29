@@ -1,14 +1,17 @@
 //! Scene trait, options, themes, and registry.
 
 use crate::canvas::Canvas;
+use crate::render::Pixels;
 use rand::rngs::StdRng;
 
 pub mod abyss;
 pub mod airspace;
+pub mod alpine;
 pub mod aquarium;
 pub mod aurora;
 pub mod boids;
 pub mod bump;
+pub mod campfire;
 pub mod candy;
 pub mod canopy;
 pub mod circuits;
@@ -48,6 +51,9 @@ pub mod reaction;
 pub mod ribbons;
 pub mod ripple;
 pub mod sand;
+pub mod scroll;
+pub mod shader;
+pub mod shader_meta;
 pub mod shells;
 pub mod sonar;
 pub mod starfield;
@@ -127,12 +133,16 @@ impl Detail {
 }
 
 /// Per-launch scene configuration.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct SceneOptions {
     pub theme: Option<String>,
     pub detail: Detail,
     /// bump font scale override (1|2|3); None = auto
     pub text_scale: Option<u32>,
+    /// pixel mode the canvas will be shown in — gives scenes the on-screen
+    /// pixel aspect (see `Pixels::aspect`) so compositions stay round and
+    /// orientation-aware. The engine fills this in from the render request.
+    pub pixels: Pixels,
 }
 
 pub trait Scene {
@@ -301,7 +311,7 @@ pub const SCENES: &[SceneDef] = &[
         name: "den",
         desc: "a cozy room with a CRT playing other scenes",
         themes: &["night", "evening", "rain-outside"],
-        make: |rng, o| Box::new(den::Den::new(rng, o.theme.as_deref(), o.detail)),
+        make: |rng, o| Box::new(den::Den::new(rng, o.theme.as_deref(), o.detail, o.pixels)),
     },
     SceneDef {
         name: "traffic",
@@ -447,36 +457,186 @@ pub const SCENES: &[SceneDef] = &[
         themes: &["classic", "sour", "pastel", "mono"],
         make: |rng, o| Box::new(candy::Candy::new(rng, o.theme.as_deref(), o.detail)),
     },
+    SceneDef {
+        name: "scroll",
+        desc: "endless ink-wash mountain scroll unrolling upward, made for portrait screens",
+        themes: &["sumi", "night", "indigo"],
+        make: |rng, o| Box::new(scroll::Scroll::new(rng, o.theme.as_deref(), o.detail)),
+    },
+    SceneDef {
+        name: "alpine",
+        desc: "alpine lake at dusk: parallax ridges under a sinking sun, a mirrored lake, a lone canoe",
+        themes: &["dusk", "dawn", "storm"],
+        make: |rng, o| Box::new(alpine::Alpine::new(rng, o.theme.as_deref(), o.detail, o.pixels)),
+    },
+    SceneDef {
+        name: "campfire",
+        desc: "night campfire in the forest: flame, embers, smoke, and a figure poking the fire",
+        themes: &["pine", "autumn", "snow"],
+        make: |rng, o| Box::new(campfire::Campfire::new(rng, o.theme.as_deref(), o.detail, o.pixels)),
+    },
 ];
 
+/// The Classic (CPU) scenes, in registry order. Tests, `Playback` and the
+/// WGSL world shader's positional ids all work on this list; the UI uses
+/// [`all_names`], which also includes the Studio shader scenes.
 pub fn names() -> Vec<&'static str> {
     SCENES.iter().map(|s| s.name).collect()
 }
 
-/// All scenes for --list and the settings menu.
-pub fn catalog() -> Vec<(&'static str, &'static str)> {
-    SCENES.iter().map(|s| (s.name, s.desc)).collect()
+/// Every scene, Studio and Classic, in browser order (see [`entries`]).
+pub fn all_names() -> Vec<&'static str> {
+    entries().map(|e| e.name()).collect()
 }
 
-/// Look a scene up by name.
+/// All scenes as (name, desc) for --list and the settings menu, in the same
+/// order as [`all_names`].
+pub fn catalog() -> Vec<(&'static str, &'static str)> {
+    entries().map(|e| (e.name(), e.desc())).collect()
+}
+
+/// Look a Classic scene up by name. Studio scenes are not `SceneDef`s — use
+/// [`lookup`] for either kind.
 pub fn find(name: &str) -> Option<&'static SceneDef> {
     SCENES.iter().find(|s| s.name == name)
 }
 
-/// Named themes available for a scene (first = default).
+/// Named themes available for a scene of either kind (first = default).
 pub fn themes(name: &str) -> &'static [&'static str] {
-    find(name).map(|s| s.themes).unwrap_or(&[])
+    lookup(name).map(|e| e.themes()).unwrap_or(&[])
 }
 
-/// Build a scene by name with options.
+/// Build a Classic scene by name with options. Studio scenes have no CPU
+/// implementation and return `None` (their fallback is a Classic scene).
 pub fn create(name: &str, opts: &SceneOptions, rng: StdRng) -> Option<Box<dyn Scene>> {
     find(name).map(|s| (s.make)(rng, opts))
+}
+
+pub use shader::Category;
+
+/// A scene of either kind.
+#[derive(Clone, Copy)]
+pub enum Entry {
+    Cpu(&'static SceneDef),
+    Shader(&'static shader::ShaderSpec),
+}
+
+impl Entry {
+    pub fn name(self) -> &'static str {
+        match self {
+            Entry::Cpu(d) => d.name,
+            Entry::Shader(s) => s.name,
+        }
+    }
+    /// Display title ("Tokyo Alley"); Classic scenes use their name.
+    pub fn title(self) -> &'static str {
+        match self {
+            Entry::Cpu(d) => d.name,
+            Entry::Shader(s) => s.title,
+        }
+    }
+    pub fn desc(self) -> &'static str {
+        match self {
+            Entry::Cpu(d) => d.desc,
+            Entry::Shader(s) => s.desc,
+        }
+    }
+    pub fn themes(self) -> &'static [&'static str] {
+        match self {
+            Entry::Cpu(d) => d.themes,
+            Entry::Shader(s) => s.themes,
+        }
+    }
+    pub fn category(self) -> Category {
+        match self {
+            Entry::Cpu(_) => Category::Classic,
+            Entry::Shader(s) => s.category,
+        }
+    }
+    pub fn tags(self) -> &'static [&'static str] {
+        match self {
+            Entry::Cpu(d) => classic_tags(d.name),
+            Entry::Shader(s) => s.tags,
+        }
+    }
+    /// Sub-heading inside a category: Classic scenes are grouped by kind.
+    pub fn group(self) -> &'static str {
+        match self {
+            Entry::Cpu(d) => classic_tags(d.name).first().copied().unwrap_or("other"),
+            Entry::Shader(s) => s.category.label(),
+        }
+    }
+    /// Studio scenes render on the GPU; without one they show their fallback.
+    pub fn needs_gpu(self) -> bool {
+        matches!(self, Entry::Shader(_))
+    }
+}
+
+/// Every scene in browser order: Studio scenes by category, then Classic in
+/// registry order.
+pub fn entries() -> impl Iterator<Item = Entry> {
+    shader::SHADER_SCENES
+        .iter()
+        .map(Entry::Shader)
+        .chain(SCENES.iter().map(Entry::Cpu))
+}
+
+/// Find a scene of either kind.
+pub fn lookup(name: &str) -> Option<Entry> {
+    shader::find(name)
+        .map(Entry::Shader)
+        .or_else(|| find(name).map(Entry::Cpu))
+}
+
+pub fn exists(name: &str) -> bool {
+    lookup(name).is_some()
+}
+
+/// Classic scenes' browser groups and search tags; the first tag is the group.
+fn classic_tags(name: &str) -> &'static [&'static str] {
+    match name {
+        "rain" | "aurora" | "clouds" | "meadow" | "fireflies" | "frost" | "canopy" | "alpine"
+        | "airspace" | "scroll" => &["nature", "landscape"],
+        "ocean" | "koi" | "abyss" | "aquarium" | "ripple" => &["water", "nature"],
+        "starfield" | "meteors" | "nebula" | "orbits" => &["space"],
+        "plasma" | "tunnel" | "fire" | "pipes" | "dvd" | "bump" | "grid" | "mandel" => {
+            &["demoscene", "retro"]
+        }
+        "life" | "boids" | "sand" | "reaction" | "lava" | "harmonograph" | "pendulum"
+        | "inkdrop" | "mosaic" | "tide" | "ribbons" | "nexus" | "candy" => {
+            &["generative", "simulation"]
+        }
+        "city" | "traffic" | "drive" | "finale" => &["urban", "night"],
+        "circuits" | "sonar" | "clockwork" => &["machines"],
+        "den" | "incense" | "campfire" | "lanterns" => &["cozy"],
+        _ => &["other"],
+    }
+}
+
+/// Scenes drawn by their WGSL arm in `src/gpu/shaders/world.wgsl` when a GPU
+/// is available, instead of running the Rust scene. Empty by default: the
+/// Rust scenes are the artwork and the GPU only post-processes and packs
+/// cells. `--renderer shader` treats every scene as if it were listed here.
+pub const GPU_WORLD_SCENES: &[&str] = &[];
+
+/// Whether the GPU should draw this scene from its shader arm.
+pub fn gpu_world(name: &str) -> bool {
+    GPU_WORLD_SCENES.contains(&name)
 }
 
 
 #[cfg(test)]
 mod option_tests {
     use super::*;
+
+    #[test]
+    fn gpu_world_allowlist_names_exist() {
+        for name in GPU_WORLD_SCENES {
+            assert!(find(name).is_some(), "GPU_WORLD_SCENES lists unknown scene {name}");
+            assert!(gpu_world(name));
+        }
+        assert!(!gpu_world("no-such-scene"));
+    }
 
     #[test]
     fn detail_scaling_changes_particle_counts() {
@@ -536,6 +696,7 @@ mod perf {
             theme: None,
             detail: Detail::High,
             text_scale: None,
+            pixels: Default::default(),
         };
         for name in names() {
             let mut s = create(name, &opts, StdRng::seed_from_u64(1)).unwrap();
@@ -569,6 +730,7 @@ mod scaling_tests {
                 theme: None,
                 detail: Detail::Medium,
                 text_scale: None,
+                pixels: Default::default(),
             };
             let mut s = create(name, &opts, StdRng::seed_from_u64(1)).unwrap();
             let mut c = Canvas::new(w, h);
@@ -602,6 +764,7 @@ mod scaling_tests {
             theme: None,
             detail: Detail::High,
             text_scale: None,
+            pixels: Default::default(),
         };
         for (w, h) in [(40, 12), (400, 200)] {
             for name in names() {
@@ -682,6 +845,7 @@ mod fast_forward_tests {
             theme: None,
             detail: Detail::High,
             text_scale: None,
+            pixels: Default::default(),
         };
         for name in names() {
             let mut s = create(name, &opts, StdRng::seed_from_u64(1)).unwrap();
@@ -717,6 +881,7 @@ mod clouds_perf_tests {
             theme: None,
             detail: Detail::High,
             text_scale: None,
+            pixels: Default::default(),
         };
         let mut s = create("clouds", &opts, StdRng::seed_from_u64(1)).unwrap();
         let mut c = Canvas::new(200, 100);
@@ -743,6 +908,7 @@ mod edge_coverage_tests {
             theme: None,
             detail: Detail::Medium,
             text_scale: None,
+            pixels: Default::default(),
         };
         for name in names() {
             if matches!(name, "bump" | "dvd") {
@@ -824,6 +990,7 @@ mod registry_tests {
             theme: theme.map(|t| t.to_string()),
             detail,
             text_scale: None,
+            pixels: Default::default(),
         }
     }
 
@@ -873,7 +1040,8 @@ mod registry_tests {
     #[test]
     fn registry_is_internally_consistent() {
         assert_eq!(SCENES.len(), names().len());
-        assert_eq!(SCENES.len(), catalog().len());
+        // the catalog lists Studio scenes too
+        assert_eq!(SCENES.len() + shader::SHADER_SCENES.len(), catalog().len());
         for def in SCENES {
             assert!(!def.desc.is_empty(), "{} has no description", def.name);
             assert!(!def.themes.is_empty(), "{} has no themes", def.name);
@@ -930,6 +1098,7 @@ mod particle_trim_tests {
                 theme: None,
                 detail: Detail::High,
                 text_scale: None,
+                pixels: Default::default(),
             };
             let mut s = create(name, &opts, StdRng::seed_from_u64(11)).unwrap();
             let mut c = Canvas::new(160, 100);

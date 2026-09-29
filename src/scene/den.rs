@@ -33,7 +33,7 @@ pub struct Den {
 }
 
 impl Den {
-    pub fn new(rng: StdRng, theme: Option<&str>, detail: Detail) -> Self {
+    pub fn new(rng: StdRng, theme: Option<&str>, detail: Detail, pixels: crate::render::Pixels) -> Self {
         let (evening, rain_outside) = match theme {
             Some("evening") => (true, false),
             Some("rain-outside") => (false, true),
@@ -50,6 +50,7 @@ impl Den {
                         theme: None,
                         detail: Detail::Medium,
                         text_scale: None,
+                        pixels,
                     },
                     StdRng::seed_from_u64(seed),
                 )
@@ -560,7 +561,7 @@ mod tests {
 
     #[test]
     fn tv_plays_real_scenes() {
-        let mut d = Den::new(StdRng::seed_from_u64(7), None, Detail::Medium);
+        let mut d = Den::new(StdRng::seed_from_u64(7), None, Detail::Medium, Default::default());
         let mut c = Canvas::new(120, 50);
         for _ in 0..90 {
             d.update(1.0 / 30.0, &mut c);
@@ -584,7 +585,7 @@ mod tests {
 
     #[test]
     fn channel_changes_after_interval() {
-        let mut d = Den::new(StdRng::seed_from_u64(8), None, Detail::Medium);
+        let mut d = Den::new(StdRng::seed_from_u64(8), None, Detail::Medium, Default::default());
         let mut c = Canvas::new(120, 50);
         d.update(1.0 / 30.0, &mut c);
         assert_eq!(d.channel, 0);

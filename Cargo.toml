@@ -1,8 +1,8 @@
 [package]
 name = "termpaper"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Wallpaper Engine for the terminal — 120fps truecolor worlds, 22 filters, total customization"
+description = "Wallpaper Engine for the terminal — GPU-rendered real-world scenes, synced across every monitor"
 readme = "README.md"
 license = "MIT"
 keywords = ["terminal", "tui", "animation", "wallpaper", "screensaver"]
@@ -10,7 +10,7 @@ categories = ["command-line-utilities"]
 repository = "https://github.com/Aphrodine-wq/termpaper"
 homepage = "https://github.com/Aphrodine-wq/termpaper"
 authors = ["aphrodine"]
-include = ["src/**/*", "LICENSE", "README.md", "Cargo.lock"]
+include = ["src/**/*", "build.rs", "LICENSE", "README.md", "Cargo.lock"]
 
 [[bin]]
 name = "termpaper"
@@ -22,21 +22,54 @@ crossterm = "0.29.0"
 rand = "0.10.2"
 ratatui = "0.30.2"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 toml = "1.1.3"
-[target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
-
-# GPU post-processing backend (optional). Off by default so the plain
-# terminal build keeps its zero-driver dependency footprint.
-wgpu = { version = "30.0.0", optional = true, default-features = false, features = ["vulkan", "wgsl"] }
+# local time for the clock overlay and time-of-day variants (TZ and DST
+# handled per platform, no `date` subprocess)
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# theme share codes: deflate, pure Rust
+miniz_oxide = "0.8"
+# GPU backend: Studio shader scenes plus post-processing. On by default;
+# `--no-default-features` builds the CPU-only binary (Classic scenes only).
+# Vulkan on Linux and Windows, Metal on macOS, DX12 as the Windows fallback;
+# each backend feature is a no-op on the other platforms. The drivers load
+# at runtime, so a machine without a GPU still runs.
+# `std` makes error scopes thread-local, which the shader compile thread needs.
+wgpu = { version = "30.0.0", optional = true, default-features = false, features = ["std", "vulkan", "metal", "dx12", "wgsl"] }
 bytemuck = { version = "1.25", optional = true, features = ["derive"] }
 pollster = { version = "1.0", optional = true }
+# The theme gallery (`termpaper theme install/browse/publish`, the Gallery
+# shelf): HTTPS with rustls and bundled root certificates, so it works the
+# same everywhere. Only ever used when you ask; `--no-default-features`
+# leaves it out.
+ureq = { version = "3.4", optional = true, default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+# wgsl-in validates every shader; the MSL and HLSL writers catch constructs
+# only Metal (macOS) or DX12 (Windows) reject, on any machine
+naga = { version = "30.0.0", features = ["wgsl-in", "msl-out", "hlsl-out"] }
+# examples/ui_snapshot.rs: the menu rasterised to PNG for review
+fontdue = "0.9"
+png = "0.18"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Media",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Power",
+    "Win32_System_Threading",
+] }
 
 [features]
-default = []
+default = ["gpu", "net"]
 gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
+net = ["dep:ureq"]
 
-# These link the GPU backend, so they only exist in a `--features gpu` build.
+# These link the GPU backend, so they only exist in a `gpu` build.
 [[example]]
 name = "gpu_bench"
 required-features = ["gpu"]
@@ -44,3 +77,19 @@ required-features = ["gpu"]
 [[example]]
 name = "gpu_diag"
 required-features = ["gpu"]
+
+[[example]]
+name = "world_review"
+required-features = ["gpu"]
+
+[[example]]
+name = "shader_review"
+required-features = ["gpu"]
+
+# naga validates every Studio shader in the test suite; unoptimized it
+# dominates `cargo test` time.
+[profile.dev.package.naga]
+opt-level = 3
+
+[profile.dev.package.wgpu-core]
+opt-level = 2

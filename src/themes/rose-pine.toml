@@ -1,0 +1,22 @@
+format = 1
+name = "Rosé Pine"
+author = "termpaper"
+description = "All natural pine, faux fur and a bit of soho vibes: muted rose and iris."
+tags = ["terminal", "dark", "pink"]
+
+[grade]
+tint = 0.12
+fade = 0.06
+
+[palette]
+mode = "tint"
+strength = 0.6
+colors = ["#191724", "#26233a", "#6e6a86", "#c4a7e7", "#ebbcba", "#e0def4"]
+
+[effects]
+stack = ["bloom"]
+bloom = 0.4
+
+[scene]
+name = "library"
+variant = "candle"

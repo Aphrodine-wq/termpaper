@@ -24,6 +24,7 @@ fn main() {
         theme: theme.map(|t| t.to_string()),
         detail: Detail::Medium,
         text_scale: None,
+        pixels: Default::default(),
     };
     let mut s = scene::create(name, &opts, StdRng::seed_from_u64(42)).expect("scene exists");
     let mut canvas = Canvas::new(w, h);

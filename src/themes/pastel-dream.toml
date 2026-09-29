@@ -1,0 +1,23 @@
+format = 1
+name = "Pastel Dream"
+author = "termpaper"
+description = "Soft, airy and light: pale colours, lifted shadows, a gentle glow."
+tags = ["mood", "light", "pastel"]
+
+[grade]
+exposure = 0.25
+saturation = 0.7
+fade = 0.12
+
+[palette]
+mode = "tint"
+strength = 0.4
+colors = ["#2b2d42", "#8d99ae", "#ffb5a7", "#fcd5ce", "#f8edeb"]
+
+[effects]
+stack = ["bloom"]
+bloom = 0.6
+
+[scene]
+name = "cloudsea"
+variant = "sunrise"

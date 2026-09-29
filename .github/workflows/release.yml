@@ -18,6 +18,14 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
 
     runs-on: ${{ matrix.os }}
 
@@ -31,13 +39,48 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Package
+      - name: Package (tar.gz)
+        if: runner.os != 'Windows'
         run: |
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/termpaper" dist/
           tar -czf "termpaper-${{ matrix.target }}.tar.gz" -C dist termpaper
 
+      - name: Package (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/termpaper.exe" dist/
+          Compress-Archive -Path dist/termpaper.exe -DestinationPath "termpaper-${{ matrix.target }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: termpaper-${{ matrix.target }}
+          path: termpaper-${{ matrix.target }}.*
+
       - uses: softprops/action-gh-release@v2
         with:
-          files: termpaper-${{ matrix.target }}.tar.gz
+          files: termpaper-${{ matrix.target }}.*
           generate_release_notes: true
+
+  universal-macos:
+    # one binary for Apple Silicon and Intel Macs; install.sh downloads this
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: termpaper-*-apple-darwin
+          merge-multiple: true
+      - name: lipo
+        run: |
+          mkdir arm intel
+          tar -xzf termpaper-aarch64-apple-darwin.tar.gz -C arm
+          tar -xzf termpaper-x86_64-apple-darwin.tar.gz -C intel
+          lipo -create -output termpaper arm/termpaper intel/termpaper
+          lipo -info termpaper
+          tar -czf termpaper-universal-apple-darwin.tar.gz termpaper
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: termpaper-universal-apple-darwin.tar.gz

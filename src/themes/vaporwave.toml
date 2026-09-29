@@ -1,0 +1,22 @@
+format = 1
+name = "Vaporwave"
+author = "termpaper"
+description = "Magenta and cyan dreams, soft scanlines and colour fringing."
+tags = ["retro", "neon", "pink"]
+
+[grade]
+vibrance = 0.4
+
+[palette]
+mode = "tint"
+strength = 0.7
+colors = ["#1a0033", "#3d0066", "#ff00a0", "#00e5ff", "#ffd1f0"]
+
+[effects]
+stack = ["chroma", "scanlines"]
+chroma = 0.6
+scanlines = 0.4
+
+[scene]
+name = "grid"
+variant = "vapor"

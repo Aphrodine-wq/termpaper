@@ -1,0 +1,19 @@
+format = 1
+name = "Everforest"
+author = "termpaper"
+description = "Comfortable green-based forest colours, easy on the eyes."
+tags = ["terminal", "dark", "green"]
+
+[grade]
+saturation = 0.9
+temperature = 0.1
+tint = -0.1
+
+[palette]
+mode = "tint"
+strength = 0.6
+colors = ["#2d353b", "#3d484d", "#7a8478", "#83c092", "#a7c080", "#dbbc7f", "#d3c6aa"]
+
+[scene]
+name = "redwoods"
+variant = "morning"
