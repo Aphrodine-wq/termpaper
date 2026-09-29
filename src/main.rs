@@ -323,12 +323,6 @@ fn print_list(category: Option<&str>) {
     let _ = std::io::stdout().write_all(out.as_bytes());
 }
 
-fn detect_truecolor() -> bool {
-    std::env::var("COLORTERM")
-        .map(|v| v.contains("truecolor") || v.contains("24bit"))
-        .unwrap_or(false)
-}
-
 /// Fallback quality profile when neither CLI nor config sets one.
 /// macOS (MacBook thermal/battery headroom) defaults to half-res pixels
 /// and 0.5x particle counts; explicit --detail/--pixels/config always win.
@@ -424,6 +418,8 @@ fn main() -> std::io::Result<()> {
 
     let cfg = config::load();
     let names = scene::all_names();
+    // which terminal this is: 24-bit colour and a frame rate it can take
+    let caps = termpaper::term_caps::detect();
 
     let detail = args
         .detail
@@ -461,7 +457,7 @@ fn main() -> std::io::Result<()> {
     } else {
         args.filter.clone()
     };
-    let fps = args.fps.or(cfg.fps).unwrap_or(config::DEFAULT_FPS).clamp(1, 240);
+    let fps = args.fps.or(cfg.fps).unwrap_or(caps.default_fps).clamp(1, 240);
     let idle_fps = args.idle_fps.or(cfg.idle_fps).map(|f| f.clamp(1, 240));
     let speed = args.speed.or(cfg.speed).unwrap_or(1.0);
     let cycle = args.cycle.or(cfg.cycle).filter(|c| *c > 0.0);
@@ -532,12 +528,15 @@ fn main() -> std::io::Result<()> {
         saturation,
         contrast,
         screensaver: args.screensaver,
-        truecolor: detect_truecolor() && !args.no_truecolor,
+        truecolor: caps.truecolor && !args.no_truecolor,
+        default_fps: caps.default_fps,
         renderer,
         gpu_budget_ms: cfg_budget,
         shader_fps: cfg_shader_fps,
     };
 
+    // 1 ms timed waits on Windows (frame pacing); a no-op elsewhere
+    let _timer = termpaper::platform::TimerResolution::raise();
     let mut terminal = init_terminal()?;
     terminal.hide_cursor()?;
     // focus reporting lets unfocused instances skip the pacing spin (and
@@ -622,6 +621,9 @@ struct Settings {
     contrast: f32,
     screensaver: bool,
     truecolor: bool,
+    /// the terminal's frame-rate default (a config value equal to it is not
+    /// written back)
+    default_fps: u32,
     renderer: termpaper::engine::Renderer,
     /// GPU ms per frame a Studio scene may use (quality governor budget)
     gpu_budget_ms: f32,
@@ -968,6 +970,7 @@ fn persist(settings: &mut Settings, scene_name: &str, theme: Option<&str>, detai
         filters: &settings.filters,
         text_scale: settings.text_scale,
         fps: settings.fps,
+        default_fps: settings.default_fps,
         speed: settings.speed,
         smooth: settings.smooth,
         dim: settings.dim,
@@ -1114,7 +1117,7 @@ fn apply_defaults(
     settings.theme = None;
     settings.filters.clear();
     settings.text_scale = None;
-    settings.fps = config::DEFAULT_FPS;
+    settings.fps = settings.default_fps;
     settings.speed = config::DEFAULT_SPEED;
     settings.smooth = config::DEFAULT_SMOOTH;
     settings.dim = config::DEFAULT_DIM;
@@ -1232,7 +1235,8 @@ fn run(
     let mut wall_layout: Option<wall::WallLayout> = None;
     let mut wall_refresh = Instant::now() - Duration::from_secs(10);
     // hyprctl inside the frame loop stalls the frame it lands on
-    let mut geo_watcher = if (settings.link_enabled && settings.wall_enabled) || settings.wall_spec.is_some() {
+    let hypr_ok = termpaper::hypr::present() && termpaper::hypr::monitors().is_some();
+    let mut geo_watcher = if hypr_ok && ((settings.link_enabled && settings.wall_enabled) || settings.wall_spec.is_some()) {
         Some(wall::GeoWatcher::spawn())
     } else {
         None
@@ -1241,7 +1245,6 @@ fn run(
     // whole group from the desk model and every pane adopts it — portrait
     // and landscape monitors line up in millimetres. The cell-count layout
     // stays as the fallback everywhere else.
-    let hypr_ok = termpaper::hypr::monitors().is_some();
     let mut planner: Option<termpaper::wallplan::Planner> = None;
     let mut plan_watcher: Option<termpaper::wallplan::PlanWatcher> = None;
     let mut calib_watcher: Option<termpaper::calibrate::Watcher> = None;
@@ -1484,7 +1487,7 @@ fn run(
                 }
                 Effect::SetWall(on) => {
                     settings.wall_enabled = on;
-                    if on && geo_watcher.is_none() {
+                    if on && hypr_ok && geo_watcher.is_none() {
                         geo_watcher = Some(wall::GeoWatcher::spawn());
                     }
                     if !on && settings.wall_spec.is_none() {
@@ -1586,6 +1589,7 @@ fn run(
         // instance linking: a stat per channel per frame; a file is only
         // read and parsed when a publish replaced it
         if let Some(g) = &mut guard {
+            g.heartbeat();
             if let Some(a) = g.poll_anchor() {
                 receive_anchor(&mut st, a, &mut transition, &names, &mut settings, &mut opts);
                 last_switch = Instant::now();
@@ -1755,16 +1759,12 @@ fn run(
             }
         }
 
-        // clock overlay: one cheap `date` call per 10s, handles TZ/DST
-        if settings.clock && clock_stamp.elapsed() > Duration::from_secs(10) {
+        // clock overlay: local time (TZ and DST from the OS), refreshed at
+        // most once a second
+        if settings.clock && clock_stamp.elapsed() > Duration::from_secs(1) {
             clock_stamp = Instant::now();
-            clock_text = std::process::Command::new("date")
-                .arg("+%H:%M")
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_default();
+            let t = termpaper::platform::local_time();
+            clock_text = format!("{:02}:{:02}", t.hour, t.minute);
         }
 
         // a newly published plan, and any calibration in progress

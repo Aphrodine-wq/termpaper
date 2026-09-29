@@ -2,18 +2,58 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: ["**"]
   pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # CPU-only build (Classic scenes), then the default GPU build. Studio
-      # shaders are validated with naga in both; rendering needs a real GPU
-      # (`cargo test --test gpu_shader_scenes -- --ignored` locally).
+      - uses: Swatinem/rust-cache@v2
+      # CPU-only build (Classic scenes), then the default GPU build. Every
+      # Studio shader is validated with naga in both, including its Metal
+      # and DX12 translations, so no GPU is needed here.
       - run: cargo test --all-targets --no-default-features --locked
       - run: cargo test --all-targets --locked
       - run: cargo build --release --locked
+
+  gpu:
+    # The real-device tests (`--ignored`) on whatever each runner offers:
+    # Mesa's software Vulkan (lavapipe) on Linux, Metal on the Apple Silicon
+    # runner, WARP (software DX12) on Windows. Software rasterizers are slow
+    # and new here, so this job reports without blocking.
+    name: gpu (${{ matrix.name }})
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-lavapipe
+            os: ubuntu-latest
+          - name: macos-metal
+            os: macos-latest
+          - name: windows-warp
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Software Vulkan
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      - name: GPU tests
+        run: cargo test --release --locked --test gpu_shader_scenes --test gpu_world -- --ignored --test-threads=1
+        env:
+          RUST_BACKTRACE: "1"

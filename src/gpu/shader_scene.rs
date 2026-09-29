@@ -261,11 +261,7 @@ fn compile(
 
 /// Where compile errors go: stderr would scribble over the TUI.
 fn log_error(name: &str, msg: &str) {
-    let dir = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state")))
-        .map(|d| d.join("termpaper"));
-    if let Some(dir) = dir {
+    if let Some(dir) = crate::platform::state_dir() {
         let _ = std::fs::create_dir_all(&dir);
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new()

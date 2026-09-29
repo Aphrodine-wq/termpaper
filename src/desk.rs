@@ -323,10 +323,7 @@ pub fn desk_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("TERMPAPER_DESK") {
         return Some(PathBuf::from(p));
     }
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("termpaper").join("desk.toml"))
+    crate::platform::config_dir().map(|d| d.join("desk.toml"))
 }
 
 /// The desk config, or defaults when there is none (or it does not parse).

@@ -6,6 +6,8 @@
 //! of a user's wallpaper. Errors are reported against the scene file.
 use termpaper::scene::{self, shader};
 
+mod common;
+
 fn validate(composed: &shader::Composed) -> Result<(), String> {
     let module = naga::front::wgsl::parse_str(&composed.source).map_err(|e| {
         let msg = e.emit_to_string(&composed.source);
@@ -15,13 +17,13 @@ fn validate(composed: &shader::Composed) -> Result<(), String> {
             None => msg,
         }
     })?;
-    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::default())
+    let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::default())
         .validate(&module)
         .map_err(|e| e.emit_to_string(&composed.source))?;
     if !module.entry_points.iter().any(|e| e.name == "main") {
         return Err("no `main` entry point".into());
     }
-    Ok(())
+    common::translate_for_every_backend(&module, &info)
 }
 
 #[test]

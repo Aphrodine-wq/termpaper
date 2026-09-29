@@ -17,12 +17,47 @@
 //!   keep following; new binaries only read it for messages that lack the
 //!   `proto` marker, i.e. ones an older binary wrote.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Link protocol version written into every file. 2 = anchor.json,
-/// settings.json and the wall's cell/padding facts in inst files.
-pub const PROTO: u32 = 2;
+/// settings.json and the wall's cell/padding facts in inst files; 3 = the
+/// instance file is refreshed every [`HEARTBEAT`].
+pub const PROTO: u32 = 3;
+
+/// First protocol that publishes `anchor.json`. Scene and settings messages
+/// on `control.json` from binaries below it are the only way to follow them;
+/// from anything newer they are mirrors of what anchor.json already says.
+const ANCHOR_PROTO: u32 = 2;
+
+/// First protocol whose instance files carry a heartbeat.
+const HEARTBEAT_PROTO: u32 = 3;
+
+/// How often a live instance rewrites its registry entry.
+pub const HEARTBEAT: Duration = Duration::from_secs(5);
+
+/// A heartbeat entry left alone this long belongs to a process that is gone,
+/// even when its pid now names another process (Windows recycles pids fast).
+pub const STALE_AFTER: Duration = Duration::from_secs(30);
+
+/// Whether a registry entry belongs to a live instance: its pid exists and,
+/// for entries that heartbeat, it was refreshed recently.
+fn entry_alive(pid: u32, proto: u32, modified: Option<SystemTime>) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    if !pid_alive(pid) {
+        return false;
+    }
+    if proto < HEARTBEAT_PROTO {
+        return true;
+    }
+    // a clock set backwards makes elapsed() fail: count that as fresh
+    modified
+        .and_then(|m| m.elapsed().ok())
+        .is_none_or(|age| age < STALE_AFTER)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ControlKind {
@@ -385,15 +420,10 @@ pub fn sanitize_group(s: &str) -> String {
     }
 }
 
-/// $XDG_RUNTIME_DIR/termpaper, else /tmp/termpaper-$UID.
+/// $XDG_RUNTIME_DIR/termpaper, /tmp/termpaper-$UID, or %TEMP%\termpaper
+/// (see `platform::runtime_dir`).
 pub fn registry_base() -> Option<PathBuf> {
-    if let Ok(x) = std::env::var("XDG_RUNTIME_DIR") {
-        if !x.is_empty() {
-            return Some(PathBuf::from(x).join("termpaper"));
-        }
-    }
-    let uid = libc_getuid();
-    Some(PathBuf::from(format!("/tmp/termpaper-{uid}")))
+    crate::platform::runtime_dir()
 }
 
 /// Registry directory for a link group. `default` uses the legacy flat dir.
@@ -412,42 +442,7 @@ pub fn registry_dir() -> Option<PathBuf> {
     group_dir("default")
 }
 
-#[cfg(target_os = "linux")]
-fn libc_getuid() -> u32 {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("Uid:"))
-                .and_then(|l| l.split_whitespace().nth(1).map(|v| v.to_string()))
-        })
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1000)
-}
-
-#[cfg(target_os = "macos")]
-fn libc_getuid() -> u32 {
-    unsafe { libc::getuid() }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn libc_getuid() -> u32 {
-    1000
-}
-
-#[cfg(target_os = "macos")]
-fn pid_alive(pid: u32) -> bool {
-    // kill(pid, 0): 0 = alive & ours, EPERM = alive but not ours, ESRCH = dead
-    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn pid_alive(pid: u32) -> bool {
-    PathBuf::from(format!("/proc/{pid}")).exists()
-}
+use crate::platform::pid_alive;
 
 fn atomic_write(path: &PathBuf, contents: &str) -> std::io::Result<()> {
     // pid-suffixed temp name: concurrent publishers to the same target
@@ -525,6 +520,8 @@ pub struct Guard {
     anchor: Option<Anchor>,
     settings_seen: Option<FileSig>,
     settings_last: Option<Stamp>,
+    /// when the instance file was last written (the heartbeat's clock)
+    written: Cell<Instant>,
 }
 
 #[cfg(unix)]
@@ -533,7 +530,16 @@ fn file_ino(m: &std::fs::Metadata) -> u64 {
     m.ino()
 }
 
-#[cfg(not(unix))]
+/// Windows has no stable inode through std; `atomic_write` renames a freshly
+/// created file into place, so the creation time changes on every publish
+/// and serves the same purpose.
+#[cfg(windows)]
+fn file_ino(m: &std::fs::Metadata) -> u64 {
+    use std::os::windows::fs::MetadataExt;
+    m.creation_time()
+}
+
+#[cfg(not(any(unix, windows)))]
 fn file_ino(_m: &std::fs::Metadata) -> u64 {
     0
 }
@@ -560,7 +566,7 @@ impl Guard {
             self.anchor = Some(a.clone());
             return Some(a);
         }
-        let legacy = self.latest_scene().filter(|c| c.proto < PROTO)?;
+        let legacy = self.latest_scene().filter(|c| c.proto < ANCHOR_PROTO)?;
         let a = Anchor::from_legacy(&legacy, sim);
         self.anchor = Some(a.clone());
         Some(a)
@@ -598,6 +604,7 @@ impl Guard {
             anchor: None,
             settings_seen: None,
             settings_last: None,
+            written: Cell::new(Instant::now()),
         };
         g.write()?;
         Some(g)
@@ -624,6 +631,7 @@ impl Guard {
             Some((w, h)) => format!(",\"cw\":{w},\"ch\":{h}"),
             None => String::new(),
         };
+        self.written.set(Instant::now());
         // px/py stay whole numbers for older binaries; padx/pady are exact
         atomic_write(
             &self.path(),
@@ -649,6 +657,15 @@ impl Guard {
             ),
         )
         .ok()
+    }
+
+    /// Rewrite the instance file when the last write is [`HEARTBEAT`] old,
+    /// so peers can tell a live pane from a dead one whose pid was reused.
+    /// Call every frame; it only touches the disk every few seconds.
+    pub fn heartbeat(&self) {
+        if self.written.get().elapsed() >= HEARTBEAT {
+            let _ = self.write();
+        }
     }
 
     /// Ask the group's leader for a fresh anchor because this pane cannot
@@ -712,7 +729,7 @@ impl Guard {
         let text = std::fs::read_to_string(path).ok()?;
         parse_control(&text).filter(|c| {
             c.from_pid != self.pid
-                && c.proto < PROTO
+                && c.proto < ANCHOR_PROTO
                 && Stamp {
                     epoch: c.epoch,
                     seq: c.seq,
@@ -921,10 +938,15 @@ pub fn reap_stale(dir: &PathBuf) {
         if let Some(rest) = name.strip_prefix("inst-") {
             if let Some(pid_s) = rest.strip_suffix(".json") {
                 if let Ok(pid) = pid_s.parse::<u32>() {
-                    if pid != std::process::id() && !pid_alive(pid) {
-                        let _ = std::fs::remove_file(e.path());
-                    } else {
+                    let proto = std::fs::read_to_string(e.path())
+                        .ok()
+                        .and_then(|t| json_get(&t, "proto").and_then(|v| v.parse().ok()))
+                        .unwrap_or(0);
+                    let modified = e.metadata().and_then(|m| m.modified()).ok();
+                    if entry_alive(pid, proto, modified) {
                         any_live_inst = true;
+                    } else {
+                        let _ = std::fs::remove_file(e.path());
                     }
                 }
             }
@@ -981,7 +1003,8 @@ fn scan_group_dir(dir: &PathBuf, group: &str) -> Vec<InstanceInfo> {
                     if info.group.is_empty() {
                         info.group = group.to_string();
                     }
-                    if pid_alive(info.pid) {
+                    let modified = e.metadata().and_then(|m| m.modified()).ok();
+                    if entry_alive(info.pid, info.proto, modified) {
                         out.push(info);
                     }
                 }
@@ -1300,6 +1323,42 @@ mod tests {
             drop(g);
             assert!(!dir.join(format!("inst-{pid}.json")).exists());
         });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn heartbeat_entries_go_stale_but_old_ones_do_not() {
+        // a live pid that is not ours: the test runner's parent
+        let other = std::os::unix::process::parent_id();
+        assert!(pid_alive(other));
+        let now = SystemTime::now();
+        let old = now - STALE_AFTER - Duration::from_secs(1);
+        // heartbeat entries: fresh = alive, stale = dead even with a live pid
+        assert!(entry_alive(other, HEARTBEAT_PROTO, Some(now)));
+        assert!(!entry_alive(other, HEARTBEAT_PROTO, Some(old)));
+        // entries from binaries that never heartbeat keep pid-only liveness
+        assert!(entry_alive(other, ANCHOR_PROTO, Some(old)));
+        assert!(entry_alive(other, 0, Some(old)));
+        // our own entry is always alive; a dead pid never is
+        assert!(entry_alive(std::process::id(), HEARTBEAT_PROTO, Some(old)));
+        assert!(!entry_alive(0x7FFF_FFFE, 0, Some(now)));
+    }
+
+    #[test]
+    fn a_proto_2_mirror_is_not_a_legacy_message() {
+        // proto-2 binaries publish anchor.json; their control.json mirror
+        // must not be applied a second time by a newer binary
+        let dir = std::env::temp_dir().join(format!("termpaper-mirror-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut g = Guard::new_in(dir.clone(), "fire", "t").unwrap();
+        let mirror = "{\"kind\":\"scene\",\"proto\":2,\"scene\":\"rain\",\"epoch\":99999999999999,\"seq\":1,\"from_pid\":1,\"seed\":1,\"t0_ms\":1}";
+        std::fs::write(dir.join("control.json"), mirror).unwrap();
+        assert!(g.poll_control(Stamp::default()).is_none());
+        let legacy = mirror.replace("\"proto\":2,", "");
+        std::fs::write(dir.join("control.json"), legacy).unwrap();
+        assert!(g.poll_control(Stamp::default()).is_some(), "a proto-less message is legacy");
+        drop(g);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

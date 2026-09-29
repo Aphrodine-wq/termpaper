@@ -228,6 +228,9 @@ pub fn hypr_geo(pid: u32) -> Option<Geo> {
 
 /// Run `hyprctl <args>` and return its stdout.
 fn hyprctl(args: &[&str]) -> Option<String> {
+    if !crate::hypr::present() {
+        return None;
+    }
     let mut cmd = std::process::Command::new("hyprctl");
     cmd.args(args);
     // hyprctl refuses to run without HYPRLAND_INSTANCE_SIGNATURE; when the

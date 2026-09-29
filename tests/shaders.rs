@@ -1,27 +1,27 @@
-#[test]
-fn world_shader_is_valid_without_a_gpu() {
-    let source = include_str!("../src/gpu/shaders/world.wgsl");
+mod common;
+
+/// Parse, validate and translate for Metal and DX12, panicking with the
+/// error against the source.
+fn check(source: &str) {
     let module = naga::front::wgsl::parse_str(source)
         .unwrap_or_else(|error| panic!("{}", error.emit_to_string(source)));
-    naga::valid::Validator::new(
+    let info = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::empty(),
     )
     .validate(&module)
     .unwrap_or_else(|error| panic!("{}", error.emit_to_string(source)));
+    common::translate_for_every_backend(&module, &info).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn world_shader_is_valid_without_a_gpu() {
+    check(include_str!("../src/gpu/shaders/world.wgsl"));
 }
 
 #[test]
 fn post_shader_is_valid_without_a_gpu() {
-    let source = include_str!("../src/gpu/shaders/post.wgsl");
-    let module = naga::front::wgsl::parse_str(source)
-        .unwrap_or_else(|error| panic!("{}", error.emit_to_string(source)));
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::empty(),
-    )
-    .validate(&module)
-    .unwrap_or_else(|error| panic!("{}", error.emit_to_string(source)));
+    check(include_str!("../src/gpu/shaders/post.wgsl"));
 }
 
 // WGSL `case N:` arms are indexed by catalog position, so new scenes are

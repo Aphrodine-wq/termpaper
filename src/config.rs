@@ -1,4 +1,5 @@
-//! Config file: ~/.config/termpaper/config.toml
+//! Config file: `config.toml` in the config directory (see
+//! `platform::config_dir`: ~/.config/termpaper, or %APPDATA%\termpaper).
 //! Read on startup; the settings menu writes changes back atomically
 //! (temp file + rename). Unknown keys warn, never fail.
 
@@ -238,6 +239,8 @@ pub struct Live<'a> {
     pub filters: &'a [String],
     pub text_scale: Option<u32>,
     pub fps: u32,
+    /// the terminal's frame-rate default; not stored when equal
+    pub default_fps: u32,
     pub speed: f32,
     pub smooth: f32,
     pub dim: f32,
@@ -267,7 +270,7 @@ pub fn store(cfg: &mut Config, live: &Live) {
     cfg.detail = keep(live.detail, live.default_detail).map(str::to_string);
     cfg.filters = live.filters.to_vec();
     cfg.text_scale = live.text_scale;
-    cfg.fps = keep(live.fps, DEFAULT_FPS);
+    cfg.fps = keep(live.fps, live.default_fps);
     cfg.speed = keep(round2(live.speed), DEFAULT_SPEED);
     cfg.smooth = keep(round2(live.smooth), DEFAULT_SMOOTH);
     cfg.dim = keep(round2(live.dim), DEFAULT_DIM);
@@ -335,14 +338,7 @@ impl SaveTimer {
 }
 
 pub fn config_path() -> Option<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return Some(PathBuf::from(xdg).join("termpaper/config.toml"));
-        }
-    }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|h| h.join(".config/termpaper/config.toml"))
+    crate::platform::config_dir().map(|d| d.join("config.toml"))
 }
 
 pub fn load() -> Config {
@@ -362,7 +358,7 @@ pub fn load() -> Config {
 }
 
 /// Persist the config atomically: write a temp file next to the target,
-/// then rename over it. Creates ~/.config/termpaper if needed (explicit
+/// then rename over it. Creates the config directory if needed (explicit
 /// user action via the menu — not done silently on startup).
 #[allow(dead_code)] // used by the settings menu
 pub fn save(cfg: &Config) -> std::io::Result<()> {
@@ -584,6 +580,7 @@ mod tests {
             filters: &[],
             text_scale: None,
             fps: DEFAULT_FPS,
+            default_fps: DEFAULT_FPS,
             speed: DEFAULT_SPEED,
             smooth: DEFAULT_SMOOTH,
             dim: DEFAULT_DIM,

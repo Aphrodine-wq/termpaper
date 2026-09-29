@@ -5,9 +5,7 @@
 //! the `hyprctl` binary. Only the fields termpaper needs are decoded; unknown
 //! fields are ignored so newer compositors keep working.
 use serde::Deserialize;
-use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::time::Duration;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -77,7 +75,17 @@ fn signature() -> Option<String> {
     (dirs.len() == 1).then(|| dirs[0].file_name().to_string_lossy().into_owned())
 }
 
+/// Whether a Hyprland session is reachable from here. Cheap (no process
+/// spawn), so callers check it before asking anything: on macOS, Windows or
+/// another compositor every query would otherwise try to spawn `hyprctl`.
+pub fn present() -> bool {
+    signature().is_some()
+}
+
+#[cfg(unix)]
 fn via_socket(request: &str) -> Option<String> {
+    use std::io::{Read, Write};
+    use std::time::Duration;
     let sig = signature()?;
     let path = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?)
         .join("hypr")
@@ -90,6 +98,12 @@ fn via_socket(request: &str) -> Option<String> {
     let mut out = String::new();
     s.read_to_string(&mut out).ok()?;
     Some(out)
+}
+
+/// Hyprland only runs on Unix; elsewhere there is no socket to ask.
+#[cfg(not(unix))]
+fn via_socket(_request: &str) -> Option<String> {
+    None
 }
 
 fn via_hyprctl(what: &str) -> Option<String> {
@@ -105,6 +119,9 @@ fn via_hyprctl(what: &str) -> Option<String> {
 }
 
 fn query(what: &str) -> Option<String> {
+    if !present() {
+        return None;
+    }
     via_socket(&format!("j/{what}")).or_else(|| via_hyprctl(what))
 }
 

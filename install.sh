@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install termpaper to ~/.local/bin (and optionally ~/.cargo/bin).
+# Install termpaper to ~/.local/bin (and optionally ~/.cargo/bin) on Linux
+# and macOS. On Windows use install.ps1 instead.
 #
 # From a clone:
 #   ./install.sh
@@ -50,9 +51,18 @@ need_cargo() {
 machine_target() {
     local arch
     arch="$(uname -m)"
-    case "$arch" in
-        x86_64 | amd64) echo "x86_64-unknown-linux-gnu" ;;
-        aarch64 | arm64) echo "aarch64-unknown-linux-gnu" ;;
+    case "$(uname -s)" in
+        Darwin)
+            # one universal binary runs on Apple Silicon and Intel Macs
+            echo "universal-apple-darwin"
+            ;;
+        Linux)
+            case "$arch" in
+                x86_64 | amd64) echo "x86_64-unknown-linux-gnu" ;;
+                aarch64 | arm64) echo "aarch64-unknown-linux-gnu" ;;
+                *) return 1 ;;
+            esac
+            ;;
         *) return 1 ;;
     esac
 }
@@ -99,7 +109,7 @@ install_from_git() {
 
 install_binary() {
     local target url tmp
-    target="$(machine_target)" || die "no prebuilt Linux binary for $(uname -m); install Rust from https://rustup.rs and re-run without --binary"
+    target="$(machine_target)" || die "no prebuilt binary for $(uname -s) $(uname -m); install Rust from https://rustup.rs and re-run without --binary"
     url="https://github.com/${RELEASE_REPO}/releases/latest/download/termpaper-${target}.tar.gz"
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
@@ -125,22 +135,29 @@ link_local_bin() {
 
 truecolor_hint() {
     local ct="${COLORTERM:-}"
-    if [[ "$ct" != *truecolor* && "$ct" != *24bit* ]]; then
-        warn "COLORTERM is '${ct:-unset}' — termpaper works best in a truecolor terminal (kitty, ghostty, alacritty, foot, wezterm)."
-        warn "256-color fallback still works; use --no-truecolor to force it."
+    # termpaper recognises most terminals by name (kitty, ghostty, wezterm,
+    # iTerm2, Terminal.app on macOS 26+, ...); only warn when nothing hints
+    # at 24-bit colour
+    if [[ "$ct" == *truecolor* || "$ct" == *24bit* ]]; then
+        return 0
     fi
+    case "${TERM_PROGRAM:-}:${TERM:-}" in
+        iTerm.app:* | WezTerm:* | ghostty:* | vscode:* | Apple_Terminal:* | *:xterm-kitty | *:xterm-ghostty | *:alacritty | *:foot*) return 0 ;;
+    esac
+    warn "this terminal does not advertise 24-bit colour (COLORTERM is '${ct:-unset}')."
+    warn "termpaper falls back to 256 colours; press ? then Display → Colors to change it."
 }
 
 success_msg() {
     cat <<EOF
 
-termpaper is live. Your terminal just got interesting.
+termpaper is installed.
 
-  termpaper rain --fps 120   high-refresh rain on glass
-  termpaper --list            the full catalog
-  termpaper                   press ? — mixing desk
+  termpaper                   start; press ? for the menu
+  termpaper tokyo             a Studio scene (needs a GPU; falls back without one)
+  termpaper list              the full catalog
 
-Tune live:  [ ] fps   , . speed   c color   f filter
+Keys:  ← → scene   ? menu   c colour   [ ] fps   , . speed   q quit
 
 Build your own: CONTRIBUTING.md
 

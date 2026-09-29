@@ -229,6 +229,17 @@ pub struct Gpu {
     readback_tag: u64,
 }
 
+fn backend_name(b: wgpu::Backend) -> &'static str {
+    match b {
+        wgpu::Backend::Vulkan => "Vulkan",
+        wgpu::Backend::Metal => "Metal",
+        wgpu::Backend::Dx12 => "DX12",
+        wgpu::Backend::Gl => "GL",
+        wgpu::Backend::BrowserWebGpu => "WebGPU",
+        _ => "GPU",
+    }
+}
+
 /// The finished cells of a frame, ready to be written into a ratatui buffer.
 pub struct FrameCells<'a> {
     pub words: &'a [u32],
@@ -256,25 +267,63 @@ impl<'a> FrameCells<'a> {
     }
 }
 
+/// Which graphics APIs to try: `WGPU_BACKEND` when set (e.g. `dx12`,
+/// `vulkan`), else Vulkan on Linux, Metal on macOS, and Vulkan then DX12 on
+/// Windows. Adapters of equal kind are taken in that order, so a Windows GPU
+/// with a Vulkan driver uses it; DX12 covers the rest (including WARP).
+pub fn backends() -> wgpu::Backends {
+    if let Some(b) = wgpu::Backends::from_env() {
+        return b;
+    }
+    if cfg!(target_os = "macos") {
+        wgpu::Backends::METAL
+    } else if cfg!(windows) {
+        wgpu::Backends::VULKAN | wgpu::Backends::DX12
+    } else {
+        wgpu::Backends::VULKAN
+    }
+}
+
+/// Which adapter to prefer when a machine has more than one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpuPreference {
+    /// the fastest GPU (discrete when there is one)
+    #[default]
+    HighPerformance,
+    /// the integrated GPU: less power and heat, the laptop default on battery
+    LowPower,
+}
+
 impl Gpu {
     /// Bring up a compute-only device, or return `None` if there is no usable
     /// adapter. Every failure here is non-fatal: the caller keeps the CPU path.
     pub fn new(width: usize, height: usize, max_cells: usize) -> Option<Self> {
+        Self::with_preference(width, height, max_cells, GpuPreference::default())
+    }
+
+    /// `new`, choosing between integrated and discrete GPUs.
+    pub fn with_preference(width: usize, height: usize, max_cells: usize, pref: GpuPreference) -> Option<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
+            backends: backends(),
             flags: wgpu::InstanceFlags::default(),
             memory_budget_thresholds: Default::default(),
             backend_options: Default::default(),
             display: Default::default(),
         });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference: match pref {
+                GpuPreference::HighPerformance => wgpu::PowerPreference::HighPerformance,
+                GpuPreference::LowPower => wgpu::PowerPreference::LowPower,
+            },
             force_fallback_adapter: false,
             compatible_surface: None,
             apply_limit_buckets: false,
         }))
         .ok()?;
-        let adapter_name = adapter.get_info().name;
+        let info = adapter.get_info();
+        // "AMD Radeon RX 7800 XT · Vulkan": which API matters when a
+        // platform has several
+        let adapter_name = format!("{} · {}", info.name, backend_name(info.backend));
 
         // downlevel defaults, but with the storage-buffer binding count the
         // layout actually needs. Requesting more than the adapter offers is a
