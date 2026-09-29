@@ -343,6 +343,11 @@ fn steam(ro: vec3f, rd: vec3f, tmax: f32, t: f32, jit: f32, l: Look, n: i32) -> 
         }
         tt += dt;
     }
+    // stopped because the steam went opaque: no stars through its core
+    if (tr < 0.04) {
+        acc /= max(1.0 - tr, 1e-3);
+        tr = 0.0;
+    }
     return vec4f(acc, tr);
 }
 

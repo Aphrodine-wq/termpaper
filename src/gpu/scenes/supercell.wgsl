@@ -88,14 +88,16 @@ fn upd_r(y: f32) -> f32 {
 }
 
 // the anvil: flat on top, streaming off downwind and widening
-fn anvil(p: vec3f) -> f32 {
+// (sag lowers its underside: the mammatus pouches)
+fn anvil_s(p: vec3f, sag: f32) -> f32 {
     let at = p.xz - upd_axis(11000.0);
     let al = dot(at, WIND);
     let ac = dot(at, vec2f(WIND.y, -WIND.x));
     let thick = mix(2000.0, 600.0, saturate(al / 45000.0));
     let top = ANVIL - 0.01 * max(al, 0.0);
-    return max(max(abs(ac) - (5000.0 + 0.5 * max(al, 0.0)), -al - 3600.0), max(p.y - top, top - thick - p.y));
+    return max(max(abs(ac) - (5000.0 + 0.5 * max(al, 0.0)), -al - 3600.0), max(p.y - top, top - thick - sag - p.y));
 }
+fn anvil(p: vec3f) -> f32 { return anvil_s(p, 0.0); }
 
 // one tower of the flanking line: a tapering column with a domed head
 fn flank(p: vec3f, i: i32) -> f32 {
@@ -129,7 +131,7 @@ fn storm_bound(p: vec3f) -> f32 {
     let hi = smoothstep(5000.0, 7800.0, y);
     var d = max(r - upd_r(y) - mix(1100.0, 1450.0, hi), y - 11600.0 - 1450.0);
     d = min(d, length(vec3f(a.x, (y - 11800.0) * 1.7, a.y)) - 2400.0 - 1500.0);
-    d = min(d, anvil(p) - 1000.0);
+    d = min(d, anvil(p) - 1800.0);
     d = min(d, min(flank(p, 0), flank(p, 1)) - 1750.0);
     d = max(d, BASE - y);
     // the wall cloud hangs below the base
@@ -161,7 +163,7 @@ fn storm(p: vec3f, t: f32, fine: bool) -> vec2f {
         // each band: a sharp lip on top, its face sloping back underneath;
         // most bands bold, a few fading out around the column
         let bold = 0.3 + 0.7 * smoothstep(0.1, 0.55, noise_value3(vec3f(cs * 1.1, floor(ph) * 0.71)));
-        d += (300.0 - (f * f) * sstep(1.0, 0.86, f) * 850.0 * bold) * striae;
+        d += (300.0 - (f * f) * sstep(1.0, 0.8, f) * 850.0 * bold) * striae;
     }
     // turbulence tearing at the shelves
     if (fine) { d += (noise_value3(p * (1.0 / 800.0) + vec3f(0.0, -t * 0.002, 0.0)) - 0.5) * 380.0; }
@@ -170,11 +172,14 @@ fn storm(p: vec3f, t: f32, fine: bool) -> vec2f {
     let top = max(d, y - 11600.0);
     d = smin(top, length(vec3f(a.x, (y - 11800.0) * 1.7, a.y)) - 2400.0 - bil, 500.0);
     // --- the anvil, fraying at its edges
-    let dav = anvil(p);
-    if (dav < 2500.0) {
+    if (anvil(p) < 3200.0) {
         let at = p.xz - upd_axis(11000.0);
-        let fib = noise_value2(vec2f(dot(at, WIND) * 0.00012, dot(at, vec2f(WIND.y, -WIND.x)) * 0.0006)) - 0.5;
-        d = smin(d, dav + fib * 900.0 - bil * 0.35, 900.0);
+        let al = dot(at, WIND);
+        let fib = noise_value2(vec2f(al * 0.00012, dot(at, vec2f(WIND.y, -WIND.x)) * 0.0006)) - 0.5;
+        // mammatus: rounded pouches sagging from the underside downwind
+        let mq = noise_value2(at * (1.0 / 1500.0) + vec2f(3.3, 8.1));
+        let sag = 800.0 * mq * mq * mq * smoothstep(4000.0, 14000.0, al);
+        d = smin(d, anvil_s(p, sag) + fib * 900.0 - bil * 0.35, 900.0);
     }
     // --- the flanking line
     let fk = min(flank(p, 0), flank(p, 1));
@@ -186,7 +191,7 @@ fn storm(p: vec3f, t: f32, fine: bool) -> vec2f {
         let wq = p.xz - (UPD + vec2f(-1700.0, 600.0));
         let wl = length(wq);
         let rag = noise_value3(vec3f(rot2(t * 0.02) * (wq / max(wl, 1.0)) * 1.6, y / 280.0));
-        let wall = max(wl - 2500.0 - 600.0 * (rag - 0.5), max(500.0 + 300.0 * rag - y, y - BASE - 150.0));
+        let wall = max(wl - 2300.0 - 800.0 * (rag - 0.5), max(380.0 + 500.0 * rag - y, y - BASE - 150.0));
         d = min(d, wall);
     }
     // (x: distance; y: how far the billows push out here, for crease shading)
@@ -248,7 +253,7 @@ fn storm_march(ro: vec3f, rd: vec3f, l: Look, t: f32, fl: Flash, jit: f32, n: i3
     let fcol = vec3f(0.75, 0.8, 1.0) * fl.w;
     var first = true;
     for (var i = 0; i < 110; i++) {
-        if (i >= n || tt > t1 || tr < 0.02) { break; }
+        if (i >= n || tt > t1 || tr < 0.035) { break; }
         let p = ro + rd * tt;
         // far from the bare shapes nothing can be there
         let dl = storm_bound(p);
@@ -285,8 +290,9 @@ fn storm_march(ro: vec3f, rd: vec3f, l: Look, t: f32, fl: Flash, jit: f32, n: i3
         let crease = mix(0.45, 1.0, smoothstep(200.0, 800.0, sf.y));
         let sunv = face * exp(-occ * 2.0) * mix(1.0, crease, 0.5);
         // skylight: open above, closed in under the base and the anvil
-        let above = storm_lo(p + vec3f(0.0, 1800.0, 0.0));
-        let open = saturate(0.3 + above / 3000.0) * smoothstep(BASE - 300.0, BASE + 3000.0, p.y);
+        // (closed in under the anvil's footprint, and low in the storm)
+        let cover = saturate(0.5 - anvil(vec3f(p.x, 11000.0, p.z)) / 3000.0) * sstep(10500.0, 7000.0, p.y);
+        let open = (1.0 - 0.7 * cover) * smoothstep(BASE - 300.0, BASE + 3000.0, p.y);
         let under = sstep(BASE + 400.0, BASE - 200.0, p.y);
         var c = l.sun_c * sunv * (1.05 + 0.6 * fwd) * (1.0 - 0.85 * under);
         c += l.amb * mix(0.04, 0.34, open) * crease * mix(vec3f(1.0), l.tint, under * 0.8);
@@ -298,11 +304,17 @@ fn storm_march(ro: vec3f, rd: vec3f, l: Look, t: f32, fl: Flash, jit: f32, n: i3
             let ff = smoothstep(-0.5, 0.8, (storm(p + fdir * 320.0, t, false).x - dc) / 320.0);
             c += fcol * (2.2 * exp(-fd / 1800.0) + 0.9 * ff / (1.0 + sq(fd / 4000.0)));
         }
-        let step_len = select(200.0, 320.0, d < -SOFT);
+        let step_len = select(240.0, 360.0, d < -SOFT);
         let st = exp(-dens * step_len * 0.006);
         acc += tr * c * (1.0 - st);
         tr *= st;
         tt += step_len;
+    }
+    // stopped because the cloud went opaque: it is opaque. Leaving the last
+    // few percent would let bright stars shine through the storm at night
+    if (tr < 0.06) {
+        acc /= max(1.0 - tr, 1e-3);
+        tr = 0.0;
     }
     hit.c = acc;
     hit.tr = tr;
@@ -483,7 +495,7 @@ fn scene(p: vec2f, ctx: Ctx) -> vec3f {
     // the storm in front of the sky and the far fields, and the rain in
     // front of whatever of the storm lies behind it
     let tmax = select(1e7, tg, tg > 0.0);
-    let st = storm_march(ro, rd, l, ctx.t, fl, ctx.jitter, steps(60.0, ctx));
+    let st = storm_march(ro, rd, l, ctx.t, fl, ctx.jitter, steps(56.0, ctx));
     // aerial perspective over twenty kilometres of humid air
     col = col * st.tr + mix(st.c, air * (1.0 - st.tr), 0.2);
     let rs = precip_shaft(ro, rd, l, ctx.t, fl, min(tmax, st.t + 800.0));
