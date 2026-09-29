@@ -142,6 +142,10 @@ enum Command {
         /// Only this category: coast, wilds, weather, city, cozy, space or classic
         #[arg(long)]
         category: Option<String>,
+        /// Every scene as JSON: name, title, category, description,
+        /// variants, tags, Studio or Classic, fallback
+        #[arg(long)]
+        json: bool,
     },
     /// List live termpaper instances in every group and exit
     Instances,
@@ -613,6 +617,30 @@ fn theme_command(action: ThemeCmd, args: &Args) -> std::io::Result<()> {
     Ok(())
 }
 
+/// `termpaper list --json`: the catalog the website and other tools read.
+fn print_list_json(category: Option<&str>) {
+    use std::io::Write;
+    let only = category.and_then(|s| scene::Category::parse(&s.to_lowercase()));
+    let items: Vec<serde_json::Value> = scene::entries()
+        .filter(|e| only.is_none_or(|c| e.category() == c))
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name(),
+                "title": e.title(),
+                "category": e.category().slug(),
+                "category_label": e.category().label(),
+                "description": e.desc(),
+                "variants": e.themes(),
+                "tags": e.tags(),
+                "studio": e.needs_gpu(),
+                "fallback": scene::shader::find(e.name()).map(|s| s.fallback),
+            })
+        })
+        .collect();
+    let out = serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "scenes": items });
+    let _ = writeln!(std::io::stdout(), "{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+}
+
 fn print_list(category: Option<&str>) {
     let only = category.map(|s| {
         scene::Category::parse(&s.to_lowercase()).unwrap_or_else(|| {
@@ -674,7 +702,7 @@ fn main() -> std::io::Result<()> {
         } else if let Some(scene) = args.switch.clone() {
             Some(Command::Switch { scene, group: None, all: args.all_groups })
         } else if args.list {
-            Some(Command::List { category: None })
+            Some(Command::List { category: None, json: false })
         } else {
             None
         }
@@ -689,8 +717,12 @@ fn main() -> std::io::Result<()> {
             let group = group.or_else(|| args.group.clone());
             return switch_remote(&scene, group.as_deref(), all, &args);
         }
-        Some(Command::List { category }) => {
+        Some(Command::List { category, json: false }) => {
             print_list(category.as_deref());
+            return Ok(());
+        }
+        Some(Command::List { category, json: true }) => {
+            print_list_json(category.as_deref());
             return Ok(());
         }
         Some(Command::Theme { action }) => {
@@ -3407,9 +3439,10 @@ mod cli_tests {
     #[test]
     fn subcommands_parse() {
         match parse(&["list", "--category", "coast"]).command {
-            Some(Command::List { category }) => assert_eq!(category.as_deref(), Some("coast")),
+            Some(Command::List { category, json }) => assert_eq!((category.as_deref(), json), (Some("coast"), false)),
             _ => panic!("expected list"),
         }
+        assert!(matches!(parse(&["list", "--json"]).command, Some(Command::List { json: true, .. })));
         assert!(matches!(parse(&["instances"]).command, Some(Command::Instances)));
         match parse(&["switch", "fire", "--group", "art"]).command {
             Some(Command::Switch { scene, group, all }) => {
