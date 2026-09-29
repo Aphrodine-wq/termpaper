@@ -9,11 +9,12 @@
 //! fallback: lava
 //! credits: original
 
-// World units are metres, sea level y = 0. We stand on an older flow 28 m up,
-// looking along the coast: the Pacific on the left, the new lava delta on the
-// right. A channel of molten rock winds down from the shield of Kilauea to
-// the ocean entry, where the lava meets the surf in a column of steam lit
-// orange from below.
+// World units are metres, sea level y = 0. We stand on a tumulus of older
+// pahoehoe a few hundred metres inland, looking down the coast: the Pacific
+// on the left, the flow field on the right. A channel of molten rock comes
+// past us on the right and winds away to the new lava delta, where it pours
+// over the sea cliff into the surf and a column of steam boils up, lit
+// orange from below. Fresh toes of lava break out of the crust nearby.
 
 struct Look {
     moon: vec3f,
@@ -27,196 +28,308 @@ struct Look {
 fn look(theme: u32) -> Look {
     switch (theme) {
         case 1u: {
-            return Look(normalize(vec3f(0.5, 0.18, -0.85)), vec3f(0.05, 0.06, 0.1), vec3f(0.018, 0.028, 0.06), 1u, 0.8, 0.2);
+            return Look(normalize(vec3f(-0.75, 0.16, -0.64)), vec3f(0.05, 0.06, 0.1), vec3f(0.018, 0.028, 0.06), 1u, 0.8, 0.1);
         }
         case 2u: {
-            return Look(normalize(vec3f(-0.6, 0.45, 0.4)), vec3f(0.012, 0.014, 0.02), vec3f(0.003, 0.003, 0.005), 2u, 1.25, -1.0);
+            return Look(normalize(vec3f(0.5, 0.45, -0.6)), vec3f(0.012, 0.014, 0.02), vec3f(0.003, 0.003, 0.005), 2u, 1.25, -1.0);
         }
         default: {
-            return Look(normalize(vec3f(-0.6, 0.45, 0.4)), vec3f(0.014, 0.017, 0.026), vec3f(0.0025, 0.003, 0.006), 0u, 1.0, -0.8);
+            return Look(normalize(vec3f(0.5, 0.45, -0.6)), vec3f(0.014, 0.017, 0.026), vec3f(0.0025, 0.003, 0.006), 0u, 1.0, -0.8);
         }
     }
 }
 
 // ------------------------------------------------------------------ layout
 
-const ENTRY: vec3f = vec3f(-38.0, 0.0, -240.0);
+const EYE: vec3f = vec3f(0.0, 20.0, 0.0);
+const ENTRY: vec3f = vec3f(-150.0, 0.0, -430.0);
+const LAND_TOP: f32 = 12.0;
+// the way the older flows ran to the sea (their ropes fold across it)
+const FLOW: vec2f = vec2f(-0.371, -0.928);
 
-// the coastline: land for x > coast_x(z)
+// the coastline: land for x > coast_x(z); the delta bulges out at the entry
 fn coast_x(z: f32) -> f32 {
-    let s = -z;
-    return -48.0 + 22.0 * sin(s * 0.0052 + 0.4) + 8.0 * sin(s * 0.019 + 1.3) - s * 0.03;
+    let u = z - ENTRY.z;
+    let far = 1.0 - exp(-u * u / 6400.0);
+    return ENTRY.x + 0.2 * u + (25.0 + 7.0 * sin(z * 0.021 + 0.7) + 4.0 * sin(z * 0.063 + 2.0)) * far;
 }
 
-// the channel: centre z as a function of x; it comes across the delta from
-// the right and pours into the sea at the entry
-fn chan_z(x: f32) -> f32 {
-    return ENTRY.z + (x - ENTRY.x) * 0.9 + 24.0 * (sin(x * 0.013 + 0.6) - sin(ENTRY.x * 0.013 + 0.6));
+// the channel's centreline x(z): it comes past us on the right and runs
+// away, meandering a little, to the entry
+fn chan_x(z: f32) -> f32 {
+    let u = z - ENTRY.z;
+    // (its last reach swings round to pour straight off the delta)
+    return ENTRY.x + 0.46 * u + 12.0 * sin(u * 0.021) + 4.0 * sin(u * 0.052) + 16.0 * (1.0 - exp(-max(u, 0.0) / 22.0));
+}
+fn chan_slope(z: f32) -> f32 {
+    let u = z - ENTRY.z;
+    return 0.46 + 0.252 * cos(u * 0.021) + 0.208 * cos(u * 0.052) + 16.0 / 22.0 * exp(-max(u, 0.0) / 22.0);
 }
 
-// distance to the channel centreline (horizontal, approximate) and the
-// channel coordinate along it
+// (distance from the centreline, signed offset across it)
 fn chan(xz: vec2f) -> vec2f {
-    if (xz.x < ENTRY.x - 6.0) { return vec2f(1e4, xz.x); }
-    let dz = xz.y - chan_z(xz.x);
-    // correct for the channel's slant so the width reads true
-    let slope = 0.9 + 0.312 * cos(xz.x * 0.013 + 0.6);
-    return vec2f(abs(dz) * inverseSqrt(1.0 + slope * slope), xz.x);
+    if (xz.y < ENTRY.z - 4.0) { return vec2f(1e4, 1e4); }
+    let s = chan_slope(xz.y);
+    let d = (xz.x - chan_x(xz.y)) * inverseSqrt(1.0 + s * s);
+    return vec2f(abs(d), d);
 }
 
 fn land_h(xz: vec2f) -> f32 {
     let off = xz.x - coast_x(xz.y);
-    // older flows rise gently inland; lobes and tumuli of pahoehoe
-    var h = 5.0 + off * 0.012 + max(-xz.y - 900.0, 0.0) * 0.03;
-    h += 1.6 * noise_value2(xz * 0.03) + 0.7 * noise_value2(xz * 0.11 + 3.0);
-    // the channel sits between levees
-    let c = chan(xz);
-    h += 1.4 * exp(-sq((c.x - 13.0) / 5.0)) - 1.8 * sstep(12.0, 5.0, c.x);
-    // a low sea cliff at the coast
-    return min(h, off * 1.6 - 1.0);
+    var h = 5.5 + 3.5 * (1.0 - exp(-max(off, 0.0) / 220.0));
+    // inflated sheets and tumuli of older pahoehoe
+    h += 1.8 * noise_value2(xz * 0.021 + 1.7) + 0.7 * noise_value2(xz * 0.075 + 3.0) - 1.2;
+    // the channel runs between its levees, the lava a metre down
+    let c = chan(xz).x;
+    h += 1.1 * exp(-sq((c - 7.5) / 3.5)) - 1.5 * sstep(6.5, 4.0, c);
+    // a low sea cliff
+    return min(h, off * 1.3 - 0.8);
 }
 
 // ------------------------------------------------------------------ lava
 
-// heat of the ground 0..1 (emission and the light it throws)
+// nearest two points of a jittered grid: (F1, F2, random id of the nearest)
+fn toe_cells(p: vec2f) -> vec3f {
+    let i = vec2i(floor(p));
+    let f = fract(p);
+    var d1 = 8.0;
+    var d2 = 8.0;
+    var id = 0.0;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let o = vec2i(x, y);
+            let h = hash_cell2(i + o, 0x51f3u);
+            let r = vec2f(o) + 0.15 + 0.7 * h.xy - f;
+            let dd = dot(r, r);
+            if (dd < d1) { d2 = d1; d1 = dd; id = h.z; } else if (dd < d2) { d2 = dd; }
+        }
+    }
+    return vec3f(sqrt(d1), sqrt(d2), id);
+}
+
+// pahoehoe lobes: (F1, F2 - F1, gradient of F2 - F1) of a jittered grid,
+// and the vector from p to the nearest lobe's seed (for ropes and colour)
+struct Lobe { f1: f32, e: f32, g: vec2f, r1: vec2f, id: f32 }
+
+fn lobes(p: vec2f) -> Lobe {
+    let i = vec2i(floor(p));
+    let f = fract(p);
+    var d1 = 8.0;
+    var d2 = 8.0;
+    var r1 = vec2f(0.0);
+    var r2 = vec2f(0.0);
+    var id = 0.0;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let o = vec2i(x, y);
+            let h = hash_cell2(i + o, 0x9a17u);
+            let r = vec2f(o) + 0.15 + 0.7 * h.xy - f;
+            let dd = dot(r, r);
+            if (dd < d1) { d2 = d1; r2 = r1; d1 = dd; r1 = r; id = h.z; } else if (dd < d2) { d2 = dd; r2 = r; }
+        }
+    }
+    let f1 = sqrt(d1);
+    let f2 = sqrt(d2);
+    var lb: Lobe;
+    lb.f1 = f1;
+    lb.e = f2 - f1;
+    lb.g = r1 / max(f1, 1e-4) - r2 / max(f2, 1e-4);
+    lb.r1 = r1;
+    lb.id = id;
+    return lb;
+}
+
 struct Lava { e: vec3f, heat: f32 }
 
-// breakouts: fresh pahoehoe toes oozing from the crust, hot at their seams
-const BRK0: vec3f = vec3f(34.0, -12.0, 26.0);   // centre xz, radius
-const BRK1: vec3f = vec3f(128.0, -64.0, 34.0);
+// breakouts: fresh pahoehoe toes budding from the crust (xz centre, radius)
+const BRK0: vec3f = vec3f(-15.0, -58.0, 10.0);
+const BRK1: vec3f = vec3f(38.0, -190.0, 18.0);
+const BRK2: vec3f = vec3f(-64.0, -128.0, 13.0);
 
-fn breakout(xz: vec2f, b: vec3f, t: f32) -> f32 {
-    let d = length(xz - b.xy) / b.z + (noise_value2(xz * 0.07 + b.xy) - 0.5) * 0.55 + (noise_value2(xz * 0.3) - 0.5) * 0.12;
-    if (d > 1.2) { return 0.0; }
-    let breathe = 0.85 + 0.15 * sin(t * 0.3 + b.x);
-    // the advancing front: bulging incandescent toes
-    // (only on its downhill, seaward side: behind, it is fed by a tube)
-    let dir = normalize(xz - b.xy + vec2f(1e-3));
-    let down = smoothstep(-0.3, 0.5, dot(dir, vec2f(-0.75, 0.66)));
-    let front = exp(-sq((d - 1.0) / 0.05)) * smoothstep(0.3, 0.7, noise_value2(xz * 0.25 + vec2f(t * 0.01, 0.0))) * down;
-    // behind it a silvery crust, split by a few still-glowing cracks
-    let w = noise_worley2(xz * 0.32);
-    let crack = sstep(0.1, 0.0, w.y - w.x) * smoothstep(0.52, 0.8, noise_value2(xz * 0.18 + b.xy * 0.1));
-    let inside = sstep(1.0, 0.75, d);
-    return breathe * max(front * 0.9, crack * inside * 0.7);
+fn breakout(xz: vec2f, b: vec3f, t: f32, fp: f32) -> f32 {
+    let rel = (xz - b.xy) / b.z;
+    let d = length(rel) + (noise_value2(xz * 0.09 + b.xy) - 0.5) * 0.7;
+    if (d > 1.1) { return 0.0; }
+    let inside = sstep(1.05, 0.8, d);
+    // toes about two metres across; each one swells, glows and skins over
+    // on its own slow clock. Most live ones push out on the downhill front.
+    let front = saturate(dot(rel, vec2f(-0.6, -0.8)) / max(length(rel), 1e-3) * 0.5 + 0.5);
+    let tc = toe_cells(xz * 0.26 + b.xy);
+    let edge = tc.y - tc.x;
+    let busy = step(0.62 - 0.5 * front * sstep(0.2, 0.9, d), tc.z);
+    let age = fract(t / 64.0 + tc.z * 5.37);
+    let glow = busy * sstep(0.0, 0.05, age) * sstep(0.95, 0.35, age);
+    // a rounded toe: bright molten middle, its margin chilled to a dark rind
+    let blob = sstep(0.72, 0.36, tc.x) * sstep(0.0, 0.08, edge);
+    let core = sstep(0.5, 0.1, tc.x);
+    var heat = glow * blob * mix(0.36, 0.73, core);
+    // as it ages a skin wrinkles over the toe, split by glowing cracks
+    let cr = noise_worley2(xz * 1.3 + vec2f(tc.z * 17.0, 0.0));
+    let cw = max(0.07, fp * 0.8);
+    let crack = sstep(cw, 0.0, cr.y - cr.x) * min(1.0, 0.1 / cw);
+    heat *= mix(1.0, 0.3 + 0.55 * crack, sstep(0.3, 0.75, age));
+    // the whole lobe is still hot under its skin: dull red in the seams
+    // between the toes and through the cracks
+    let warm = (0.14 + 0.16 * crack + 0.1 * sstep(0.12, 0.0, edge)) * sstep(1.0, 0.35, d) * smoothstep(0.25, 0.65, noise_value2(xz * 0.3 + b.xy));
+    heat = max(heat, warm);
+    // the advancing margin: an incandescent seam where the new lobe spills
+    // out of its crust, broken where it has skinned over
+    let seam = exp(-sq((d - 0.93) / 0.07)) * front * smoothstep(0.3, 0.6, noise_value2(xz * 0.35 + vec2f(t * 0.01, b.x)));
+    heat = max(heat, 0.66 * seam);
+    return heat * inside;
 }
+
 fn lava_at(xz: vec2f, t: f32, fp: f32, l: Look) -> Lava {
     var r: Lava;
     r.e = vec3f(0.0);
     r.heat = 0.0;
+    let off = xz.x - coast_x(xz.y);
     let c = chan(xz);
-    // the channel: molten rock under drifting plates of crust; some reaches
-    // run hot and open, others are nearly crusted over
-    if (c.x < 14.0) {
-        let across = c.x / 10.0;
-        let uv = vec2f(c.y * 0.22 + t * 0.33, (xz.y - chan_z(c.y)) * 0.3);
-        let w = noise_worley2(uv);
-        let seam = sstep(0.35, 0.02, w.y - w.x);
-        let open = 0.55 + 0.45 * smoothstep(0.3, 0.7, noise_value2(vec2f(c.y * 0.018 + t * 0.004, 3.0)));
-        let core = sstep(1.05, 0.4, across);
-        var heat = mix(0.45, 0.92, seam * open + (1.0 - open) * 0.2) * core * (0.75 + 0.25 * open);
-        heat = max(heat, 0.35 * sstep(1.3, 0.8, across));
+    // the channel: molten rock running to the sea under drifting plates of
+    // crust; the banks are frozen crust, cracked and dull red
+    if (c.x < 8.0 && off > -2.0) {
+        let across = c.x / 5.8;
+        // plates of crust ride the current, torn apart along hot seams;
+        // some reaches run open, others are nearly crusted over
+        let sflow = xz.y + t * 1.3;
+        let tc = toe_cells(vec2f(sflow * 0.15, c.y * 0.45));
+        let seam = sstep(0.2, 0.02, tc.y - tc.x);
+        let open = 0.55 + 0.4 * smoothstep(0.3, 0.7, noise_value2(vec2f(xz.y * 0.02, 5.0)));
+        let plate = step(open, tc.z) * (1.0 - seam) * sstep(0.8, 0.5, across);
+        let streak = noise_value2(vec2f(sflow * 0.06, c.y * 1.1));
+        // molten, hottest mid-stream; plates and torn scraps of darker
+        // crust drift on it, drawn out into streaks by the shear
+        let scrap = smoothstep(0.58, 0.72, noise_value2(vec2f(sflow * 0.35, c.y * 1.6))) * sstep(0.2, 0.7, across);
+        var heat = 0.76 + 0.06 * streak - 0.12 * across * across;
+        heat = mix(heat, 0.5 + 0.06 * streak, max(plate, scrap * 0.8));
+        // the banks: crust frozen to the levees, dull red, a few hot cracks
+        let crk = sstep(0.1, 0.0, abs(noise_grad2(vec2f(xz.y * 0.22, c.y * 0.6))));
+        heat = mix(heat, 0.26 + 0.24 * crk, sstep(0.72, 0.98, across));
+        heat *= sstep(1.2, 0.98, across);
         r.heat = heat;
-        r.e = fire_temperature_color(heat) * 1.4;
+        r.e = fire_temperature_color(heat);
     }
-    // cooling crust along the channel: a web of glowing cracks
-    let fresh = exp(-max(c.x - 12.0, 0.0) / 40.0);
-    if (fresh > 0.05 && c.x >= 12.0) {
-        let n = noise_value2(xz * 0.05 + vec2f(t * 0.01, 0.0));
-        let hot = fresh * smoothstep(0.35, 0.8, n);
-        if (hot > 0.02) {
-            let w = noise_worley2(xz * 0.45);
-            // cracks thinner than a pixel still glow, just dimmer
-            let cw = max(0.06, fp * 0.45);
-            let crack = sstep(cw, 0.0, w.y - w.x) * min(1.0, 0.1 / cw) * smoothstep(0.45, 0.75, noise_value2(xz * 0.16 + 3.0));
-            let heat = hot * (0.25 + 0.55 * crack);
-            r.heat = max(r.heat, heat);
-            r.e += fire_temperature_color(heat * crack * 0.9) * crack * hot * 1.2;
-        }
-    }
-    let bk = max(breakout(xz, BRK0, t), breakout(xz, BRK1, t));
+    let bk = max(breakout(xz, BRK0, t, fp), max(breakout(xz, BRK1, t, fp), breakout(xz, BRK2, t, fp)));
     if (bk > 0.0) {
         r.heat = max(r.heat, bk);
-        r.e += fire_temperature_color(bk) * 1.3;
+        r.e = max(r.e, fire_temperature_color(bk));
     }
-    // where the lava pours into the sea
-    let off = xz.x - coast_x(xz.y);
+    // scattered breakouts glowing far out across the flow field
+    let cell = floor(xz / 70.0);
+    let h = hash_cell2(vec2i(cell), 0x77a1u);
+    if (h.w < 0.2 && off > 25.0 && xz.y < -120.0) {
+        let cp = (cell + 0.2 + 0.6 * h.xy) * 70.0;
+        let dd = length((xz - cp) * vec2f(1.0, 1.6)) / (2.0 + 5.0 * h.z) + (noise_value2(xz * 0.4) - 0.5) * 0.8;
+        let s = sstep(1.0, 0.2, dd) * (0.55 + 0.35 * h.z);
+        r.heat = max(r.heat, s);
+        r.e = max(r.e, fire_temperature_color(s));
+    }
+    // where the lava pours over the cliff into the sea
     let de = length(xz - ENTRY.xz);
-    let pour = exp(-de * de / 180.0) * smoothstep(-4.0, 3.0, off);
+    let pour = exp(-de * de / 160.0) * smoothstep(-5.0, 2.0, off);
     r.heat = max(r.heat, pour);
-    r.e += fire_temperature_color(0.9) * pour * 1.6;
+    r.e += fire_temperature_color(0.85) * pour;
     r.e *= l.lava;
     return r;
 }
 
-// light thrown by the lava onto a point (channel, entry and the breakouts)
-fn lava_light(p: vec3f, t: f32, l: Look) -> vec3f {
+// light the lava throws on a surface point: the channel's nearest reach,
+// the breakouts, and the entry with the lit foot of the plume
+fn lava_light(p: vec3f, n: vec3f, l: Look) -> vec3f {
+    var e = vec3f(0.0);
+    let hot = fire_temperature_color(0.7);
     let c = chan(p.xz);
-    let hy = max(p.y - land_h(p.xz), 0.0) + 2.0;
-    var e = 2.6 * exp(-max(c.x - 8.0, 0.0) / 34.0);
-    let de = length(p - ENTRY);
-    e += 60.0 / (1.0 + de * de / 150.0) + 1.5 * exp(-de / 70.0);
-    e += 1.1 * exp(-max(length(p.xz - BRK0.xy) - BRK0.z * 0.6, 0.0) / 14.0);
-    e += 1.1 * exp(-max(length(p.xz - BRK1.xy) - BRK1.z * 0.6, 0.0) / 16.0);
-    return fire_temperature_color(0.72) * e * l.lava * (1.0 / hy);
+    if (c.x < 400.0) {
+        let s = chan_slope(p.z);
+        let across = vec2f(1.0, -s) * inverseSqrt(1.0 + s * s);
+        let to = vec3f(-across.x * c.y, 2.5, -across.y * c.y);
+        let dif = 0.3 + 0.7 * saturate(dot(n, normalize(to)));
+        e += hot * 1.3 * dif / (1.0 + sq(c.x / 10.0));
+    }
+    for (var i = 0; i < 3; i++) {
+        var b = BRK0;
+        if (i == 1) { b = BRK1; }
+        if (i == 2) { b = BRK2; }
+        let to = vec3f(b.x - p.x, 1.5, b.y - p.z);
+        let d = max(length(to.xz) - b.z * 0.5, 0.0);
+        let dif = 0.3 + 0.7 * saturate(dot(n, normalize(to)));
+        e += hot * 0.8 * dif / (1.0 + sq(d / (b.z * 0.8)));
+    }
+    let toe = ENTRY + vec3f(0.0, 25.0, 0.0) - p;
+    let de2 = dot(toe, toe);
+    e += hot * (0.2 + 0.8 * saturate(dot(n, normalize(toe)))) * 3.0 / (1.0 + de2 / 1600.0);
+    return e * l.lava;
 }
 
 // ------------------------------------------------------------------ steam
 
-// the plume axis leans downwind with height and sways slowly
+const PLUME_TOP: f32 = 360.0;
+
+// the plume axis bends away downwind with height and sways slowly
 fn plume_axis(y: f32, t: f32) -> vec2f {
-    let lean = vec2f(0.28, -0.2) * y + vec2f(12.0 * sin(y * 0.016 - t * 0.04), 8.0 * sin(y * 0.012 + 1.0 - t * 0.03));
-    return ENTRY.xz + lean;
+    let lean = vec2f(-0.3, 0.1) * y * (0.5 + 0.5 * smoothstep(0.0, 200.0, y));
+    let sway = vec2f(10.0 * sin(y * 0.014 - t * 0.05), 7.0 * sin(y * 0.011 + 1.0 - t * 0.04)) * smoothstep(0.0, 80.0, y);
+    return ENTRY.xz + lean + sway;
 }
 
 fn plume_dens(p: vec3f, t: f32) -> f32 {
-    if (p.y < 0.0 || p.y > 380.0) { return 0.0; }
-    let rad = 9.0 + 0.42 * p.y;
-    // large, slow turbulence bends the column into billows
-    let wq = vec3f(p.x, p.y, p.z) * 0.012 - vec3f(0.0, t * 0.03, 0.0);
-    let warp = vec2f(noise_value3(wq) - 0.5, noise_value3(wq + vec3f(7.1, 3.3, 1.9)) - 0.5) * rad * 1.1;
-    let r = length(p.xz + warp - plume_axis(p.y, t)) / rad;
-    if (r > 1.35) { return 0.0; }
-    // billows: rising, rolling, eating into the edge of the column
-    let q = vec3f(p.x, p.y * 0.8, p.z) * (0.9 / rad + 0.012) + vec3f(0.0, -t * 0.06, t * 0.01);
-    let n = noise_fbm3(q, 4);
-    let body = sstep(1.05, 0.15, r + (n - 0.5) * 1.3);
-    let holes = smoothstep(0.12, 0.48, n);
-    let fade = sstep(380.0, 120.0, p.y) * smoothstep(0.0, 5.0, p.y);
-    return body * holes * fade;
+    if (p.y < -2.0 || p.y > PLUME_TOP) { return 0.0; }
+    let y = max(p.y, 0.0);
+    let rad = 15.0 + 0.34 * y;
+    let d = p.xz - plume_axis(y, t);
+    let r = length(d) / rad;
+    if (r > 1.7) { return 0.0; }
+    // self-similar cauliflower: the lobes grow as they climb (log height)
+    // and roll slowly upward; |noise| gives round heads with sharp creases
+    let q = vec3f(d.x / rad * 1.25, log(rad) * 3.3 - t * 0.04, d.y / rad * 1.25);
+    let b0 = noise_grad3(q * 0.45 + vec3f(7.7, 0.0, 2.2));
+    let b1 = abs(noise_grad3(q));
+    let b2 = abs(noise_grad3(q * 2.3 + vec3f(3.1, 1.7, 5.3)));
+    let bil = b1 * 0.72 + b2 * 0.28 + b0 * 0.55;
+    // it thins and frays as it climbs, evaporating into the dry air
+    let fade = sstep(PLUME_TOP, PLUME_TOP * 0.3, y) * smoothstep(-2.0, 4.0, p.y);
+    let body = sstep(1.0, 0.82, r - 0.62 * bil + 0.1 + (1.0 - fade) * 0.5);
+    return body * fade;
 }
 
 // march the plume; (radiance, transmittance)
 fn steam(ro: vec3f, rd: vec3f, tmax: f32, t: f32, jit: f32, l: Look, n: i32) -> vec4f {
     // bound: a vertical cylinder around the leaning column
-    let cen = plume_axis(170.0, t);
+    let cen = plume_axis(PLUME_TOP * 0.45, t);
     let oc = ro.xz - cen;
     let d2 = rd.xz;
     let a = max(dot(d2, d2), 1e-6);
     let hb = dot(oc, d2);
-    let disc = hb * hb - a * (dot(oc, oc) - 175.0 * 175.0);
+    let rb = 150.0;
+    let disc = hb * hb - a * (dot(oc, oc) - rb * rb);
     if (disc <= 0.0) { return vec4f(0.0, 0.0, 0.0, 1.0); }
     let sq_ = sqrt(disc);
     let t0 = max((-hb - sq_) / a, 0.0);
     var t1 = min((-hb + sq_) / a, tmax);
-    if (rd.y > 0.0) { t1 = min(t1, (380.0 - ro.y) / rd.y); }
+    if (rd.y > 0.0) { t1 = min(t1, (PLUME_TOP - ro.y) / rd.y); }
     if (t1 <= t0) { return vec4f(0.0, 0.0, 0.0, 1.0); }
     let dt = (t1 - t0) / f32(n);
     var tt = t0 + dt * jit;
     var tr = 1.0;
     var acc = vec3f(0.0);
-    let glow = fire_temperature_color(0.7) * l.lava;
-    for (var i = 0; i < 40; i++) {
-        if (i >= n || tr < 0.03) { break; }
+    let glow = fire_temperature_color(0.72) * l.lava;
+    for (var i = 0; i < 48; i++) {
+        if (i >= n || tr < 0.02) { break; }
         let p = ro + rd * tt;
         let d = plume_dens(p, t);
         if (d > 0.01) {
-            // lit from below by the entry: bright at the foot of the column,
-            // fading as the steam climbs out of reach of the glow; the upper
-            // plume only catches the sky and the moon
-            let lit = glow * (1.3 * exp(-p.y / 22.0) + 0.003 * exp(-p.y / 120.0));
-            let sky = l.amb * 2.5 + l.moon_c * 0.35 * smoothstep(20.0, 250.0, p.y);
-            let ext = d * 0.03;
+            let y = max(p.y, 0.0);
+            // lit from below by the entry: a lobe glows on the side facing
+            // down toward it and falls dark on its crown
+            let ve = ENTRY + vec3f(0.0, -4.0, 0.0) - p;
+            let de2 = dot(ve, ve);
+            let dl = plume_dens(p + ve * inverseSqrt(de2) * (5.0 + 0.1 * y), t);
+            let facing = saturate((d - dl) * 2.0 + 0.15 + 0.6 * exp(-y / 18.0));
+            let reach = 1.2 / (1.0 + de2 / 700.0) + 0.012 * exp(-y / 200.0);
+            let lit = glow * reach * facing;
+            let top = smoothstep(30.0, 300.0, y);
+            let sky = l.amb * (1.2 + 1.5 * top) + l.moon_c * 0.4 * top * (1.2 - facing);
+            let ext = d * 0.07;
             let st = exp(-ext * dt);
             acc += tr * (lit + sky) * (1.0 - st);
             tr *= st;
@@ -228,10 +341,10 @@ fn steam(ro: vec3f, rd: vec3f, tmax: f32, t: f32, jit: f32, l: Look, n: i32) -> 
 
 // ------------------------------------------------------------------ sky
 
-// the shield of Kilauea behind the delta: elevation of its skyline
+// the shield of Kilauea behind the flow field: elevation of its skyline
 fn shield(az: f32) -> f32 {
-    let rise = smoothstep(-0.35, 1.1, az);
-    return -0.003 + 0.082 * rise - 0.02 * smoothstep(0.9, 1.6, az) + 0.004 * noise_value2(vec2f(az * 30.0, 2.0)) * rise;
+    let rise = smoothstep(-0.3, 0.9, az);
+    return -0.002 + 0.05 * rise + 0.01 * smoothstep(0.12, 0.22, az) + 0.003 * noise_value2(vec2f(az * 30.0, 2.0)) * rise;
 }
 
 fn sky(rd: vec3f, l: Look, ctx: Ctx) -> vec3f {
@@ -241,7 +354,7 @@ fn sky(rd: vec3f, l: Look, ctx: Ctx) -> vec3f {
         // blue hour: deep blue overhead, a last violet-rose band low in the west
         let west = saturate(dot(normalize(rd.xz + vec2f(1e-4)), normalize(l.moon.xz)) * 0.5 + 0.5);
         c = mix(col_hex(0x4a6aa8u) * 0.11, col_hex(0x0e2250u) * 0.06, pow(y, 0.35));
-        c += col_hex(0xd08a7au) * 0.045 * exp(-y * 10.0) * west * west;
+        c += col_hex(0xd08a7au) * 0.05 * exp(-y * 10.0) * west * west;
         c += star_field(rd, 0.4, ctx) * 0.35 * smoothstep(0.08, 0.4, y);
     } else {
         c = sky_night(rd) * 1.2;
@@ -269,24 +382,24 @@ fn backdrop(rd: vec3f, l: Look, pxa: f32, t: f32) -> vec4f {
     for (var i = 0; i < 6; i++) {
         let fi = f32(i);
         let h = hash_f(u32(i) * 747u + 11u);
-        let ai = 0.03 + 0.07 * fi + 0.05 * h;
-        if (hash_f(u32(i) * 91u + 5u) < 0.35) { continue; }
-        let ti = shield(ai) - 0.003;
+        let ai = 0.05 + 0.09 * fi + 0.05 * h;
+        if (hash_f(u32(i) * 91u + 5u) < 0.3) { continue; }
+        let ti = shield(ai) - 0.002;
         let dy = ti - rd.y;
-        if (dy < 0.0 || dy > 0.05) { continue; }
-        let x = az - ai - dy * 0.9 - 0.0012 * sin(dy * 260.0 + fi * 2.0);
+        if (dy < 0.0 || dy > 0.04) { continue; }
+        let x = az - ai + dy * 1.4 - 0.001 * sin(dy * 260.0 + fi * 2.0);
         let seg = smoothstep(0.35, 0.6, noise_value2(vec2f(dy * 140.0, fi * 7.0)));
-        riv += (0.2 + 0.5 * h) * seg * exp(-x * x / (w * w)) * sstep(0.05, 0.035, dy);
+        riv += (0.2 + 0.5 * h) * seg * exp(-x * x / (w * w)) * sstep(0.04, 0.028, dy);
     }
     col += fire_temperature_color(0.62) * riv * 0.9 * l.lava * select(1.0, 1.6, l.kind == 2u);
     var out = col * cov;
     if (l.kind == 2u) {
         // lava fountain on the flank
-        let fa = 0.2;
+        let fa = 0.3;
         let fx = az - fa;
         let fy = rd.y - (shield(fa) - 0.002);
         let ww = max(pxa * 0.9, 0.0018);
-        let jet = exp(-fx * fx / (ww * ww * (1.0 + max(fy, 0.0) * 500.0))) * sstep(0.055, 0.01, fy) * smoothstep(-0.003, 0.0, fy);
+        let jet = exp(-fx * fx / (ww * ww * (1.0 + max(fy, 0.0) * 500.0))) * sstep(0.05, 0.01, fy) * smoothstep(-0.003, 0.0, fy);
         out += fire_temperature_color(0.72 + 0.12 * sstep(0.05, 0.0, fy)) * jet * 4.0;
         // its glow on the flank and in the air around it
         out += fire_temperature_color(0.6) * 0.06 * exp(-(fx * fx + fy * fy) / 0.0009);
@@ -306,108 +419,204 @@ fn backdrop(rd: vec3f, l: Look, pxa: f32, t: f32) -> vec4f {
 
 // ------------------------------------------------------------------ surfaces
 
-fn trace_land(ro: vec3f, rd: vec3f) -> f32 {
-    if (rd.y > 0.02) { return -1.0; }
-    var t = 1.0;
+// march the land; (hit distance or -1, glow of the fume over the channel
+// gathered on the way: seen from low down the levees hide the far channel,
+// but not the orange haze of fume and steam that hangs over it)
+fn trace_land(ro: vec3f, rd: vec3f, tmax: f32) -> vec2f {
+    if (rd.y > -1e-4) { return vec2f(-1.0, 0.0); }
+    // start where the ray drops below the highest land
+    var t = max((LAND_TOP - ro.y) / rd.y, 0.5);
     var tp = t;
     var hp = 1.0;
-    for (var i = 0; i < 110; i++) {
+    var fume = 0.0;
+    for (var i = 0; i < 120; i++) {
         let p = ro + rd * t;
         let h = p.y - land_h(p.xz);
+        let cd = chan(p.xz).x;
+        fume += exp(-cd * cd / 45.0 - max(h, 0.0) / 3.0) * (t - tp);
         if (h < 0.0) {
-            if (i == 0) { return t; }
-            return tp + (t - tp) * hp / (hp - h);
+            if (i == 0) { return vec2f(t, fume); }
+            // refine the crossing (regula falsi)
+            var a = tp;
+            var b = t;
+            var ha = hp;
+            var hb = h;
+            for (var k = 0; k < 4; k++) {
+                let m = a + (b - a) * ha / (ha - hb);
+                let q = ro + rd * m;
+                let hm = q.y - land_h(q.xz);
+                if (hm < 0.0) { b = m; hb = hm; } else { a = m; ha = hm; }
+            }
+            return vec2f(a + (b - a) * ha / (ha - hb), fume);
         }
+        // past the sea surface: nothing more to find
+        if (t >= tmax) { break; }
         tp = t;
         hp = h;
-        t += max(h * 0.7, 0.06 + t * 0.004);
-        if (t > 5000.0 || p.y < -3.0) { break; }
+        // the ground is gentle (slopes under ~0.5): the vertical gap converts
+        // to a safe step along the ray; far away, grow with distance. The
+        // last step lands exactly on the sea plane so no shore is skipped.
+        t = min(t + max(h / (0.45 - rd.y) * 0.9, 0.02 + t * 0.01), tmax);
     }
-    return -1.0;
+    return vec2f(-1.0, fume);
+}
+
+// what the glassy crust mirrors: the sky, the lit plume, the channel
+fn sheen_env(r: vec3f, p: vec3f, l: Look) -> vec3f {
+    let hot = fire_temperature_color(0.7) * l.lava;
+    var e = l.amb * (0.6 + 0.6 * saturate(r.y));
+    let to_s = normalize(ENTRY + vec3f(-12.0, 60.0, 4.0) - p);
+    e += hot * (0.06 * pow(saturate(dot(r, to_s)), 30.0) + 0.5 * pow(saturate(dot(r, to_s)), 200.0));
+    let c = chan(p.xz);
+    if (c.x < 60.0) {
+        let s = chan_slope(p.z);
+        let across = vec2f(1.0, -s) * inverseSqrt(1.0 + s * s);
+        let to = normalize(vec3f(-across.x * c.y, 1.0, -across.y * c.y));
+        e += hot * 0.6 * pow(saturate(dot(r, to)), 16.0) / (1.0 + sq(c.x / 8.0));
+    }
+    e += l.moon_c * 6.0 * pow(saturate(dot(r, l.moon)), 60.0);
+    return e;
 }
 
 fn shade_land(p: vec3f, rd: vec3f, t: f32, pxa: f32, l: Look, ctx: Ctx) -> vec3f {
-    let e = max(0.08, t * pxa);
+    let fp = t * pxa;
+    let e = max(0.06, fp);
     let hx = land_h(p.xz + vec2f(e, 0.0)) - land_h(p.xz - vec2f(e, 0.0));
     let hz = land_h(p.xz + vec2f(0.0, e)) - land_h(p.xz - vec2f(0.0, e));
     var n = normalize(vec3f(-hx, 2.0 * e, -hz));
-    // ropy pahoehoe folds, faded with the pixel footprint
-    // lumpy pahoehoe toes, faded with the pixel footprint
-    let lump = saturate(1.0 - t * pxa / 0.6);
-    if (lump > 0.0) {
-        let w = noise_worley2(p.xz * 0.35);
-        let g = vec2f(noise_value2(p.xz * 0.35 + 5.0) - 0.5, noise_value2(p.xz * 0.35 + 9.0) - 0.5);
-        n = normalize(n + vec3f(g.x, 0.0, g.y) * 0.5 * lump * smoothstep(0.1, 0.4, w.y - w.x));
+    // pahoehoe: domed lobes a few metres across split by dark cracks, ropy
+    // folds wrinkling each one in arcs around where it budded
+    var crack = 1.0;
+    var shine = 1.0;
+    var tone = 0.5;
+    let lk = saturate(1.0 - fp / 1.8);
+    if (lk > 0.0) {
+        let s1 = 0.2;
+        let wq = vec2f(noise_value2(p.xz * 0.06), noise_value2(p.xz * 0.06 + 5.3)) - 0.5;
+        let lb = lobes(p.xz * s1 + wq * 2.2 + vec2f(3.7, 1.1));
+        // each lobe inflates into a dome, rounded on top, steep at its margin
+        // smooth sheets in places, lumpy toes and lobes in others
+        let lumpy = smoothstep(0.2, 0.65, noise_value2(p.xz * 0.035 + 2.0));
+        let hgt = 0.5 * (0.3 + lb.id) * (0.25 + 0.75 * lumpy);
+        var g = lb.g * s1 * hgt * 4.0 * exp(-lb.e * 4.0);
+        let rk = saturate(1.0 - fp / 0.22);
+        if (rk > 0.0) {
+            let rp = lb.f1 * 42.0 + noise_value2(p.xz * 0.9) * 2.5;
+            g += -lb.r1 / max(lb.f1, 1e-3) * s1 * cos(rp) * 42.0 * 0.014 * rk * sstep(0.04, 0.16, lb.e);
+        }
+        n = normalize(n - vec3f(g.x, 0.0, g.y) * lk);
+        crack = mix(1.0, 0.45 + 0.55 * sstep(0.0, 0.04, lb.e), lk * saturate(1.3 - fp / 1.2) * (0.3 + 0.7 * lumpy));
+        shine = mix(1.0, 0.35 + 0.9 * lb.id, lk);
+        tone = mix(0.5, lb.id, lk);
     }
-    let lv = lava_at(p.xz, ctx.t, t * pxa, l);
+    // older, larger inflation lobes and tumuli further out
+    let bk2 = saturate(1.0 - fp / 6.0) * (1.0 - lk * 0.5);
+    if (bk2 > 0.0) {
+        let lb2 = lobes(p.xz * 0.07 + vec2f(9.1, 4.3));
+        let g2 = lb2.g * 0.07 * exp(-lb2.e * 3.0) * 3.0 * 2.0;
+        n = normalize(n - vec3f(g2.x, 0.0, g2.y) * bk2);
+        crack *= mix(1.0, sstep(0.0, 0.06, lb2.e), bk2 * 0.7);
+    }
+    let lv = lava_at(p.xz, ctx.t, fp, l);
     // glassy black basalt: dark diffuse, a silvery sheen at grazing angles
-    let alb = mix(col_hex(0x141416u), col_hex(0x201f1eu), noise_value2(p.xz * 0.07)) * 0.5;
-    let ll = lava_light(p, ctx.t, l);
+    let alb = mix(col_hex(0x1c1c1eu), col_hex(0x3a3633u), tone * 0.7 + 0.3 * noise_value2(p.xz * 0.07)) * crack;
+    let ll = lava_light(p, n, l);
     let dif = saturate(dot(n, l.moon));
-    var c = alb * (l.moon_c * dif + l.amb + ll * 0.6);
-    let fres = 0.03 + 0.25 * pow(1.0 - saturate(dot(n, -rd)), 5.0);
+    var c = alb * (l.moon_c * dif + l.amb * (0.6 + 0.4 * n.y) + ll);
+    // glassy crust, but lumpy: at grazing angles and from afar the bumps
+    // mask and average the mirror away
+    let fres = 0.04 + 0.4 * pow(1.0 - saturate(dot(n, -rd)), 5.0);
+    let gloss = 1.0 / (1.0 + fp * 1.5);
     let r = reflect(rd, n);
-    c += fres * (l.amb * 0.8 + ll * 0.08 * saturate(r.y + 0.3));
-    c += fres * 0.15 * l.moon_c * pow(saturate(dot(r, l.moon)), 24.0) * 8.0;
+    let env = mix(l.amb * 0.8, sheen_env(r, p, l), gloss);
+    c += fres * env * shine * crack * (1.0 - saturate(lv.heat * 2.0));
     return c + lv.e;
 }
 
 fn shade_sea(p: vec3f, rd: vec3f, t: f32, pxa: f32, l: Look, ctx: Ctx) -> vec3f {
-    let n = water_normal(p.xz, ctx.t, 0.8, t, ctx);
+    let n = water_normal(p.xz, ctx.t, 0.7, t, ctx);
     let r = reflect(rd, n);
     let fres = water_fresnel(dot(-rd, n));
     let rr = normalize(vec3f(r.x, abs(r.y) + 0.005, r.z));
     var refl = sky(rr, l, ctx) * 0.8;
-    // the glow of the entry and the lit steam, reflected as a broken path
-    let to_e = normalize(ENTRY + vec3f(0.0, 30.0, 0.0) - p);
-    let to_s = normalize(ENTRY + vec3f(25.0, 110.0, -30.0) - p);
+    // the glow of the entry and the lit column of steam, reflected as a
+    // broken path of light running toward us
+    let to_e = normalize(ENTRY + vec3f(0.0, 8.0, 0.0) - p);
     let glow = fire_temperature_color(0.72) * l.lava;
-    refl += glow * (pow(saturate(dot(r, to_e)), 40.0) * 8.0 + pow(saturate(dot(r, to_s)), 10.0) * 0.8);
+    let de_ = ENTRY.xz - p.xz;
+    let daz = atan2(r.x, -r.z) - atan2(de_.x, -de_.y);
+    let path = exp(-sq((daz + 0.05) / 0.1)) * saturate(r.y * 30.0 + 0.3) * exp(-max(r.y, 0.0) * 4.0);
+    refl += glow * (pow(saturate(dot(r, to_e)), 200.0) * 12.0 + path * 0.6);
     refl += l.moon_c * pow(saturate(dot(r, l.moon)), 300.0) * 25.0;
     var c = mix(vec3f(0.001, 0.0022, 0.003), refl, fres);
-    // surf along the delta, lit by the lava
+    // surf: swells steepen and break as they reach the cliff, each crest
+    // a sharp line of white water trailing broken foam seaward
     let off = p.x - coast_x(p.z);
-    let near = exp(-max(-off, 0.0) / 14.0);
-    let wave = sin(-off * 0.16 + ctx.t * 1.1 + noise_value2(p.xz * 0.03) * 5.0);
-    let foam = near * smoothstep(0.2, 0.9, wave) * (0.5 + 0.5 * noise_value2(p.xz * vec2f(0.2, 0.08) + ctx.t * 0.1));
-    let fl = l.amb * 2.0 + l.moon_c * 0.4 + lava_light(vec3f(p.x, 0.5, p.z), ctx.t, l) * 0.5;
-    c = mix(c, fl * 0.8, saturate(foam));
-    // water at the entry boils and glows
+    let dsh = max(-off, 0.0);
     let de = length(p.xz - ENTRY.xz);
-    c += fire_temperature_color(0.8) * exp(-de * de / 300.0) * 0.8 * l.lava;
+    let wob = noise_value2(p.xz * vec2f(0.03, 0.012)) * 0.8;
+    let ph = fract(dsh / 16.0 + ctx.t * 0.09 + wob);
+    let brk = sstep(40.0, 8.0, dsh);
+    let tex = smoothstep(0.25, 0.75, noise_value2(p.xz * vec2f(0.3, 0.12) + vec2f(ctx.t * 0.08, 0.0)));
+    var foam = sstep(0.0, 0.015, ph) * exp(-ph * 9.0) * brk * (0.35 + 0.65 * tex);
+    // churning white water at the foot of the cliff
+    let swash = sstep(6.0, 0.5, dsh) * (0.4 + 0.6 * tex) * (0.6 + 0.4 * sin(ctx.t * 0.5 + p.z * 0.05 + wob * 6.0));
+    foam = max(foam, swash * 0.8);
+    let lit_e = lava_light(vec3f(p.x, 1.0, p.z), vec3f(0.0, 1.0, 0.0), l);
+    let fl = l.amb * 2.2 + l.moon_c * 0.5 + lit_e * 0.6;
+    c = mix(c, fl * 0.8, saturate(foam));
+    // where a breaker hits hot lava it bursts into steam, lit orange from
+    // the lava it quenches
+    let hitk = max(exp(-de / 50.0), exp(-max(length(p.xz - BRK2.xy) - BRK2.z * 0.5, 0.0) / 12.0));
+    let arrive = sstep(7.0, 0.0, dsh) * exp(-ph * 7.0) * sstep(0.0, 0.02, ph);
+    c += fire_temperature_color(0.72) * l.lava * hitk * (arrive * 2.0 + swash * 0.3) * (0.3 + 0.7 * tex);
+    // water at the entry boils and glows
+    c += fire_temperature_color(0.8) * exp(-de * de / 500.0) * 0.8 * l.lava;
     return c;
 }
 
 fn scene(p: vec2f, ctx: Ctx) -> vec3f {
     let l = look(ctx.theme);
-    let ro = vec3f(62.0, 34.0, 60.0);
-    let cam = cam_look_at(ro, ro + vec3f(-0.16, -0.1, -1.0), 0.0, 40.0);
+    let ro = EYE;
+    let cam = cam_look_at(ro, ro + vec3f(-0.132, -0.073, -1.0), 0.0, 40.0);
     let rd = cam_ray(cam, p);
     let pxa = ctx.px / cam.zoom;
-    let tl = trace_land(ro, rd);
     let tw = water_intersect(ro, rd, 0.0);
+    let tr_ = trace_land(ro, rd, select(9000.0, tw, tw > 0.0));
+    let tl = tr_.x;
+    // the colour of the haze: the low sky, dimmed by the vog
+    let hz = sky(normalize(vec3f(rd.x, 0.01, rd.z)), l, ctx) * 0.6;
     var col: vec3f;
     var tt = 1e5;
-    if (tl > 0.0 && (tw < 0.0 || tl < tw)) {
+    if (tl > 0.0) {
         let hp = ro + rd * tl;
         col = shade_land(hp, rd, tl, pxa, l, ctx);
         tt = tl;
     } else if (tw > 0.0) {
         let hp = ro + rd * tw;
-        col = shade_sea(hp, rd, tw, pxa, l, ctx);
         tt = tw;
+        if (hp.x > coast_x(hp.z)) {
+            // beyond the land march's reach: the far flow field, lost in haze
+            col = hz;
+        } else {
+            col = shade_sea(hp, rd, tw, pxa, l, ctx);
+        }
     } else {
         col = sky(rd, l, ctx);
         let b = backdrop(rd, l, pxa, ctx.t);
-        col = mix(col, b.rgb, b.w);
+        // the shield stands kilometres off: its foot sinks into the same
+        // haze as the far flow field and the sea horizon
+        let bc = mix(b.rgb, hz, 0.85 * exp(-max(rd.y, 0.0) * 45.0));
+        col = mix(col, bc, b.w);
     }
     // vog and sea haze toward the horizon
-    if (tt < 9e4 || tw > 0.0) {
-        let haze = 1.0 - exp(-min(tt, 1e5) * 0.00035);
-        col = mix(col, sky(normalize(vec3f(rd.x, 0.01, rd.z)), l, ctx), haze);
+    if (tt < 9e4) {
+        let haze = 1.0 - exp(-tt * 0.00035);
+        col = mix(col, hz, haze);
     }
+    col += fire_temperature_color(0.66) * l.lava * tr_.y * 0.004;
     // the steam column in front of whatever lies behind it
-    let st = steam(ro, rd, tt, ctx.t, ctx.jitter, l, steps(22.0, ctx));
+    let st = steam(ro, rd, tt, ctx.t, ctx.jitter, l, steps(28.0, ctx));
     col = col * st.w + st.rgb;
     return col * exp2(l.exposure);
 }
