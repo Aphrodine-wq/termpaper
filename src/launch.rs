@@ -61,7 +61,7 @@ pub fn plan_wall_up(
     let ref_pitch = reference.mm_per_px;
     desk.monitors
         .iter()
-        .filter(|d| only.is_empty() || only.iter().any(|o| *o == d.mon.name))
+        .filter(|d| only.is_empty() || only.contains(&d.mon.name))
         .map(|d| {
             // equal physical cells: point size inversely proportional to pitch
             let pt = ((base_pt as f64) * ref_pitch / d.mm_per_px * 4.0).round() / 4.0;
@@ -91,7 +91,7 @@ pub fn run_wall_up(plans: &[LaunchPlan], dry_run: bool) -> std::io::Result<Vec<L
         .collect();
     let mut launched = Vec::new();
     for p in plans {
-        if existing.iter().any(|c| *c == p.class) {
+        if existing.contains(&p.class) {
             continue;
         }
         if !dry_run {

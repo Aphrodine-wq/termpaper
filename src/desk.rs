@@ -149,7 +149,7 @@ impl Monitor {
         // roughly match the mode's aspect
         const ASPECT_ONLY: [(i32, i32); 6] = [(160, 90), (160, 100), (90, 160), (100, 160), (64, 27), (43, 18)];
         let edid_mm = (mw > 50 && mh > 50 && !ASPECT_ONLY.contains(&(mw, mh)))
-            .then(|| (mw as f64, mh as f64))
+            .then_some((mw as f64, mh as f64))
             .filter(|(a, b)| {
                 let pitch = (a * a + b * b).sqrt() / (w * w + h * h).sqrt();
                 let aspect_err = ((a / b) / (w / h) - 1.0).abs();
