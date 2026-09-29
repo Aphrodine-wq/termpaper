@@ -136,10 +136,29 @@ rain_ snow_ bokeh_ light_ fire_ l2d_ entry_`. The modules live in
 ### WGSL gotchas
 
 - Mixing bitwise and arithmetic operators needs parentheses: `(a * b) ^ c`.
-- Reserved words bite: `target`, `patch`, `filter`, `sample`, `texture`, `meta`.
+- Reserved words bite: `target`, `patch`, `pass`, `filter`, `sample`, `texture`, `meta`.
 - `%` on floats is not GLSL `mod`: use `fmod_pos`. No implicit int/float
   conversion. An array you index dynamically must be a `var`.
 - `smoothstep(a, b, x)` is undefined for `a >= b` (use `sstep`).
+
+### Lessons from the first 41 scenes
+
+- **Shadow rays:** the march stops up to ~0.4 px from the surface, so a fixed
+  normal offset self-shadows at distance. Start at
+  `p + n * (base + t * ctx.px * 1.5)`.
+- **Cheap bounds count as hits:** `rm_march` treats any distance below the
+  pixel-footprint threshold as a hit, so pad your early-out bounds (return a
+  distance a little larger than the true gap) or you get invisible walls.
+- **Rain costs bandwidth:** `rain_streaks` adds uniform brightness; gate it by
+  local light (streaks only show where lamps light them) or it repaints most
+  of the terminal every frame.
+- **Sky colour:** the sky model has no ozone, so low-sun horizons drift olive;
+  tint or blend toward a palette horizon where it matters.
+- **Walls:** a portrait monitor beside the landscape row sees far past the
+  frame (|p.x| up to ~2.8, |p.y| up to ~1). The entry point continues the view
+  as a cylinder there (x only), which suits perspective scenes; flat 2.5D
+  scenes that want true desk scale can undo it past `ctx.half.x`. Rooms must
+  not end in black: continue walls, add a second window or lamp.
 
 ### Iterate
 
@@ -147,6 +166,7 @@ rain_ snow_ bokeh_ light_ fire_ l2d_ entry_`. The modules live in
 cargo test --test shader_scenes                                    # naga-validates every scene, lints the contract
 cargo run --release --example shader_review -- <name>              # contact sheets → target/shader_review/
 cargo run --release --example shader_review -- <name> --bench      # GPU time vs budget
+cargo run --release --example shader_review -- <name> --desk       # across your real monitors (Hyprland), to scale
 TERMPAPER_SHADER_DIR=src/gpu/scenes cargo run --release -- <name>  # live, hot-reloads on save
 ```
 
