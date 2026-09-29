@@ -335,12 +335,16 @@ fn shade_cliff(p: vec3f, rd: vec3f, t: f32, l: Look, ctx: Ctx) -> vec3f {
     let dx = abs(p.x - FALL_X);
     // black basalt, vivid moss where spray and ledges let it hold, grass on top
     let ledge = smoothstep(0.12, 0.4, n.y);
+    // stacked lava flows: dark layers with rubbly partings between them
+    let strata = sin(p.y * 0.55 + 5.0 * noise_value2(vec2f(p.x * 0.02, p.y * 0.035)) + 1.5 * noise_value2(vec2f(p.x * 0.12, p.y * 0.2)));
     let wet = smoothstep(40.0, 14.0, dx);
     let outcrop = smoothstep(0.55, 0.75, noise_fbm2(vec2f(p.x * 0.06, p.y * 0.025), 4));
-    let mossy = saturate(ledge * 1.3 - outcrop * 0.9 + 0.25 * noise_value2(vec2f(p.x * 0.3, p.y * 0.06)) + wet * 0.25 - 0.1);
-    var alb = col_hex(0x2c2b2au) * (0.7 + 0.5 * noise_value2(vec2f(p.x * 0.5, p.y * 0.08)));
+    var mossy = saturate(ledge * 1.3 - outcrop * 0.9 + 0.25 * noise_value2(vec2f(p.x * 0.3, p.y * 0.06)) + wet * 0.25 - 0.1);
+    // moss clings to the partings of the lava layers on the steep walls
+    mossy = max(mossy, smoothstep(0.8, 0.97, strata) * wet * 0.55 * smoothstep(0.35, 0.65, noise_value2(vec2f(p.x * 0.25, p.y * 0.1))));
+    var alb = col_hex(0x2c2b2au) * (0.7 + 0.5 * noise_value2(vec2f(p.x * 0.5, p.y * 0.08))) * (0.72 + 0.4 * smoothstep(-0.2, 0.6, strata));
     let mv = noise_fbm2(vec2f(p.x * 0.05, p.y * 0.04), 3);
-    let moss = mix(col_hex(0x3a5a20u), col_hex(0x5a7c2cu), mv) * (0.85 + 0.3 * noise_value2(vec2f(p.x * 0.7, p.y * 0.35)));
+    let moss = mix(col_hex(0x3a5a20u), col_hex(0x5a7c2cu), mv) * (0.8 + 0.25 * noise_value2(vec2f(p.x * 0.7, p.y * 0.35)) + 0.15 * noise_value2(p.xz * 1.9 + p.y));
     // a band of bare basalt just under the lip
     let band = smoothstep(9.0, 4.0, cliff_top(p.x, p.z) - p.y) * smoothstep(0.5, 2.0, cliff_top(p.x, p.z) - p.y);
     alb = mix(alb, moss, mossy * (1.0 - band * 0.8));
