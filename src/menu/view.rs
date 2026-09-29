@@ -1,10 +1,14 @@
 //! Drawing the menu. The drawer takes the left ~46% of the screen (all of it
 //! on narrow terminals) over a darkened copy of the scene, so the live
 //! picture stays visible beside it — and faintly through it.
+//!
+//! While it draws, the view records what is where ([`super::Hit`]) so the
+//! mouse can reach every control the keys do.
 
 use super::browser::{self, Column, Shelf};
 use super::settings::{self, Kind};
-use super::{Menu, MenuCtx, Page};
+use super::{Hit, HitBox, Menu, MenuCtx, Page};
+
 use crate::scene::{self, Entry};
 use crate::{brand, config};
 use ratatui::{
@@ -12,9 +16,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap,
-    },
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 use std::time::Instant;
@@ -26,10 +28,14 @@ struct Pal {
     muted: Color,
     faint: Color,
     accent: Color,
+    /// text drawn on the accent (selected tab)
+    on_accent: Color,
     /// focused-row background
     hi_bg: Color,
     /// solid background for the help overlay
     panel: Color,
+    /// a slider's empty track
+    track: Color,
     fav: Color,
     live: Color,
     warn: Color,
@@ -38,12 +44,14 @@ struct Pal {
 fn pal(truecolor: bool) -> Pal {
     if truecolor {
         Pal {
-            text: Color::Rgb(214, 218, 228),
-            muted: Color::Rgb(140, 147, 164),
+            text: Color::Rgb(220, 224, 234),
+            muted: Color::Rgb(146, 153, 170),
             faint: Color::Rgb(88, 94, 110),
             accent: Color::Rgb(122, 196, 236),
-            hi_bg: Color::Rgb(40, 50, 72),
+            on_accent: Color::Rgb(10, 14, 22),
+            hi_bg: Color::Rgb(36, 46, 68),
             panel: Color::Rgb(12, 13, 18),
+            track: Color::Rgb(56, 62, 78),
             fav: Color::Rgb(240, 196, 92),
             live: Color::Rgb(126, 212, 146),
             warn: Color::Rgb(236, 160, 110),
@@ -54,8 +62,10 @@ fn pal(truecolor: bool) -> Pal {
             muted: Color::Gray,
             faint: Color::DarkGray,
             accent: Color::Cyan,
+            on_accent: Color::Black,
             hi_bg: Color::Indexed(237),
             panel: Color::Indexed(233),
+            track: Color::Indexed(239),
             fav: Color::Yellow,
             live: Color::Green,
             warn: Color::LightRed,
@@ -95,17 +105,32 @@ fn pad(s: &str, w: usize) -> String {
     format!("{f}{}", " ".repeat(w - n))
 }
 
-/// Selection plus an offset that keeps it roughly centred in `height` rows.
-fn list_state(selected: usize, len: usize, height: u16) -> ListState {
-    let h = height as usize;
-    let offset = if len <= h {
+/// `s` cut or padded on the left to exactly `w` columns (right-aligned).
+fn pad_left(s: &str, w: usize) -> String {
+    let f = fit(s, w);
+    let n = width(&f);
+    format!("{}{f}", " ".repeat(w - n))
+}
+
+/// First visible line of a list of `len` lines in `height` rows, keeping
+/// `selected` roughly centred.
+fn scroll_offset(selected: usize, len: usize, height: usize) -> usize {
+    if len <= height {
         0
     } else {
-        selected.saturating_sub(h / 2).min(len - h)
-    };
-    ListState::default()
-        .with_selected(Some(selected))
-        .with_offset(offset)
+        selected.saturating_sub(height / 2).min(len - height)
+    }
+}
+
+fn hit(m: &Menu, rect: Rect, what: Hit) {
+    if rect.width > 0 && rect.height > 0 {
+        m.hits.borrow_mut().push(HitBox { rect, hit: what });
+    }
+}
+
+/// Draw one line in a one-row rect.
+fn line_at(f: &mut Frame, x: u16, y: u16, w: u16, line: Line<'static>) {
+    f.render_widget(Paragraph::new(line), Rect::new(x, y, w, 1));
 }
 
 /// The drawer: the left ~46% of the screen, at least 44 columns, and the
@@ -153,17 +178,24 @@ fn frost(buf: &mut Buffer, rect: Rect, truecolor: bool) {
 }
 
 pub fn render(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx) {
+    m.hits.borrow_mut().clear();
     let p = pal(ctx.truecolor);
     let rect = drawer_rect(area);
     if rect.width < 12 || rect.height < 5 {
         return;
     }
+    // the live scene beside the drawer: a click there closes the menu; the
+    // drawer's own empty space does nothing
+    hit(m, area, Hit::Outside);
+    hit(m, rect, Hit::Drawer);
     frost(f.buffer_mut(), rect, ctx.truecolor);
 
     let shown = scene::lookup(ctx.scene_name).map_or(ctx.scene_name, |e| e.title());
-    let right = match m.previewing() {
-        Some(_) => format!(" preview · {shown} "),
-        None => format!(" {shown} "),
+    let variant = ctx.theme.clone().or_else(|| scene::themes(ctx.scene_name).first().map(|t| t.to_string()));
+    let right = match (m.previewing(), variant) {
+        (Some(_), _) => format!(" preview · {shown} "),
+        (None, Some(v)) => format!(" {shown} · {v} "),
+        (None, None) => format!(" {shown} "),
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -214,15 +246,31 @@ pub fn render(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx) {
     }
 }
 
+/// Tabs as pills: the current page on the accent, the rest quiet. Narrow
+/// drawers get short names.
 fn draw_tabs(f: &mut Frame, area: Rect, m: &Menu, p: &Pal) {
-    let divider = if area.width >= 41 { " · " } else { " " };
-    let tabs = Tabs::new(Page::ALL.iter().map(|pg| pg.title()))
-        .select(m.page.index())
-        .style(fg(p.muted))
-        .highlight_style(bold(p.accent).add_modifier(Modifier::UNDERLINED))
-        .divider(Span::styled(divider, fg(p.faint)))
-        .padding("", "");
-    f.render_widget(tabs, area);
+    let full: usize = Page::ALL.iter().map(|pg| width(pg.title()) + 2).sum::<usize>() + Page::ALL.len() - 1;
+    let short = full > area.width as usize;
+    let mut x = area.x;
+    for (i, pg) in Page::ALL.iter().enumerate() {
+        let name = if short { pg.short_title() } else { pg.title() };
+        let label = format!(" {name} ");
+        let w = width(&label) as u16;
+        if x + w > area.x + area.width {
+            break;
+        }
+        let style = if *pg == m.page {
+            Style::new().fg(p.on_accent).bg(p.accent).add_modifier(Modifier::BOLD)
+        } else {
+            fg(p.muted)
+        };
+        line_at(f, x, area.y, w, Line::from(Span::styled(label, style)));
+        hit(m, Rect::new(x, area.y, w, 1), Hit::Tab(*pg));
+        x += w;
+        if i + 1 < Page::ALL.len() {
+            x += 1;
+        }
+    }
 }
 
 // ── Scenes ──────────────────────────────────────────────────────────────
@@ -286,34 +334,42 @@ fn draw_search(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal) {
 fn draw_shelves(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal) {
     let shelves = browser::shelves();
     let w = area.width as usize;
-    let items: Vec<ListItem> = shelves
-        .iter()
-        .map(|&s| {
-            let count = format!("{:>3}", browser::shelf_scenes(s, ctx).len());
-            let label = if s.nested() {
-                format!("  {}", s.label())
-            } else {
-                s.label().to_string()
-            };
-            let style = match s {
-                Shelf::Favorites => fg(p.fav),
-                Shelf::Group(_) => fg(p.muted),
-                _ => fg(p.text),
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(pad(&label, w.saturating_sub(count.len())), style),
-                Span::styled(count, fg(p.faint)),
-            ]))
-        })
-        .collect();
     let sel = m.browser.shelf.min(shelves.len() - 1);
-    let hl = if m.browser.column == Column::Shelves {
-        Style::new().bg(p.hi_bg).add_modifier(Modifier::BOLD)
-    } else {
-        bold(p.accent)
-    };
-    let mut state = list_state(sel, shelves.len(), area.height);
-    f.render_stateful_widget(List::new(items).highlight_style(hl), area, &mut state);
+    let focused = m.browser.column == Column::Shelves;
+    let off = scroll_offset(sel, shelves.len(), area.height as usize);
+    for (row, (i, &s)) in shelves.iter().enumerate().skip(off).take(area.height as usize).enumerate() {
+        let y = area.y + row as u16;
+        let count = format!("{:>3}", browser::shelf_scenes(s, ctx).len());
+        let label = if s.nested() {
+            format!("  {}", s.label())
+        } else {
+            s.label().to_string()
+        };
+        let mut style = match s {
+            Shelf::Favorites => fg(p.fav),
+            Shelf::Group(_) => fg(p.muted),
+            _ => fg(p.text),
+        };
+        if i == sel {
+            style = if focused {
+                style.bg(p.hi_bg).add_modifier(Modifier::BOLD)
+            } else {
+                bold(p.accent)
+            };
+        }
+        let count_style = if i == sel && focused { fg(p.faint).bg(p.hi_bg) } else { fg(p.faint) };
+        line_at(
+            f,
+            area.x,
+            y,
+            area.width,
+            Line::from(vec![
+                Span::styled(pad(&label, w.saturating_sub(count.len())), style),
+                Span::styled(count, count_style),
+            ]),
+        );
+        hit(m, Rect::new(area.x, y, area.width, 1), Hit::Shelf(i));
+    }
 }
 
 fn draw_scene_list(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal, focused: bool) {
@@ -338,45 +394,45 @@ fn draw_scene_list(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal, 
         return;
     }
     let w = area.width as usize;
-    let items: Vec<ListItem> = list
-        .iter()
-        .map(|e| {
-            let name = e.name();
-            let live = name == ctx.scene_name;
-            let fav = ctx.favorites.iter().any(|f| f == name);
-            let theme = ctx
-                .scene_themes
-                .get(name)
-                .map(String::as_str)
-                .or_else(|| e.themes().first().copied())
-                .unwrap_or("");
-            let theme_w = if w >= 24 {
-                width(theme).min((w - 4) / 3)
-            } else {
-                0
-            };
-            let title_w = w.saturating_sub(3 + if theme_w > 0 { theme_w + 1 } else { 0 });
-            let mut spans = vec![
-                Span::styled(if live { "●" } else { " " }, fg(p.live)),
-                Span::styled(if fav { "★" } else { " " }, fg(p.fav)),
-                Span::raw(" "),
-                Span::styled(pad(e.title(), title_w), fg(p.text)),
-            ];
-            if theme_w > 0 {
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(fit(theme, theme_w), fg(p.faint)));
-            }
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
     let sel = b.row_in(list.len());
-    let hl = if focused {
-        Style::new().bg(p.hi_bg).add_modifier(Modifier::BOLD)
-    } else {
-        Style::new().add_modifier(Modifier::BOLD)
-    };
-    let mut state = list_state(sel, list.len(), area.height);
-    f.render_stateful_widget(List::new(items).highlight_style(hl), area, &mut state);
+    let off = scroll_offset(sel, list.len(), area.height as usize);
+    for (row, (i, e)) in list.iter().enumerate().skip(off).take(area.height as usize).enumerate() {
+        let y = area.y + row as u16;
+        let name = e.name();
+        let live = name == ctx.scene_name;
+        let fav = ctx.favorites.iter().any(|f| f == name);
+        let theme = ctx
+            .scene_themes
+            .get(name)
+            .map(String::as_str)
+            .or_else(|| e.themes().first().copied())
+            .unwrap_or("");
+        let theme_w = if w >= 24 {
+            width(theme).min((w - 4) / 3)
+        } else {
+            0
+        };
+        let title_w = w.saturating_sub(3 + if theme_w > 0 { theme_w + 1 } else { 0 });
+        let row_style = if i == sel && focused {
+            Style::new().bg(p.hi_bg).add_modifier(Modifier::BOLD)
+        } else if i == sel {
+            Style::new().add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+        };
+        let mut spans = vec![
+            Span::styled(if live { "●" } else { " " }, fg(p.live).patch(row_style)),
+            Span::styled(if fav { "★" } else { " " }, fg(p.fav).patch(row_style)),
+            Span::styled(" ", row_style),
+            Span::styled(pad(e.title(), title_w), fg(p.text).patch(row_style)),
+        ];
+        if theme_w > 0 {
+            spans.push(Span::styled(" ", row_style));
+            spans.push(Span::styled(pad(&fit(theme, theme_w), theme_w), fg(p.faint).patch(row_style)));
+        }
+        line_at(f, area.x, y, area.width, Line::from(spans));
+        hit(m, Rect::new(area.x, y, area.width, 1), Hit::Scene(i));
+    }
 }
 
 fn draw_detail(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal) {
@@ -399,18 +455,17 @@ fn draw_detail(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal) {
     if e.title() != e.name() {
         head.push(Span::styled(format!(" · {}", e.name()), fg(p.faint)));
     }
+    head.push(Span::raw("  "));
     if e.needs_gpu() {
-        head.push(Span::raw("  "));
-        head.push(Span::styled(
-            " GPU ",
-            Style::new().fg(Color::Black).bg(p.accent),
-        ));
+        head.push(Span::styled(" Studio ", Style::new().fg(p.on_accent).bg(p.accent)));
+    } else {
+        head.push(Span::styled(" Classic ", Style::new().fg(p.on_accent).bg(p.muted)));
     }
     lines.push(Line::from(head));
     if let Entry::Shader(spec) = e {
         match ctx.gpu {
             Some(false) => lines.push(Line::from(Span::styled(
-                format!("needs GPU → shows {} here", spec.fallback),
+                format!("needs a GPU → shows {} here", spec.fallback),
                 fg(p.warn),
             ))),
             None => lines.push(Line::from(Span::styled(
@@ -427,19 +482,16 @@ fn draw_detail(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal) {
         ctx.scene_themes.get(e.name()).cloned()
     }
     .or_else(|| e.themes().first().map(|t| t.to_string()));
-    let mut themes = vec![Span::styled("themes ", fg(p.faint))];
-    for (i, t) in e.themes().iter().enumerate() {
-        if i > 0 {
-            themes.push(Span::styled(" · ", fg(p.faint)));
-        }
-        let style = if Some(*t) == cur.as_deref() {
-            bold(p.accent)
+    // variants as chips: the one in use on the accent
+    let mut chips = vec![Span::styled("variants ", fg(p.faint))];
+    for t in e.themes() {
+        if Some(*t) == cur.as_deref() {
+            chips.push(Span::styled(format!(" {t} "), Style::new().fg(p.on_accent).bg(p.accent)));
         } else {
-            fg(p.muted)
-        };
-        themes.push(Span::styled(t.to_string(), style));
+            chips.push(Span::styled(format!(" {t} "), fg(p.muted)));
+        }
     }
-    lines.push(Line::from(themes));
+    lines.push(Line::from(chips));
     if !e.tags().is_empty() {
         lines.push(Line::from(Span::styled(
             format!("tags {}", e.tags().join(", ")),
@@ -476,78 +528,193 @@ fn help_height(body: u16) -> u16 {
     }
 }
 
+/// A slider bar `w` wide: the fill runs from the neutral point to the
+/// value, so a bipolar control grows either way from its middle.
+fn slider_spans(frac: f32, neutral: f32, w: usize, focused: bool, on: bool, bg: Option<Color>, p: &Pal) -> Vec<Span<'static>> {
+    if w == 0 {
+        return Vec::new();
+    }
+    let at = |v: f32| ((v.clamp(0.0, 1.0) * (w - 1) as f32).round() as usize).min(w - 1);
+    let (k, n) = (at(frac), at(neutral));
+    let (lo, hi) = (k.min(n), k.max(n));
+    let fill = if !on {
+        p.faint
+    } else if focused {
+        p.accent
+    } else {
+        p.muted
+    };
+    let knob = if focused && on { p.text } else { fill };
+    let with_bg = |s: Style| match bg {
+        Some(b) => s.bg(b),
+        None => s,
+    };
+    let mut spans = Vec::new();
+    let mut run = String::new();
+    let mut run_style = Style::new();
+    for i in 0..w {
+        let (ch, style) = if i == k {
+            ('●', with_bg(fg(knob)))
+        } else if i >= lo && i <= hi {
+            ('━', with_bg(fg(fill)))
+        } else {
+            ('─', with_bg(fg(p.track)))
+        };
+        if style != run_style && !run.is_empty() {
+            spans.push(Span::styled(std::mem::take(&mut run), run_style));
+        }
+        run_style = style;
+        run.push(ch);
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, run_style));
+    }
+    spans
+}
+
+/// One page line: a section heading or a settings row.
+enum PageLine {
+    Blank,
+    Section(&'static str),
+    Row(usize),
+}
+
 fn draw_settings(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal) {
     let rows = settings::page(m.page);
     if rows.is_empty() {
         return;
     }
     let sel = m.row();
+    // headings interleaved with rows
+    let sections = settings::sections(m.page);
+    let mut lines = Vec::new();
+    for i in 0..rows.len() {
+        if let Some((_, name)) = sections.iter().find(|(at, _)| *at == i) {
+            if !lines.is_empty() {
+                lines.push(PageLine::Blank);
+            }
+            lines.push(PageLine::Section(name));
+        }
+        lines.push(PageLine::Row(i));
+    }
     // rows, then their help right beneath (rule + two lines), then extras
-    let rows_h = (rows.len() as u16)
-        .min(area.height.saturating_sub(1))
-        .max(1);
-    let help_h = (area.height - rows_h).min(3);
-    let list_area = Rect {
-        height: rows_h,
-        ..area
-    };
+    let help_h = help_height(area.height).min(area.height.saturating_sub(1));
+    let list_h = (lines.len() as u16).min(area.height.saturating_sub(help_h)).max(1);
+    let list_area = Rect { height: list_h, ..area };
     let help_area = Rect {
-        y: area.y + rows_h,
+        y: area.y + list_h,
         height: help_h,
         ..area
     };
     let rest = Rect {
         y: help_area.bottom(),
-        height: area.bottom() - help_area.bottom(),
+        height: area.bottom().saturating_sub(help_area.bottom()),
         ..area
     };
+    m.page_len.set(list_h as usize);
     let w = list_area.width as usize;
-    let lw = (w / 2).clamp(8, 17);
-    let vw = w.saturating_sub(lw + 4);
-    let items: Vec<ListItem> = rows
-        .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            let focused = i == sel;
-            let on = settings::enabled(s.id, ctx);
-            let v = fit(&settings::value(s.id, ctx), vw);
-            let (label_style, value_style) = match (on, focused) {
-                (false, _) => (fg(p.faint), fg(p.faint)),
-                (true, true) => (bold(p.text), fg(p.accent)),
-                (true, false) => (fg(p.text), fg(p.muted)),
-            };
-            let mut spans = vec![Span::styled(pad(s.label, lw), label_style)];
-            match s.kind {
-                Kind::Choice | Kind::Toggle if focused && on => {
-                    spans.push(Span::styled("◂ ", fg(p.accent)));
-                    spans.push(Span::styled(v, value_style));
-                    spans.push(Span::styled(" ▸", fg(p.accent)));
-                }
-                Kind::Open => {
-                    spans.push(Span::raw("  "));
-                    if !v.is_empty() {
-                        spans.push(Span::styled(v, value_style));
-                        spans.push(Span::raw(" "));
-                    }
-                    spans.push(Span::styled(
-                        "›",
-                        fg(if focused { p.accent } else { p.faint }),
-                    ));
-                }
-                _ => {
-                    spans.push(Span::raw("  "));
-                    spans.push(Span::styled(v, value_style));
-                }
+    let lw = (w * 2 / 5).clamp(8, 18);
+    // value column: after the label and a two-column gutter
+    let vx = list_area.x + (lw + 3).min(w) as u16;
+    let vw = (list_area.x + list_area.width).saturating_sub(vx) as usize;
+    let sel_line = lines.iter().position(|l| matches!(l, PageLine::Row(r) if *r == sel)).unwrap_or(0);
+    let off = scroll_offset(sel_line, lines.len(), list_h as usize);
+    for (row_on_screen, line) in lines.iter().enumerate().skip(off).take(list_h as usize).map(|(i, l)| (i - off, l)) {
+        let y = list_area.y + row_on_screen as u16;
+        match line {
+            PageLine::Blank => {}
+            PageLine::Section(name) => {
+                let head = name.to_uppercase();
+                let rule_w = w.saturating_sub(width(&head) + 2);
+                line_at(
+                    f,
+                    list_area.x,
+                    y,
+                    list_area.width,
+                    Line::from(vec![
+                        Span::styled(format!(" {head} "), bold(p.faint)),
+                        Span::styled("─".repeat(rule_w), fg(p.track)),
+                    ]),
+                );
             }
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
-    let mut state = list_state(sel, rows.len(), list_area.height);
-    f.render_stateful_widget(
-        List::new(items).highlight_style(Style::new().bg(p.hi_bg)),
-        list_area,
-        &mut state,
-    );
+            PageLine::Row(i) => {
+                let s = &rows[*i];
+                let focused = *i == sel;
+                let on = settings::enabled(s.id, ctx);
+                let bg = focused.then_some(p.hi_bg);
+                let with_bg = |st: Style| match bg {
+                    Some(b) => st.bg(b),
+                    None => st,
+                };
+                let row_rect = Rect::new(list_area.x, y, list_area.width, 1);
+                if let Some(b) = bg {
+                    f.buffer_mut().set_style(row_rect, Style::new().bg(b));
+                }
+                let label_style = match (on, focused) {
+                    (false, _) => fg(p.faint),
+                    (true, true) => bold(p.text),
+                    (true, false) if s.kind == Kind::Action => fg(p.accent),
+                    (true, false) => fg(p.text),
+                };
+                let bar = if focused { "▌" } else { " " };
+                let mut spans = vec![
+                    Span::styled(bar, with_bg(fg(p.accent))),
+                    Span::styled(pad(s.label, lw), with_bg(label_style)),
+                    Span::styled("  ", with_bg(Style::new())),
+                ];
+                let v = settings::value(s.id, ctx);
+                let value_style = match (on, focused) {
+                    (false, _) => fg(p.faint),
+                    (true, true) => fg(p.accent),
+                    (true, false) => fg(p.muted),
+                };
+                match s.kind {
+                    Kind::Slider => {
+                        let tw = 8.min(vw);
+                        let bw = vw.saturating_sub(tw + 1);
+                        if bw >= 4 {
+                            let (frac, neutral) = settings::fraction(s.id, ctx).unwrap_or((0.0, 0.0));
+                            spans.extend(slider_spans(frac, neutral, bw, focused, on, bg, p));
+                            spans.push(Span::styled(" ", with_bg(Style::new())));
+                            hit(m, Rect::new(vx, y, bw as u16, 1), Hit::Slider { row: *i, x0: vx, width: bw as u16 });
+                        }
+                        spans.push(Span::styled(pad_left(&v, tw), with_bg(value_style)));
+                    }
+                    Kind::Toggle => {
+                        let is_on = v.starts_with("on") || v == "auto";
+                        let (mark, style) = if is_on { ("● ", fg(p.live)) } else { ("○ ", fg(p.faint)) };
+                        spans.push(Span::styled(mark, with_bg(style)));
+                        spans.push(Span::styled(fit(&v, vw.saturating_sub(2)), with_bg(value_style)));
+                        hit(m, Rect::new(vx, y, vw as u16, 1), Hit::Value(*i));
+                    }
+                    Kind::Choice if focused && on => {
+                        spans.push(Span::styled("◂ ", with_bg(fg(p.accent))));
+                        spans.push(Span::styled(fit(&v, vw.saturating_sub(4)), with_bg(value_style)));
+                        spans.push(Span::styled(" ▸", with_bg(fg(p.accent))));
+                        hit(m, Rect::new(vx, y, vw as u16, 1), Hit::Value(*i));
+                    }
+                    Kind::Open | Kind::Action => {
+                        if !v.is_empty() {
+                            spans.push(Span::styled(fit(&v, vw.saturating_sub(2)), with_bg(value_style)));
+                            spans.push(Span::styled(" ", with_bg(Style::new())));
+                        }
+                        let mark = if s.kind == Kind::Open { "›" } else { "↵" };
+                        spans.push(Span::styled(mark, with_bg(fg(if focused { p.accent } else { p.faint }))));
+                        hit(m, Rect::new(vx, y, vw as u16, 1), Hit::Value(*i));
+                    }
+                    _ => {
+                        spans.push(Span::styled(fit(&v, vw), with_bg(value_style)));
+                        if s.kind == Kind::Choice {
+                            hit(m, Rect::new(vx, y, vw as u16, 1), Hit::Value(*i));
+                        }
+                    }
+                }
+                line_at(f, list_area.x, y, list_area.width, Line::from(spans));
+                // the label focuses the row; the value acts
+                hit(m, Rect::new(list_area.x, y, (lw + 3).min(w) as u16, 1), Hit::Row(*i));
+            }
+        }
+    }
     draw_help_line(f, help_area, m, rows[sel].help, p);
     // the Wall page lists its peers underneath
     if m.page == Page::Wall && rest.height >= 3 {
@@ -575,17 +742,23 @@ fn draw_filters(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal) {
     ])
     .areas(area);
     let w = head.width as usize;
-    let filters = &ctx.look.effects.stack;
-    let stack = if filters.is_empty() {
+    let effects = &ctx.look.effects;
+    let strength = |n: &str| format!("{:.0}%", effects.amount(n) * 100.0);
+    let stack = if effects.stack.is_empty() {
         "none".to_string()
     } else {
-        filters.join(" → ")
+        effects
+            .stack
+            .iter()
+            .map(|n| if crate::filter::has_amount(n) { format!("{n} {}", strength(n)) } else { n.clone() })
+            .collect::<Vec<_>>()
+            .join(" → ")
     };
     f.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("‹ Filters", bold(p.accent)),
-                Span::styled("  applied in stack order", fg(p.faint)),
+                Span::styled("‹ Effects", bold(p.accent)),
+                Span::styled("  applied top to bottom of the stack", fg(p.faint)),
             ]),
             Line::from(vec![
                 Span::styled("stack ", fg(p.faint)),
@@ -595,46 +768,126 @@ fn draw_filters(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal) {
         head,
     );
 
-    // one list with non-selectable group headings; map rows to lines
-    let lw = 12usize.min(w);
-    let on = |name: &str| filters.iter().position(|f| f == name);
-    let preset = settings::preset_of(filters).map_or("custom", |i| settings::PRESETS[i].0);
+    // one list with non-selectable group headings; rows map onto lines
+    let lw = 13usize.min(w);
+    let on = |name: &str| effects.stack.iter().position(|f| f == name);
+    let preset = settings::preset_of(effects).map_or("custom", |i| settings::PRESETS[i].0);
     let sel = m.filter_row().min(settings::filter_rows() - 1);
-    let mut items = vec![ListItem::new(Line::from(vec![
-        Span::styled(pad("Preset", lw), bold(p.text)),
-        Span::styled(if sel == 0 { "◂ " } else { "  " }, fg(p.accent)),
-        Span::styled(preset, fg(p.accent)),
-        Span::styled(if sel == 0 { " ▸" } else { "" }, fg(p.accent)),
-    ]))];
-    let mut line_of_row = vec![0usize];
+    enum L {
+        Preset,
+        Group(&'static str),
+        Effect(usize, &'static str),
+    }
+    let mut lines = vec![L::Preset];
+    let mut row = 1;
     for (group, names) in settings::FILTER_GROUPS {
-        items.push(ListItem::new(Line::from(Span::styled(
-            *group,
-            bold(p.faint),
-        ))));
+        lines.push(L::Group(group));
         for name in names.iter() {
-            line_of_row.push(items.len());
-            let (mark, style) = match on(name) {
-                Some(_) => ("[x] ", fg(p.live)),
-                None => ("[ ] ", fg(p.muted)),
-            };
-            items.push(ListItem::new(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(mark, style),
-                Span::styled(name.to_string(), style),
-            ])));
+            lines.push(L::Effect(row, name));
+            row += 1;
         }
     }
-    let total = items.len();
-    let mut state = list_state(line_of_row[sel], total, list_area.height);
-    f.render_stateful_widget(
-        List::new(items).highlight_style(Style::new().bg(p.hi_bg).add_modifier(Modifier::BOLD)),
-        list_area,
-        &mut state,
-    );
+    let sel_line = lines
+        .iter()
+        .position(|l| match l {
+            L::Preset => sel == 0,
+            L::Effect(r, _) => *r == sel,
+            L::Group(_) => false,
+        })
+        .unwrap_or(0);
+    let off = scroll_offset(sel_line, lines.len(), list_area.height as usize);
+    for (k, line) in lines.iter().enumerate().skip(off).take(list_area.height as usize) {
+        let y = list_area.y + (k - off) as u16;
+        let rect = Rect::new(list_area.x, y, list_area.width, 1);
+        match line {
+            L::Preset => {
+                let focused = sel == 0;
+                let bg = focused.then_some(p.hi_bg);
+                if let Some(b) = bg {
+                    f.buffer_mut().set_style(rect, Style::new().bg(b));
+                }
+                let st = |s: Style| match bg {
+                    Some(b) => s.bg(b),
+                    None => s,
+                };
+                line_at(
+                    f,
+                    rect.x,
+                    y,
+                    rect.width,
+                    Line::from(vec![
+                        Span::styled(if focused { "▌" } else { " " }, st(fg(p.accent))),
+                        Span::styled(pad("Preset", lw), st(bold(p.text))),
+                        Span::styled(if focused { "◂ " } else { "  " }, st(fg(p.accent))),
+                        Span::styled(preset, st(fg(p.accent))),
+                        Span::styled(if focused { " ▸" } else { "" }, st(fg(p.accent))),
+                    ]),
+                );
+                hit(m, rect, Hit::FilterRow(0));
+            }
+            L::Group(g) => {
+                let head = g.to_uppercase();
+                let rule_w = (rect.width as usize).saturating_sub(width(&head) + 2);
+                line_at(
+                    f,
+                    rect.x,
+                    y,
+                    rect.width,
+                    Line::from(vec![
+                        Span::styled(format!(" {head} "), bold(p.faint)),
+                        Span::styled("─".repeat(rule_w), fg(p.track)),
+                    ]),
+                );
+            }
+            L::Effect(r, name) => {
+                let focused = *r == sel;
+                let bg = focused.then_some(p.hi_bg);
+                if let Some(b) = bg {
+                    f.buffer_mut().set_style(rect, Style::new().bg(b));
+                }
+                let st = |s: Style| match bg {
+                    Some(b) => s.bg(b),
+                    None => s,
+                };
+                let is_on = on(name);
+                let (mark, mark_style) = match is_on {
+                    Some(_) => ("● ", fg(p.live)),
+                    None => ("○ ", fg(p.faint)),
+                };
+                let name_style = if is_on.is_some() { fg(p.text) } else { fg(p.muted) };
+                let mut spans = vec![
+                    Span::styled(if focused { "▌ " } else { "  " }, st(fg(p.accent))),
+                    Span::styled(mark, st(mark_style)),
+                    Span::styled(pad(name, lw), st(name_style)),
+                ];
+                hit(m, rect, Hit::FilterRow(*r));
+                hit(m, Rect::new(rect.x + 2, y, 2, 1), Hit::FilterBox(*r));
+                let used = 2 + 2 + lw;
+                let avail = (rect.width as usize).saturating_sub(used + 1);
+                // a strength bar for effects that are on, and on the focused
+                // row (where it is the thing ←→ and the mouse move)
+                let show_bar = is_on.is_some() || focused;
+                if crate::filter::has_amount(name) && avail >= 10 && show_bar {
+                    let tw = 5;
+                    let bw = avail.saturating_sub(tw + 4);
+                    let a = if is_on.is_some() { effects.amount(name) } else { 0.0 };
+                    let x0 = rect.x + (used + 1) as u16;
+                    spans.push(Span::styled(" ", st(Style::new())));
+                    spans.extend(slider_spans(a / 2.0, 0.0, bw, focused, is_on.is_some(), bg, p));
+                    let label = if is_on.is_some() { strength(name) } else { String::new() };
+                    spans.push(Span::styled(format!(" {}", pad_left(&label, tw)), st(fg(p.muted))));
+                    hit(m, Rect::new(x0, y, bw as u16, 1), Hit::FilterSlider { row: *r, x0, width: bw as u16 });
+                }
+                if let Some(i) = is_on {
+                    spans.push(Span::styled(format!(" #{}", i + 1), st(fg(p.faint))));
+                }
+                line_at(f, rect.x, y, rect.width, Line::from(spans));
+            }
+        }
+    }
 
     let help = match settings::filter_at(sel) {
-        None => "Presets replace the stack: Clean, Film, CRT, Dream.".to_string(),
+        None => "Presets replace the stack and its strengths.".to_string(),
         Some(name) => match on(name) {
             Some(i) => format!(
                 "{} On, #{} in the stack.",
@@ -678,7 +931,7 @@ pub fn key_hints(m: &Menu, ctx: &MenuCtx) -> Vec<(&'static str, &'static str)> {
                 if let Some(e) = hit {
                     v.extend([("Enter", "switch"), ("f", "star")]);
                     if e.themes().len() > 1 {
-                        v.push(("t", "theme"));
+                        v.push(("t", "variant"));
                     }
                 }
                 v.extend([("/", "search"), ("←", "categories")]);
@@ -687,28 +940,25 @@ pub fn key_hints(m: &Menu, ctx: &MenuCtx) -> Vec<(&'static str, &'static str)> {
             v
         }
         _ if m.filters_open => {
-            let what = if m.filter_row() == 0 {
-                "preset"
+            if m.filter_row() == 0 {
+                vec![("↑↓", "move"), ("←→", "preset"), ("u", "undo"), ("Esc", "back"), ("Tab", "page")]
             } else {
-                "toggle"
-            };
-            vec![
-                ("↑↓", "move"),
-                ("←→", what),
-                ("Esc", "back"),
-                ("Tab", "page"),
-            ]
+                vec![("↑↓", "move"), ("Enter", "on/off"), ("←→", "strength"), ("u", "undo"), ("Esc", "back"), ("Tab", "page")]
+            }
         }
         _ => {
             let set = &settings::page(m.page)[m.row()];
             let mut v = vec![("↑↓", "move")];
+            let on = settings::enabled(set.id, ctx);
             match set.kind {
-                Kind::Choice if settings::enabled(set.id, ctx) => v.push(("←→", "change")),
+                Kind::Choice if on => v.push(("←→", "change")),
+                Kind::Slider if on => v.push(("←→", "adjust")),
                 Kind::Toggle => v.push(("←→", "toggle")),
                 Kind::Open => v.push(("Enter", "open")),
+                Kind::Action => v.push(("Enter", "apply")),
                 _ => {}
             }
-            v.extend([("Tab", "page"), ("?", "help"), ("Esc", "close")]);
+            v.extend([("u", "undo"), ("Tab", "page"), ("?", "help"), ("Esc", "close")]);
             v
         }
     }
@@ -719,7 +969,7 @@ pub fn key_hints(m: &Menu, ctx: &MenuCtx) -> Vec<(&'static str, &'static str)> {
 fn hint_rank(key: &str) -> u8 {
     match key {
         "Esc" | "?" | "Enter" | "type" => 0,
-        "↑↓" | "Tab" | "←" | "→" => 2,
+        "↑↓" | "Tab" | "←" | "→" | "u" => 2,
         _ => 1,
     }
 }
@@ -791,9 +1041,11 @@ const MENU_KEYS: &[(&str, &str)] = &[
     ("← →  h l", "change a value · switch column"),
     ("PgUp PgDn Home End", "jump"),
     ("Enter", "switch scene · toggle · open"),
+    ("u", "undo the last change"),
     ("/", "search scenes"),
     ("f", "star the highlighted scene"),
-    ("t", "next theme for it"),
+    ("t", "next variant for it"),
+    ("mouse", "click anything · drag sliders · wheel scrolls"),
     ("?", "this help"),
     ("Esc", "back · clear search · close"),
 ];
@@ -818,10 +1070,10 @@ fn action_help(action: &str) -> &'static str {
         "menu" => "open this menu",
         "next" => "next scene",
         "prev" => "previous scene",
-        "filter_next" => "try filters one by one",
+        "filter_next" => "try effects one by one",
         "detail_next" => "cycle quality",
         "pause" => "pause",
-        "color" => "color grade",
+        "color" => "colour studio",
         "reset" => "reset every setting",
         "fps_up" => "raise the FPS cap",
         "fps_down" => "lower the FPS cap",

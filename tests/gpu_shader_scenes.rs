@@ -18,6 +18,7 @@ fn desc(size: (usize, usize), win: (usize, usize), window: (usize, usize), theme
         detail: Detail::Medium,
         spp: 1,
         mirror: false,
+        kaleido: false,
         exposure: 0.0,
     }
 }

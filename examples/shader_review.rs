@@ -141,6 +141,7 @@ fn render_at(
         detail,
         spp,
         mirror: false,
+        kaleido: false,
         exposure: 0.0,
     });
     g.render_shader_pixels(name, composed, &u)
@@ -178,6 +179,7 @@ fn render_desk(g: &mut Gpu, name: &str, composed: &shader::Composed, themes: usi
                 detail: Detail::High,
                 spp: 6,
                 mirror: false,
+                kaleido: false,
                 exposure: 0.0,
             });
             match g.render_shader_pixels(name, composed, &u) {

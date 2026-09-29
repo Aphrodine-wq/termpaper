@@ -13,7 +13,7 @@ struct Frame {
     view: vec4f,
     // t, t of the previous hour-cycle, blend (1 = current only), speed
     time: vec4f,
-    // window w, h, spp, flags (bit 0: mirror)
+    // window w, h, spp, flags (bit 0: mirror, bit 1: kaleido)
     size: vec4u,
     // seed lo, seed hi, theme, detail
     ids: vec4u,
@@ -93,6 +93,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (spp > 1u) { o = fract(vec2f(0.5) + vec2f(0.7548776662, 0.5698402910) * f32(i)); }
         var p = vec2f(F.map.x + (lp.x + o.x) * F.map.z, F.map.y - (lp.y + o.y) * F.map.w);
         if ((F.size.w & 1u) != 0u) { p.x = -p.x; }
+        // kaleido: the top-left quarter everywhere, as `filter::kaleido`
+        // does to a Classic canvas (y is up here)
+        if ((F.size.w & 2u) != 0u) { p = vec2f(-abs(p.x), abs(p.y)); }
         p = entry_wide(p, F.view.x);
         ctx.jitter = fract(ign + f32(i) * 0.6180340);
         ctx.sample = i;

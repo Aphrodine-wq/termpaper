@@ -21,7 +21,8 @@ use termpaper::scene::{self, Detail, SceneOptions};
 /// hash. Same range and determinism, different values.
 const EFFECTS: &[&str] = &[
     "scanlines", "vignette", "warm", "cool", "hue", "crt", "bloom", "duotone", "pixelate", "chroma", "spectrum",
-    "edges", "thermal", "warp", "invert", "sepia", "posterize", "gamma", "sharpen", "mirror", "noir",
+    "edges", "thermal", "warp", "invert", "sepia", "posterize", "gamma", "sharpen", "mirror", "noir", "letterbox",
+    "halation", "dither", "tiltshift", "kaleido",
 ];
 
 fn canvas(w: usize, h: usize) -> Canvas {
@@ -94,6 +95,14 @@ fn looks() -> Vec<(String, Look, i32)> {
         .iter()
         .map(|e| (format!("effect {e}"), Look::with_effects(&[e.to_string()]), 1))
         .collect();
+    // every effect with a strength, gentle and strong
+    for e in EFFECTS.iter().filter(|e| termpaper::filter::has_amount(e)) {
+        for a in [0.5f32, 1.7] {
+            let mut l = Look::with_effects(&[e.to_string()]);
+            l.effects.set_amount(e, a);
+            v.push((format!("effect {e} @{a}"), l, 1));
+        }
+    }
     let with = |name: &str, f: &dyn Fn(&mut Look)| {
         let mut l = Look::default();
         f(&mut l);

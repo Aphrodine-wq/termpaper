@@ -16,8 +16,9 @@ use crate::engine::Renderer;
 use crate::render::Pixels;
 use crate::scene::Detail;
 use browser::{Browser, Column};
+use ratatui::layout::Rect;
 use settings::{Kind, SettingId};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -123,6 +124,17 @@ impl Page {
         }
     }
 
+    /// For narrow drawers.
+    pub fn short_title(self) -> &'static str {
+        match self {
+            Page::Scenes => "Scenes",
+            Page::Look => "Look",
+            Page::Playback => "Play",
+            Page::Display => "Show",
+            Page::Wall => "Wall",
+        }
+    }
+
     pub fn index(self) -> usize {
         self as usize
     }
@@ -133,7 +145,51 @@ impl Page {
     }
 }
 
-/// A key, as the menu sees it.
+/// What the mouse did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mouse {
+    /// left button pressed
+    Down,
+    /// moved with the left button held
+    Drag,
+    ScrollUp,
+    ScrollDown,
+}
+
+/// What a point on screen is, recorded by the view while it draws: the
+/// mouse goes through exactly the same effects as the keys.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Hit {
+    /// anywhere outside the drawer (the live scene)
+    Outside,
+    /// the drawer's own empty space
+    Drawer,
+    Tab(Page),
+    /// a settings row's label
+    Row(usize),
+    /// a settings row's value (toggle, choice, open, action)
+    Value(usize),
+    /// a slider's bar: its row, first column and width
+    Slider { row: usize, x0: u16, width: u16 },
+    Shelf(usize),
+    Scene(usize),
+    /// an Effects sub-page row, and its on/off box
+    FilterRow(usize),
+    FilterBox(usize),
+    /// an effect's strength bar
+    FilterSlider { row: usize, x0: u16, width: u16 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct HitBox {
+    pub rect: Rect,
+    pub hit: Hit,
+}
+
+/// Two clicks on the same thing within this are a double click.
+pub const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// A key or mouse action, as the menu sees it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Input {
     Up,
@@ -150,9 +206,23 @@ pub enum Input {
     BackTab,
     Backspace,
     Char(char),
+    Mouse { kind: Mouse, x: u16, y: u16 },
 }
 
 impl Input {
+    /// Map a terminal mouse event. Right and middle buttons are ignored.
+    pub fn from_mouse(ev: crossterm::event::MouseEvent) -> Option<Input> {
+        use crossterm::event::{MouseButton, MouseEventKind as K};
+        let kind = match ev.kind {
+            K::Down(MouseButton::Left) => Mouse::Down,
+            K::Drag(MouseButton::Left) => Mouse::Drag,
+            K::ScrollUp => Mouse::ScrollUp,
+            K::ScrollDown => Mouse::ScrollDown,
+            _ => return None,
+        };
+        Some(Input::Mouse { kind, x: ev.column, y: ev.row })
+    }
+
     /// Map a terminal key press. `None` for keys the menu ignores, including
     /// Ctrl/Alt chords — those stay with the host, so Ctrl-C still quits.
     pub fn from_key(key: crossterm::event::KeyEvent) -> Option<Input> {
@@ -217,13 +287,39 @@ pub enum Effect {
     SetLinkGroup(String),
     /// automatic video wall across linked panes
     SetWall(bool),
-    ToggleFilter(String),
-    /// replace the whole filter stack (a preset)
-    SetFilters(Vec<String>),
-    /// open the colour wheel over the menu
+    /// replace the Look: grade, palette, effect stack and strengths
+    SetLook(crate::look::Look),
+    /// open the colour studio over the menu
     OpenColorGrade,
+    /// open the colour studio on its palette
+    OpenPalette,
+    /// put back what the last change replaced (`u`)
+    Undo,
     /// monitor alignment tool — not wired yet; the host flashes a notice
     OpenCalibration,
+}
+
+impl Effect {
+    /// Changes `u` can take back: settings, not navigation or actions.
+    pub fn undoable(&self) -> bool {
+        matches!(
+            self,
+            Effect::SetPixels(_)
+                | Effect::SetDetail(_)
+                | Effect::SetTheme(_)
+                | Effect::SetTextScale(_)
+                | Effect::SetSpeed(_)
+                | Effect::SetFps(_)
+                | Effect::SetSmooth(_)
+                | Effect::SetDim(_)
+                | Effect::SetFade(_)
+                | Effect::SetClock(_)
+                | Effect::SetCycle(_)
+                | Effect::SetCycleScope(_)
+                | Effect::SetRenderer(_)
+                | Effect::SetLook(_)
+        )
+    }
 }
 
 /// Snapshot of the host's current settings, for display and adjustment.
@@ -307,6 +403,10 @@ pub struct Menu {
     page_len: Cell<usize>,
     /// furthest the help text can scroll, from the last draw
     help_max: Cell<u16>,
+    /// what is where on screen, from the last draw (topmost last)
+    pub hits: RefCell<Vec<HitBox>>,
+    /// the last click, for double clicks
+    last_click: Option<(Hit, Instant)>,
 }
 
 impl Default for Menu {
@@ -332,6 +432,8 @@ impl Menu {
             flash: None,
             page_len: Cell::new(10),
             help_max: Cell::new(u16::MAX),
+            hits: RefCell::new(Vec::new()),
+            last_click: None,
         }
     }
 
@@ -404,6 +506,9 @@ impl Menu {
         if !self.open {
             return Vec::new();
         }
+        if let Input::Mouse { kind, x, y } = input {
+            return self.handle_mouse(kind, x, y, ctx);
+        }
         if self.help {
             self.handle_help(input);
             return Vec::new();
@@ -463,6 +568,110 @@ impl Menu {
             .browser
             .highlighted(ctx)
             .map(|e| (e.name(), Instant::now()));
+    }
+
+    /// The topmost thing drawn at (x, y) in the last frame.
+    pub fn hit_at(&self, x: u16, y: u16) -> Option<Hit> {
+        self.hits
+            .borrow()
+            .iter()
+            .rev()
+            .find(|h| x >= h.rect.x && x < h.rect.x + h.rect.width && y >= h.rect.y && y < h.rect.y + h.rect.height)
+            .map(|h| h.hit)
+    }
+
+    /// Clicks, drags and the wheel, through the same paths as the keys.
+    fn handle_mouse(&mut self, kind: Mouse, x: u16, y: u16, ctx: &MenuCtx) -> Vec<Effect> {
+        let scroll = match kind {
+            Mouse::ScrollUp => Some(Input::Up),
+            Mouse::ScrollDown => Some(Input::Down),
+            _ => None,
+        };
+        if let Some(key) = scroll {
+            // the wheel moves the selection of whatever is showing, without
+            // wrapping round the ends of a settings page
+            if self.help {
+                self.handle_help(key);
+                return Vec::new();
+            }
+            if self.page != Page::Scenes && !self.filters_open {
+                let n = settings::page(self.page).len();
+                let r = self.row();
+                let at_end = (key == Input::Up && r == 0) || (key == Input::Down && r + 1 >= n);
+                if at_end {
+                    return Vec::new();
+                }
+            }
+            return self.handle(key, ctx);
+        }
+        let Some(hit) = self.hit_at(x, y) else {
+            return Vec::new();
+        };
+        let now = Instant::now();
+        let double = kind == Mouse::Down
+            && self.last_click.is_some_and(|(h, at)| h == hit && now.saturating_duration_since(at) < DOUBLE_CLICK);
+        if kind == Mouse::Down {
+            self.last_click = Some((hit, now));
+        }
+        if self.help {
+            // a click anywhere closes the help overlay
+            if kind == Mouse::Down {
+                self.help = false;
+            }
+            return Vec::new();
+        }
+        let pi = self.page.index();
+        match (kind, hit) {
+            (Mouse::Down, Hit::Outside) => self.close(),
+            (Mouse::Down, Hit::Tab(p)) => self.goto(p),
+            (Mouse::Down, Hit::Row(r)) => {
+                self.rows[pi] = r;
+                Vec::new()
+            }
+            (Mouse::Down, Hit::Value(r)) => {
+                self.rows[pi] = r;
+                self.handle(Input::Enter, ctx)
+            }
+            (_, Hit::Slider { row, x0, width }) => {
+                self.rows[pi] = row;
+                let frac = x.saturating_sub(x0) as f32 / width.saturating_sub(1).max(1) as f32;
+                let id = settings::page(self.page).get(row).map(|s| s.id);
+                id.and_then(|id| settings::set_fraction(id, ctx, frac)).into_iter().collect()
+            }
+            (Mouse::Down, Hit::Shelf(i)) => {
+                self.browser.column = Column::Shelves;
+                self.browser.shelf = i;
+                self.browser.row = 0;
+                self.hover = None;
+                Vec::new()
+            }
+            (Mouse::Down, Hit::Scene(i)) => {
+                self.browser.column = Column::Scenes;
+                self.browser.row = i;
+                if double {
+                    return self.switch(ctx);
+                }
+                self.touch(ctx);
+                Vec::new()
+            }
+            (Mouse::Down, Hit::FilterRow(r)) => {
+                self.filter_row = r;
+                if double {
+                    return self.handle(Input::Enter, ctx);
+                }
+                Vec::new()
+            }
+            (Mouse::Down, Hit::FilterBox(r)) => {
+                self.filter_row = r;
+                self.handle(Input::Enter, ctx)
+            }
+            (_, Hit::FilterSlider { row, x0, width }) => {
+                self.filter_row = row;
+                let frac = x.saturating_sub(x0) as f32 / width.saturating_sub(1).max(1) as f32;
+                settings::filter_set_strength(row, ctx, frac).into_iter().collect()
+            }
+            _ => Vec::new(),
+        }
     }
 
     fn handle_help(&mut self, input: Input) {
@@ -627,10 +836,14 @@ impl Menu {
             Input::Right | Input::Char('l') | Input::Enter => {
                 return match set.kind {
                     Kind::Open => self.activate(set.id),
-                    Kind::Info => Vec::new(),
-                    Kind::Choice | Kind::Toggle => step(1),
+                    Kind::Action if input == Input::Enter => {
+                        settings::action(set.id, ctx).into_iter().collect()
+                    }
+                    Kind::Action | Kind::Info => Vec::new(),
+                    Kind::Choice | Kind::Toggle | Kind::Slider => step(1),
                 }
             }
+            Input::Char('u') => return vec![Effect::Undo],
             Input::Char('?') => self.help = true,
             Input::Esc => return self.close(),
             _ => {}
@@ -641,6 +854,7 @@ impl Menu {
     fn activate(&mut self, id: SettingId) -> Vec<Effect> {
         match id {
             SettingId::ColorGrade => vec![Effect::OpenColorGrade],
+            SettingId::Palette => vec![Effect::OpenPalette],
             SettingId::Filters => {
                 self.filters_open = true;
                 self.filter_row = 0;
@@ -662,9 +876,17 @@ impl Menu {
             Input::Left | Input::Char('h') => {
                 return settings::filter_step(r, ctx, -1).into_iter().collect()
             }
-            Input::Right | Input::Char('l') | Input::Enter => {
+            Input::Right | Input::Char('l') => {
                 return settings::filter_step(r, ctx, 1).into_iter().collect()
             }
+            // Enter flips an effect on or off; on the preset row it steps
+            Input::Enter | Input::Char(' ') if r == 0 => {
+                return settings::filter_step(r, ctx, 1).into_iter().collect()
+            }
+            Input::Enter | Input::Char(' ') => {
+                return settings::filter_toggle(r, ctx).into_iter().collect()
+            }
+            Input::Char('u') => return vec![Effect::Undo],
             Input::Esc | Input::Backspace => self.filters_open = false,
             Input::Char('?') => self.help = true,
             _ => {}

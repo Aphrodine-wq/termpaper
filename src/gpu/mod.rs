@@ -438,8 +438,7 @@ impl Gpu {
             "scanlines",
             "vignette",
             "grain",
-            "warm",
-            "cool",
+            "shift",
             "hue",
             "duotone",
             "thermal",
@@ -458,6 +457,12 @@ impl Gpu {
             "bloom_bright",
             "bloom_h",
             "bloom_v_add",
+            "letterbox",
+            "dither",
+            "blur_h",
+            "blur_v",
+            "tilt_mix",
+            "kaleido",
             "grade",
             "look_lut",
             "palette_snap",
@@ -716,53 +721,68 @@ impl Gpu {
             })
         };
 
-        let filter_pass = |name: &str, push: &mut dyn FnMut(&'static str, Params, Target)| {
+        // every effect runs with the constants `filter::params` derives from
+        // its strength, handed to the shader unchanged (`fp2`)
+        let filter_pass = |name: &str, amount: f32, push: &mut dyn FnMut(&'static str, Params, Target)| {
+            if amount <= 0.0 && crate::filter::has_amount(name) {
+                return; // the CPU skips a zero-strength effect too
+            }
+            let pv = crate::filter::params(name, amount);
             let mut p = base;
+            p.fp2 = pv;
+            // one sub-pass of a combo (crt) with its own single constant
+            let with = |v: f32| {
+                let mut q = base;
+                q.fp2 = [v, 0.0, 0.0, 0.0];
+                q
+            };
             match name {
-                "scanlines" => push("scanlines", p, Target::Pong),
-                "vignette" => push("vignette", p, Target::Pong),
-                "grain" => push("grain", p, Target::Pong),
-                "warm" => push("warm", p, Target::Pong),
-                "cool" => push("cool", p, Target::Pong),
+                "scanlines" | "vignette" | "grain" | "duotone" | "pixelate" | "chroma" | "edges" | "thermal"
+                | "warp" | "invert" | "sepia" | "posterize" | "gamma" | "sharpen" | "noir" | "letterbox"
+                | "dither" | "mirror" | "kaleido" => {
+                    let entry: &'static str = crate::filter::FILTER_CYCLE.iter().find(|n| **n == name).copied().unwrap_or("copy");
+                    push(entry, p, Target::Pong)
+                }
+                "warm" | "cool" => push("shift", p, Target::Pong),
                 "hue" => {
-                    p.fp[1] = 120.0 / 360.0;
+                    p.fp[1] = pv[0] / 360.0;
                     push("hue", p, Target::Pong);
                 }
                 "spectrum" => {
-                    // matches `filter::spectrum`: 30 deg/s, wrapped
-                    p.fp[1] = (plan.t * 30.0).rem_euclid(360.0) / 360.0;
+                    // matches `filter::apply_with`: degrees per second, wrapped
+                    p.fp[1] = (plan.t * pv[0]).rem_euclid(360.0) / 360.0;
                     push("hue", p, Target::Pong);
                 }
                 "crt" => {
-                    push("chroma", p, Target::Pong);
-                    push("scanlines", p, Target::Pong);
-                    push("vignette", p, Target::Pong);
+                    push("chroma", with(pv[0]), Target::Pong);
+                    push("scanlines", with(pv[1]), Target::Pong);
+                    push("vignette", with(pv[2]), Target::Pong);
                 }
-                "bloom" => {
-                    push("bloom_bright", p, Target::Aux);
-                    push("bloom_h", p, Target::Aux);
-                    push("bloom_v_add", p, Target::Pong);
+                "bloom" | "halation" => {
+                    let (threshold, radius, gains) = crate::filter::bloom_params(name, amount);
+                    let mut q = base;
+                    q.flags[1] = threshold;
+                    q.flags[2] = radius;
+                    q.fp2 = [gains[0], gains[1], gains[2], 0.0];
+                    push("bloom_bright", q, Target::Aux);
+                    push("bloom_h", q, Target::Aux);
+                    push("bloom_v_add", q, Target::Pong);
                 }
-                "duotone" => push("duotone", p, Target::Pong),
-                "pixelate" => push("pixelate", p, Target::Pong),
-                "chroma" => push("chroma", p, Target::Pong),
-                "edges" => push("edges", p, Target::Pong),
-                "thermal" => push("thermal", p, Target::Pong),
-                "warp" => push("warp", p, Target::Pong),
-                "invert" => push("invert", p, Target::Pong),
-                "sepia" => push("sepia", p, Target::Pong),
-                "posterize" => push("posterize", p, Target::Pong),
-                "gamma" => push("gamma", p, Target::Pong),
-                "sharpen" => push("sharpen", p, Target::Pong),
-                "mirror" => push("mirror", p, Target::Pong),
-                "noir" => push("noir", p, Target::Pong),
+                "tiltshift" => {
+                    let mut q = base;
+                    q.flags[2] = pv[2] as u32;
+                    q.fp2 = pv;
+                    push("blur_h", q, Target::Aux);
+                    push("blur_v", q, Target::Aux);
+                    push("tilt_mix", q, Target::Pong);
+                }
                 // unknown names are ignored on the CPU too
                 _ => {}
             }
         };
 
         for name in &plan.look.effects.stack {
-            filter_pass(name, &mut push);
+            filter_pass(name, plan.look.effects.amount(name), &mut push);
         }
 
         // colour grade — same early-out as `color_grade::apply`
@@ -796,7 +816,7 @@ impl Gpu {
         }
 
         if let Some(q) = plan.quick_filter {
-            filter_pass(q, &mut push);
+            filter_pass(q, 1.0, &mut push);
         }
 
         if plan.dim < 0.999 {

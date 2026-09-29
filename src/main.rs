@@ -534,8 +534,9 @@ fn main() -> std::io::Result<()> {
     let mut terminal = init_terminal()?;
     terminal.hide_cursor()?;
     // focus reporting lets unfocused instances skip the pacing spin (and
-    // honor --idle-fps); terminals without support just never send events
-    let _ = crossterm::execute!(terminal.backend_mut(), event::EnableFocusChange);
+    // honor --idle-fps); terminals without support just never send events.
+    // The mouse drives the menu: click, drag sliders, scroll.
+    let _ = crossterm::execute!(terminal.backend_mut(), event::EnableFocusChange, event::EnableMouseCapture);
     let result = run(&mut terminal, &scene_name, settings);
     let _ = crossterm::execute!(terminal.backend_mut(), event::DisableFocusChange);
     restore_terminal();
@@ -570,6 +571,7 @@ fn restore_terminal() {
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(
         std::io::stdout(),
+        crossterm::event::DisableMouseCapture,
         crossterm::terminal::LeaveAlternateScreen,
         crossterm::cursor::Show
     );
@@ -993,6 +995,72 @@ fn persist(settings: &mut Settings, scene_name: &str, theme: Option<&str>, detai
     }
 }
 
+/// How many changes `u` can step back through.
+const UNDO_DEPTH: usize = 64;
+
+/// Repeats of one kind of change closer together than this undo as one.
+const UNDO_BURST: Duration = Duration::from_millis(900);
+
+/// The settings a menu change can touch, for undo.
+struct Snapshot {
+    look: termpaper::look::Look,
+    dim: f32,
+    smooth: f32,
+    fade: f32,
+    fps: u32,
+    speed: f32,
+    pixels: Pixels,
+    detail: Detail,
+    theme: Option<String>,
+    text_scale: Option<u32>,
+    clock: bool,
+    cycle: Option<f64>,
+    cycle_scope: CycleScope,
+    renderer: termpaper::engine::Renderer,
+}
+
+impl Snapshot {
+    fn take(s: &Settings, opts: &SceneOptions) -> Self {
+        Snapshot {
+            look: s.look.get().clone(),
+            dim: s.dim,
+            smooth: s.smooth,
+            fade: s.fade,
+            fps: s.fps,
+            speed: s.speed,
+            pixels: s.pixels,
+            detail: opts.detail,
+            theme: opts.theme.clone(),
+            text_scale: s.text_scale,
+            clock: s.clock,
+            cycle: s.cycle,
+            cycle_scope: s.cycle_scope,
+            renderer: s.renderer,
+        }
+    }
+
+    /// Put everything back. Sim settings (variant, detail, pixels, speed,
+    /// text size) then reach the group through `sync_sim` like any edit.
+    fn restore(self, s: &mut Settings, opts: &mut SceneOptions, transition: &mut transition::Transition) {
+        s.look.set(self.look);
+        s.dim = self.dim;
+        s.smooth = self.smooth;
+        s.fade = self.fade;
+        transition.set_fade_secs(self.fade);
+        s.fps = self.fps;
+        s.speed = self.speed;
+        s.pixels = self.pixels;
+        opts.detail = self.detail;
+        opts.theme = self.theme;
+        s.text_scale = self.text_scale;
+        opts.text_scale = self.text_scale;
+        s.clock = self.clock;
+        s.cycle = self.cycle;
+        s.cycle_scope = self.cycle_scope;
+        s.renderer = self.renderer;
+    }
+}
+
 /// What a browser preview replaced: restored when the preview is dropped,
 /// forgotten when it is kept.
 struct PreviewOrigin {
@@ -1168,6 +1236,9 @@ fn run(
     // set while the browser previews a scene on this pane only
     let mut preview: Option<PreviewOrigin> = None;
     let mut save = config::SaveTimer::default();
+    // settings as they were before each change the menu made (`u` undoes)
+    let mut undo: Vec<Snapshot> = Vec::new();
+    let mut undo_last: Option<(std::mem::Discriminant<Effect>, Instant)> = None;
     let mut color_open = false;
     let mut color_param = color_wheel::Param::Hue;
     let mut opts = SceneOptions {
@@ -1305,6 +1376,19 @@ fn run(
         }
         let mut effects: VecDeque<Effect> = std::mem::take(&mut pending_fx).into();
         while let Some(fx) = effects.pop_front() {
+            // one undo step per change, or per burst of the same change (a
+            // held arrow key sweeping a slider undoes in one go)
+            if fx.undoable() {
+                let kind = std::mem::discriminant(&fx);
+                let fresh = undo_last.is_none_or(|(k, at)| k != kind || now.saturating_duration_since(at) > UNDO_BURST);
+                if fresh {
+                    undo.push(Snapshot::take(&settings, &opts));
+                    if undo.len() > UNDO_DEPTH {
+                        undo.remove(0);
+                    }
+                }
+                undo_last = Some((kind, now));
+            }
             match fx {
                 Effect::SwitchScene(name) => {
                     let Some(i) = names.iter().position(|n| *n == name) else {
@@ -1492,31 +1576,36 @@ fn run(
                     wall_refresh = Instant::now() - Duration::from_secs(10);
                     save.mark(now);
                 }
-                Effect::ToggleFilter(f) => {
-                    let mut look = settings.look.get().clone();
-                    if let Some(pos) = look.effects.stack.iter().position(|x| *x == f) {
-                        look.effects.stack.remove(pos);
-                    } else {
-                        look.effects.stack.push(f);
-                    }
-                    settings.look.set(look);
+                Effect::SetLook(l) => {
+                    settings.look.set(l);
                     if let Some(g) = &mut guard {
                         g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
                     }
                     save.mark(now);
                 }
-                Effect::SetFilters(v) => {
-                    let mut look = settings.look.get().clone();
-                    look.effects.stack = v;
-                    settings.look.set(look);
-                    if let Some(g) = &mut guard {
-                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
-                    }
-                    save.mark(now);
-                }
-                Effect::OpenColorGrade => {
+                Effect::OpenColorGrade | Effect::OpenPalette => {
                     color_open = true;
                     color_param = color_wheel::Param::Hue;
+                }
+                Effect::Undo => {
+                    match undo.pop() {
+                        Some(snap) => {
+                            let renderer_before = settings.renderer;
+                            snap.restore(&mut settings, &mut opts, &mut transition);
+                            if settings.renderer != renderer_before {
+                                worker = termpaper::engine::Worker::new(settings.renderer);
+                                rendered = None;
+                                worker_status = None;
+                            }
+                            if let Some(g) = &mut guard {
+                                g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                            }
+                            save.mark(now);
+                            menu.flash("Undone");
+                        }
+                        None => menu.flash("Nothing to undo"),
+                    }
+                    undo_last = None;
                 }
                 // placeholder until the alignment tool lands
                 Effect::OpenCalibration => {
@@ -2065,6 +2154,27 @@ fn run(
                     }
                     Event::FocusLost => {
                         focused = false;
+                        continue;
+                    }
+                    Event::Mouse(mouse) => {
+                        let Some(input) = menu::Input::from_mouse(mouse) else {
+                            continue;
+                        };
+                        if menu.open {
+                            let ctx = menu_ctx(&settings, &opts, names[idx], String::new(), String::new(), Vec::new());
+                            pending_fx.extend(menu.handle(input, &ctx));
+                            if !pending_fx.is_empty() || !menu.open {
+                                break;
+                            }
+                        } else if !color_open
+                            && matches!(input, menu::Input::Mouse { kind: menu::Mouse::Down, .. })
+                            && !settings.screensaver
+                        {
+                            // a click opens the menu: the way in for mouse users
+                            let ctx = menu_ctx(&settings, &opts, names[idx], String::new(), String::new(), Vec::new());
+                            menu.open(&ctx);
+                            break;
+                        }
                         continue;
                     }
                     _ => {}

@@ -41,6 +41,9 @@ pollster = { version = "1.0", optional = true }
 # wgsl-in validates every shader; the MSL and HLSL writers catch constructs
 # only Metal (macOS) or DX12 (Windows) reject, on any machine
 naga = { version = "30.0.0", features = ["wgsl-in", "msl-out", "hlsl-out"] }
+# examples/ui_snapshot.rs: the menu rasterised to PNG for review
+fontdue = "0.9"
+png = "0.18"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -523,6 +523,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
             g.resize(window.0, window.1, v.grid.0 * v.grid.1);
             governor.set_budget(request.budget_ms);
             let mirror = look.effects.stack.iter().any(|f| f == "mirror");
+            let kaleido = look.effects.stack.iter().any(|f| f == "kaleido");
             let theme = opts
                 .theme
                 .as_deref()
@@ -552,14 +553,15 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer) {
                 detail: opts.detail,
                 spp,
                 mirror,
+                kaleido,
                 exposure: 0.0,
             });
             let hash = frame_hash(&u, &request);
             // the scene pass mirrors itself (seamless on a wall); the post
             // chain must not flip it back
-            let post_look = if mirror {
+            let post_look = if mirror || kaleido {
                 let mut l = look.clone();
-                l.effects.stack.retain(|f| f != "mirror");
+                l.effects.stack.retain(|f| f != "mirror" && f != "kaleido");
                 std::borrow::Cow::Owned(l)
             } else {
                 std::borrow::Cow::Borrowed(look)

@@ -406,8 +406,39 @@ fn mid() -> MenuCtx {
         cycle_scope: CycleScope::Category,
         renderer: Renderer::Gpu,
         link_group: "wallpaper".into(),
+        // every look slider mid-range, so it can move both ways
+        look: {
+            let mut l = crate::look::Look::default();
+            l.grade.exposure = 0.5;
+            l.grade.contrast = 1.2;
+            l.grade.saturation = 1.2;
+            l.grade.vibrance = 0.2;
+            l.grade.temperature = -0.2;
+            l.grade.tint = 0.1;
+            l.grade.hue = 90.0;
+            l.grade.fade = 0.1;
+            l.palette.mode = crate::look::PaletteMode::Map;
+            l.palette.colors = settings::DEFAULT_PALETTE.to_vec();
+            l.palette.strength = 0.5;
+            l.effects.stack = vec!["bloom".into(), "vignette".into(), "grain".into(), "letterbox".into()];
+            for f in ["bloom", "vignette", "grain", "letterbox"] {
+                l.effects.set_amount(f, 0.8);
+            }
+            l
+        },
         ..ctx()
     }
+}
+
+/// Focus a settings row by id (keys only: ↓ until it is there).
+fn focus(m: &mut Menu, c: &MenuCtx, id: SettingId) {
+    let rows = settings::page(m.page);
+    let target = rows.iter().position(|s| s.id == id).expect("row on this page");
+    keys(m, c, &[Input::Home]);
+    for _ in 0..target {
+        keys(m, c, &[Input::Down]);
+    }
+    assert_eq!(rows[m.row()].id, id);
 }
 
 #[test]
@@ -418,7 +449,7 @@ fn every_setting_steps_both_ways() {
             let back = settings::step(s.id, &c, -1);
             let fwd = settings::step(s.id, &c, 1);
             match s.kind {
-                Kind::Choice => {
+                Kind::Choice | Kind::Slider => {
                     assert!(
                         back.is_some() && fwd.is_some(),
                         "{:?} must step both ways",
@@ -430,13 +461,18 @@ fn every_setting_steps_both_ways() {
                     assert!(back.is_some(), "{:?}", s.id);
                     assert_eq!(back, fwd, "{:?}: a toggle flips either way", s.id);
                 }
-                Kind::Open | Kind::Info => {
+                Kind::Open | Kind::Info | Kind::Action => {
                     assert!(back.is_none() && fwd.is_none(), "{:?} has no value", s.id);
                 }
             }
-            // every row shows something readable
-            if s.kind != Kind::Open {
+            // every row with a value shows something readable, and every
+            // slider knows where its bar is
+            if !matches!(s.kind, Kind::Open | Kind::Action) {
                 assert!(!settings::value(s.id, &c).is_empty(), "{:?}", s.id);
+            }
+            if s.kind == Kind::Slider {
+                let (f, n) = settings::fraction(s.id, &c).expect("slider fraction");
+                assert!((0.0..=1.0).contains(&f) && (0.0..=1.0).contains(&n), "{:?}", s.id);
             }
         }
     }
@@ -513,7 +549,7 @@ fn ordered_values_clamp_and_choices_wrap() {
         Some(Effect::SetPixels(Pixels::Braille))
     );
     assert_eq!(
-        step(SettingId::Theme, &first, -1),
+        step(SettingId::Variant, &first, -1),
         Some(Effect::SetTheme(Some("mono".into())))
     );
     assert_eq!(
@@ -551,19 +587,33 @@ fn settings_navigation_and_actions() {
     keys(&mut m, &c, &[Input::Up]);
     assert_eq!(m.row(), settings::LOOK.len() - 1);
     keys(&mut m, &c, &[Input::Home]);
-    assert_eq!(settings::LOOK[m.row()].id, SettingId::Theme);
+    assert_eq!(settings::LOOK[m.row()].id, SettingId::Variant);
     assert_eq!(
         keys(&mut m, &c, &[Input::Right]),
         vec![Effect::SetTheme(Some("violet".into()))]
     );
-    // Color grade… opens the wheel
+    // Colour studio… opens the wheel
     keys(&mut m, &c, &[Input::Down]);
     assert_eq!(
         keys(&mut m, &c, &[Input::Enter]),
         vec![Effect::OpenColorGrade]
     );
-    // Filters… opens the sub-page; Esc comes back without closing
-    keys(&mut m, &c, &[Input::Down, Input::Enter]);
+    // a slider steps and u asks the host to undo
+    focus(&mut m, &c, SettingId::Exposure);
+    let mut brighter = c.look.clone();
+    brighter.grade.exposure = 0.6;
+    assert_eq!(keys(&mut m, &c, &[Input::Right]), vec![Effect::SetLook(brighter)]);
+    assert_eq!(keys(&mut m, &c, &[Input::Char('u')]), vec![Effect::Undo]);
+    // Reset look only answers Enter
+    focus(&mut m, &c, SettingId::ResetLook);
+    assert!(keys(&mut m, &c, &[Input::Right]).is_empty());
+    assert_eq!(
+        keys(&mut m, &c, &[Input::Enter]),
+        vec![Effect::SetLook(crate::look::Look::default())]
+    );
+    // Effects… opens the sub-page; Esc comes back without closing
+    focus(&mut m, &c, SettingId::Filters);
+    keys(&mut m, &c, &[Input::Enter]);
     assert!(m.filters_open);
     keys(&mut m, &c, &[Input::Esc]);
     assert!(!m.filters_open && m.open);
@@ -590,39 +640,50 @@ fn filters_sub_page_toggles_and_presets() {
     let c = mid();
     let mut m = opened(&c);
     m.goto(Page::Look);
-    keys(
-        &mut m,
-        &c,
-        &[Input::Home, Input::Down, Input::Down, Input::Enter],
-    );
+    focus(&mut m, &c, SettingId::Filters);
+    keys(&mut m, &c, &[Input::Enter]);
     assert!(m.filters_open);
-    // row 0: presets; `scanlines` alone is custom, → goes to Clean
+    let with_effects = |base: &MenuCtx, e: crate::look::Effects| {
+        let mut l = base.look.clone();
+        l.effects = e;
+        Effect::SetLook(l)
+    };
+    // row 0: presets; a custom stack → goes to Clean
     assert_eq!(
         keys(&mut m, &c, &[Input::Right]),
-        vec![Effect::SetFilters(vec![])]
+        vec![with_effects(&c, settings::preset_effects(0))]
     );
+    // Film (as the preset stores it) → CRT
     let film = MenuCtx {
         look: {
             let mut l = crate::look::Look::default();
-            l.effects.stack = vec!["warm".into(), "grain".into(), "vignette".into()];
+            l.effects = settings::preset_effects(1);
             l
         },
         ..mid()
     };
+    assert_eq!(settings::preset_of(&film.look.effects), Some(1));
     assert_eq!(
         keys(&mut m, &film, &[Input::Right]),
-        vec![Effect::SetFilters(vec!["bloom".into(), "crt".into()])]
+        vec![with_effects(&film, settings::preset_effects(2))]
     );
-    // row 1 is the first Colour filter; ← and → both toggle it
+    // row 1 is the first Colour effect (warm, off here): → turns it on at
+    // full strength, ← from off does nothing, Enter toggles
     keys(&mut m, &c, &[Input::Down]);
-    assert_eq!(
-        keys(&mut m, &c, &[Input::Left]),
-        vec![Effect::ToggleFilter("warm".into())]
-    );
-    assert_eq!(
-        keys(&mut m, &c, &[Input::Enter]),
-        vec![Effect::ToggleFilter("warm".into())]
-    );
+    assert_eq!(settings::filter_at(m.filter_row()), Some("warm"));
+    let mut warm = c.look.effects.clone();
+    warm.stack.push("warm".into());
+    assert_eq!(keys(&mut m, &c, &[Input::Right]), vec![with_effects(&c, warm.clone())]);
+    assert!(keys(&mut m, &c, &[Input::Left]).is_empty());
+    assert_eq!(keys(&mut m, &c, &[Input::Enter]), vec![with_effects(&c, warm)]);
+    // an effect that is on: ← weakens it, → strengthens it
+    let bloom_row = (1..settings::filter_rows()).find(|r| settings::filter_at(*r) == Some("bloom")).unwrap();
+    while m.filter_row() != bloom_row {
+        keys(&mut m, &c, &[Input::Down]);
+    }
+    let mut weaker = c.look.effects.clone();
+    weaker.set_amount("bloom", 0.7);
+    assert_eq!(keys(&mut m, &c, &[Input::Left]), vec![with_effects(&c, weaker)]);
 }
 
 #[test]
@@ -635,8 +696,13 @@ fn filter_groups_cover_the_filter_cycle_exactly() {
     for f in crate::filter::FILTER_CYCLE {
         assert!(!settings::filter_help(f).is_empty(), "{f} has no help");
     }
-    for (_, p) in settings::PRESETS {
-        assert!(p.iter().all(|f| crate::filter::FILTER_CYCLE.contains(f)));
+    for (name, p) in settings::PRESETS {
+        assert!(p.iter().all(|(f, _)| crate::filter::FILTER_CYCLE.contains(f)), "{name}");
+        assert!(p.iter().all(|(_, a)| (0.0..=2.0).contains(a)), "{name}");
+    }
+    // every preset is recognised as itself
+    for i in 0..settings::PRESETS.len() {
+        assert_eq!(settings::preset_of(&settings::preset_effects(i)), Some(i));
     }
 }
 
@@ -788,11 +854,8 @@ fn states(c: &MenuCtx) -> Vec<(&'static str, Menu)> {
     v.push(("search", m));
     let mut m = opened(c);
     m.goto(Page::Look);
-    keys(
-        &mut m,
-        c,
-        &[Input::Home, Input::Down, Input::Down, Input::Enter],
-    );
+    focus(&mut m, c, SettingId::Filters);
+    keys(&mut m, c, &[Input::Enter]);
     v.push(("filters", m));
     let mut m = opened(c);
     keys(&mut m, c, &[Input::Char('?')]);
@@ -819,7 +882,7 @@ fn layout_degrades_sanely() {
             );
             let key_text = match name {
                 "Scenes" => "rain", // Classic scenes are titled by name
-                "Look" => "Theme",
+                "Look" => "Variant",
                 "Playback" => "Speed",
                 "Display" => "Quality",
                 "Wall" => "Link",

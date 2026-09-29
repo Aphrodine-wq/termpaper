@@ -108,6 +108,8 @@ pub struct FrameDesc {
     pub detail: Detail,
     pub spp: u32,
     pub mirror: bool,
+    /// four-fold symmetry around the wall's centre (the `kaleido` effect)
+    pub kaleido: bool,
     pub exposure: f32,
 }
 
@@ -119,7 +121,7 @@ pub fn uniforms(d: &FrameDesc) -> FrameUniforms {
         map: [v.origin[0] as f32, v.origin[1] as f32, v.step[0] as f32, v.step[1] as f32],
         view: [v.half[0] as f32, v.half[1] as f32, px as f32, (v.half[0] / v.half[1].max(1e-9)) as f32],
         time: [d.time.t, d.time.t_prev, d.time.blend, d.speed],
-        size: [d.window.0 as u32, d.window.1 as u32, d.spp.max(1), d.mirror as u32],
+        size: [d.window.0 as u32, d.window.1 as u32, d.spp.max(1), d.mirror as u32 | (d.kaleido as u32) << 1],
         ids: [d.seed as u32, (d.seed >> 32) as u32, d.theme, shader::detail_index(d.detail)],
         qual: [shader::march_scale(d.detail), d.exposure, 0.0, 0.0],
         params: [[0.0; 4]; 2],
