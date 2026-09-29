@@ -20,6 +20,11 @@
 //
 // Street space `q` is the unrefracted view (the same units as `p`). World
 // units are metres; the camera stands CAM_H above the road.
+//
+// Past the frame the view turns onto the nearest facades, a few metres away:
+// shopfronts glowing at street level, festoon bulbs along their awnings, a
+// blade sign and a wall lantern, so the bokeh carries on across a monitor
+// standing beside the row instead of fading to a dark wall.
 
 struct Look {
     sky_hi: vec3f,
@@ -70,6 +75,18 @@ fn look(theme: u32) -> Look {
 const VP: vec2f = vec2f(0.12, 0.02);  // vanishing point of the street
 const FOC: f32 = 0.95;                // focal length in p units
 const CAM_H: f32 = 5.5;
+const ZC: f32 = 8.0;                  // the side street's far facades, past the corners
+
+// The entry point continues past the frame's edge as a cylinder, which suits
+// a 3D camera; the glass is flat and sits at the lens, so undo it and keep
+// the desk's own scale there (drops stay round on a portrait monitor beside
+// the row). Identity inside the frame.
+fn flat_p(p: vec2f, ctx: Ctx) -> vec2f {
+    let hx = ctx.half.x;
+    let a = abs(p.x);
+    if (a <= hx) { return p; }
+    return vec2f(sign(p.x) * (hx + (atan(a) - atan(hx)) * (1.0 + hx * hx)), p.y);
+}
 
 fn proj(w: vec3f) -> vec2f { return VP + FOC * vec2f(w.x, w.y - CAM_H) / w.z; }
 
@@ -102,6 +119,136 @@ fn add_streak(s: ptr<function, Lit>, q: vec2f, x: f32, y0: f32, y1: f32, r: f32,
         let along = saturate((q.y - y1) / max(y0 - y1, 1e-4));
         let rip = 0.6 + 0.4 * noise_value2(vec2f(x * 40.0, q.y * 60.0));
         (*s).acc += col * sstep(r + fw, r - fw, d) * along * along * rip;
+    }
+}
+
+// A light close to the camera, only ever seen past the frame's edge: like
+// add_disc, but its halo has finite reach (so skipping it far away leaves no
+// seam) and the cat's-eye clipping stops growing past the frame.
+fn add_near(s: ptr<function, Lit>, q: vec2f, c: vec2f, r: f32, fw: f32, reach: f32, col: vec3f) {
+    let d = length(q - c);
+    if (d > reach) { return; }
+    (*s).halo += col * (0.004 / (0.004 + d * d)) * sstep(reach, reach * 0.5, d);
+    if (d < r + fw) {
+        var body = sstep(r + fw, r - fw, d);
+        let off = c / max(length(c), 1e-3) * min(length(c), 1.2) * (0.55 * r);
+        body *= sstep(r + fw, r - fw, length(q - c + off));
+        (*s).acc += col * body * (0.85 + 0.25 * sstep(r * 0.55, r, d));
+    }
+}
+
+// Past the corners (only beyond the frame) the view crosses the side street
+// in front of this building and meets the facades on its far side, square
+// on, ZC metres out. Their glow at (X along the facade, height h), metres;
+// bw is the blur in metres. Used for the facades and their wet reflection.
+fn cross_glow(X: f32, h: f32, bw: f32, l: Look, left: bool) -> vec3f {
+    var e = vec3f(0.0);
+    // windows: 3.4 m bays, 3.3 m floors from 4.4 m up
+    let cx = X / 3.4;
+    let cy = (h - 4.4) / 3.3;
+    let hw = hash_cell2(vec2i(i32(floor(cx)), i32(floor(cy))) + vec2i(select(7000, 9000, left), 0), 0x51edu);
+    let on = select(0.0, 0.35 + 0.9 * hw.y, hw.x < l.win + 0.1);
+    let fx = abs(fract(cx) - 0.5) * 3.4;
+    let fyy = abs(fract(cy) - 0.5) * 3.3;
+    let win_a = sstep(0.75 + bw, 0.75 - bw, fx) * sstep(0.8 + bw, 0.8 - bw, fyy) * step(0.0, cy);
+    let wtone = mix(col_kelvin(2500.0), col_kelvin(3800.0), hw.z) * select(1.0, 0.6, hw.w > 0.9);
+    e += wtone * on * win_a * 0.05;
+    // shopfronts: display windows between piers every 5.2 m, most of them lit
+    let sx = X / 5.2;
+    let hs = hash_cell2(vec2i(i32(floor(sx)), select(3, 4, left)), 0x5409u);
+    let pier = sstep(2.1 + bw, 2.1 - bw, abs(fract(sx) - 0.5) * 5.2);
+    let band = sstep(3.1 + bw, 2.9 - bw, h) * sstep(0.35 - bw, 0.55 + bw, h);
+    let lit = select(0.012, 0.05 + 0.05 * hs.y, hs.x < 0.8);
+    e += mix(l.shop, col_kelvin(3700.0), hs.z * 0.5) * pier * band * lit * (0.8 + 0.3 * sstep(3.0, 0.8, h));
+    // a lit fascia sign over some of them
+    let fascia = sstep(0.25 + bw, 0.15 - bw, abs(h - 4.1)) * sstep(1.9 + bw, 1.7 - bw, abs(fract(sx) - 0.5) * 5.2) * step(hs.w, 0.55);
+    e += select(l.neon_b, l.neon_a, hs.z > 0.5) * fascia * (0.05 + 0.08 * l.neon);
+    return e;
+}
+
+// the far facades and the side street in front of them, at screen point q
+fn cross_street(q: vec2f, r: f32, sky: vec3f, l: Look, left: bool) -> vec3f {
+    let X = (q.x - VP.x) * ZC / FOC;
+    let fy = CAM_H + (q.y - VP.y) * ZC / FOC;
+    let bw = r * ZC / FOC;
+    let row = select(31.0, 37.0, left);
+    var col = sky;
+    // building masses and their rooflines, some low enough to show sky
+    let roof = roofline(abs(X) + 3.0, saturate(bw / 13.0), row);
+    let yroof = VP.y + FOC * (roof - CAM_H) / ZC;
+    var facade = l.bld * (0.7 + 0.6 * noise_value2(vec2f(floor(abs(X) / 13.0 + 0.23), row + 5.0))) + cross_glow(X, fy, bw, l, left);
+    // awnings over the shops: dark, their fringe catching the shop light
+    let awn = sstep(3.25 - bw, 3.35, fy) * sstep(3.95 + bw, 3.85, fy) * sstep(2.3 + bw, 2.2 - bw, abs(fract(X / 5.2) - 0.5) * 5.2);
+    facade = mix(facade, l.bld * 0.5 + l.shop * 0.006, awn * 0.85);
+    col = mix(col, facade, sstep(r * 0.7, -r * 0.7, q.y - yroof));
+    // the wet side street below the kerb, mirroring the shopfronts
+    let yk = VP.y - FOC * CAM_H / ZC;
+    let road_m = sstep(yk + r, yk - r, q.y);
+    if (road_m > 0.0) {
+        let rip = 0.55 + 0.45 * noise_value2(vec2f(X * 3.0, q.y * 70.0));
+        var rc = l.road + sky * 0.2;
+        rc += cross_glow(X, -fy, bw * 2.5 + 0.3, l, left) * 0.35 * rip * sstep(yk - 0.6, yk, q.y);
+        col = mix(col, rc, road_m);
+    }
+    return col;
+}
+
+// Lights past the frame: festoon bulbs sagging along the awnings across the
+// side street, a street lamp over it, lanterns over shop doors, and a blade
+// sign on the corner building.
+fn near_lights(s: ptr<function, Lit>, q: vec2f, r: f32, fw: f32, gain: f32, l: Look, ctx: Ctx) {
+    let dx = q.x - VP.x;
+    let right = dx > 0.0;
+    let sgn = select(-1.0, 1.0, right);
+    let xc = select(11.4, 10.4, right);            // first bulb, just past the corner
+    let zb = ZC - 0.4;
+    let X = abs(dx) * zb / FOC;                     // position along the festoon at this column
+    let kc = round((X - xc) / 0.6);
+    if (q.y < 0.05 && q.y > -0.8) {
+        for (var j = -3; j <= 3; j++) {
+            let k = kc + f32(j);
+            if (k < 0.0 || k > 40.0) { continue; }
+            let xb = xc + k * 0.6;
+            let sag = 0.6 * sin(PI * fract((xb - xc) / 3.6));    // hooks every 3.6 m
+            let c = proj(vec3f(sgn * xb, 3.75 - sag, zb));
+            let h = hash_f(u32(k) * 7919u + select(3u, 17u, right));
+            var tint = col_kelvin(2300.0 + 500.0 * h);
+            if (l.neon > 0.0) {
+                tint = select(select(l.neon_a, l.neon_b, h > 0.66), col_kelvin(2600.0), h < 0.33) * 0.9;
+            }
+            add_near(s, q, c, r * 0.8, fw, 0.25, tint * (0.1 + 0.05 * h) * gain);
+        }
+    }
+    // a street lamp on the far kerb of the side street, and its reflection
+    let lamp = proj(vec3f(select(-13.6, 16.5, right), 7.2, ZC - 0.8));
+    let lt = select(l.lamp_a, l.lamp_b, right && l.led > 0.5);
+    add_near(s, q, lamp, r, fw, 0.4, lt * 0.3 * gain);
+    if (abs(q.x - lamp.x) < r + fw) {
+        let g0 = VP.y - FOC * CAM_H / (ZC - 0.8);
+        add_streak(s, q, lamp.x, g0, g0 - 0.45, r * 0.75, fw, lt * 0.03 * gain);
+    }
+    // lanterns over shop doors
+    for (var k = 0; k < 2; k++) {
+        if (!right && k == 1) { break; }
+        let lx = select(-14.2, select(12.4, 21.3, k == 1), right);
+        let lc = proj(vec3f(lx, 4.3, ZC - 0.1));
+        add_near(s, q, lc, r * 0.9, fw, 0.3, col_kelvin(2400.0) * 0.25 * gain);
+    }
+    // blade sign on the corner building, over the main street's pavement
+    if (right) {
+        // (far enough past the edge that no drop inside the frame shows it)
+        let a = proj(vec3f(9.3, 5.0, 8.4));
+        let b = proj(vec3f(9.3, 6.8, 8.4));
+        let w = FOC * 0.16 / 8.4;
+        let d = length(vec2f(q.x - a.x, q.y - clamp(q.y, a.y, b.y)));
+        if (d < 0.35) {
+            let tcol = l.neon_a * (0.14 + 0.08 * l.neon) * gain;
+            (*s).halo += tcol * (0.006 / (0.006 + d * d)) * sstep(0.35, 0.18, d);
+            if (d < w + r + fw) {
+                let letters = 0.7 + 0.3 * sin((q.y - a.y) / max(b.y - a.y, 1e-3) * 22.0);
+                (*s).acc += tcol * sstep(w + r + fw, w + r - fw, d) * letters;
+            }
+        }
     }
 }
 
@@ -153,6 +300,15 @@ fn street(q: vec2f, r: f32, fw: f32, gain: f32, l: Look, ctx: Ctx) -> Lit {
     let shop_n = noise_value2(vec2f(zf / 6.0, row + 9.0));
     let shop_band = sstep(3.8 + fy_w, 3.0 - fy_w, fy) * sstep(0.3 - fy_w, 0.9 + fy_w, fy);
     facade += l.shop * shop_band * (0.004 + 0.05 * sstep(0.35, 0.7, shop_n));
+    // the nearest shops (only seen past the frame): lit display windows in
+    // their frames, under a dark awning
+    let near_k = sstep(select(9.5, 9.6, left), select(7.0, 7.5, left), zf);
+    if (near_k > 0.0) {
+        let pane = sstep(0.62 + fz_w, 0.62 - fz_w, abs(fract(zf / 1.7) - 0.5) * 1.7) * sstep(3.1 + fy_w, 2.9 - fy_w, fy) * sstep(0.5 - fy_w, 0.7 + fy_w, fy);
+        let hs = noise_value2(vec2f(floor(zf / 5.1), row + 21.0));
+        facade += l.shop * pane * near_k * (0.025 + 0.035 * hs) * (0.8 + 0.2 * sstep(3.0, 0.6, fy));
+        facade *= 1.0 - 0.6 * near_k * sstep(3.3 - fy_w, 3.4, fy) * sstep(4.0 + fy_w, 3.9, fy);
+    }
     let wall = sstep(r * 0.7, -r * 0.7, q.y - yroof);
     col = mix(col, facade, wall);
     // road below the kerb line
@@ -161,6 +317,12 @@ fn street(q: vec2f, r: f32, fw: f32, gain: f32, l: Look, ctx: Ctx) -> Lit {
     let zr = FOC * CAM_H / max(-dy, 1e-3);
     let road_c = l.road + sky * 0.25 * exp(-zr * 0.01);
     col = mix(col, road_c, road_m);
+    // past the corner of the building on this side, the side street
+    let xcorner = FOC * abs(side) / ZC;
+    let past = sstep(xcorner - r * 0.7, xcorner + r * 0.7, abs(dx));
+    if (past > 0.0) {
+        col = mix(col, cross_street(q, r, sky, l, left), past);
+    }
 
     // ---- street lamps both sides, 7.5 m high, every 17 m
     for (var sd = 0; sd < 2; sd++) {
@@ -260,6 +422,10 @@ fn street(q: vec2f, r: f32, fw: f32, gain: f32, l: Look, ctx: Ctx) -> Lit {
             add_streak(&s, q, a.x, g0, g1, w + r * 0.7, fw, tcol * 0.12);
         }
     }
+    // ---- the nearest facades, only past the frame
+    if (abs(q.x - VP.x) > 0.55) {
+        near_lights(&s, q, r, fw, gain, l, ctx);
+    }
     // ---- shop signs at eye level: a green pharmacy cross, a red sign
     {
         let gsgn = proj(vec3f(-10.6, 4.3, 17.0));
@@ -354,7 +520,8 @@ fn sliders(p: vec2f, ctx: Ctx) -> Slide {
         let hd = hash_cell2(vec2i(i32(col), i32(cyc)), 0x71f3u + u32(layer));
         if (hd.w > 0.6) { continue; }
         let yd = top - (dist - cyc * span);
-        let r = select(0.016 + 0.01 * hd.z, 0.022 + 0.012 * hd.z, layer == 1);
+        // it gathers as it starts to run (only visible on tall portrait panes)
+        let r = select(0.016 + 0.01 * hd.z, 0.022 + 0.012 * hd.z, layer == 1) * sstep(top, top - 0.1, yd);
         let x0 = (col + 0.3 + 0.4 * hd.x) * cw - ox;
         best = pick(best, drop_at(p, vec2f(x0 + path_x(yd, hd.y, hd.x), yd), r, ctx));
         // the trail above the drop
@@ -362,7 +529,7 @@ fn sliders(p: vec2f, ctx: Ctx) -> Slide {
         if (above > 0.0) {
             let tw = r * 0.7;
             let dx = abs(p.x - (x0 + path_x(p.y, hd.y, hd.x)));
-            let fade = exp(-above / 0.4);
+            let fade = exp(-above / 0.4) * sstep(top, top - 0.1, p.y);
             clear = max(clear, sstep(tw + ctx.px, tw * 0.5 - ctx.px, dx) * fade * 0.8);
             // tiny beads left behind in the trail
             let bs = 0.04;
@@ -378,15 +545,19 @@ fn sliders(p: vec2f, ctx: Ctx) -> Slide {
     return Slide(best, clear);
 }
 
-fn scene(p: vec2f, ctx: Ctx) -> vec3f {
+fn scene(pw: vec2f, ctx: Ctx) -> vec3f {
+    let p = flat_p(pw, ctx);
     let l = look(ctx.theme);
     // window frame: a vertical mullion every 1.7 units (one at x = -0.72),
     // a rail above and below (only tall portrait frames reach them)
     let mxl = fmod_pos(p.x + 0.72 + 0.85, 1.7) - 0.85;
     let myl = abs(p.y) - 0.7;
     let frame_d = min(abs(mxl) - 0.026, abs(myl) - 0.026);
-    // ---- glass
-    let sl = sliders(p, ctx);
+    // ---- glass (the transom above the upper rail has drops of its own)
+    let transom = p.y > 0.674;
+    let toff = select(vec2f(0.0), vec2f(0.37, -0.5), transom);
+    var sl = sliders(p + toff, ctx);
+    sl.d.c -= toff;
     let clear = sl.clear;
     var bd = beads(p, ctx);
     bd.m *= 1.0 - clear;
