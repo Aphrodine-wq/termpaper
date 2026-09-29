@@ -11,8 +11,10 @@
 
 // World units are metres; y up, the camera stands on the gravel bank of the
 // river 2 m up, ~130 m south of the falls, looking north. The old sea cliff
-// runs across the frame; the fall drops 60 m from its lip along a ballistic
-// curve. The curtain's streaks are keyed to each parcel's time of flight,
+// runs across the frame, a stack of lava flows: each a wall of basalt
+// columns over a rubbly top weathered back into a mossy ledge. Beside the
+// fall the spray keeps it bare, dark and wet; further out it is grassed
+// over. The fall drops 60 m from its lip along a ballistic curve. The curtain's streaks are keyed to each parcel's time of flight,
 // sqrt(2 (60 - y) / g) - t, so they fall and stretch exactly like water.
 // The rainbow sits 42 degrees from the antisolar point, weighted by how
 // much sunlit spray the ray crosses.
@@ -48,8 +50,8 @@ fn look(theme: u32) -> Look {
             l.snow = 0.0; l.flow = 1.0; l.bow = 1.3; l.exposure = 0.35; l.haze = 1.3;
         }
         default: {
-            l.sun = sky_sun_dir(32.0, 153.0);
-            l.snow = 0.0; l.flow = 1.0; l.bow = 1.0; l.exposure = -0.2; l.haze = 1.0;
+            l.sun = sky_sun_dir(24.0, 142.0);
+            l.snow = 0.0; l.flow = 1.0; l.bow = 1.0; l.exposure = -0.3; l.haze = 1.0;
         }
     }
     l.sun_c = sky_sun_light(l.sun);
@@ -75,29 +77,64 @@ fn ozone(sun: vec3f) -> vec3f {
 
 // ------------------------------------------------------------ the cliff
 
+// lava-flow strata: (layer coordinate, layer index, ledge strength): the
+// flows run 4-25 m thick, and only some weathered back into a ledge
+fn strata(x: f32, y: f32) -> vec3f {
+    let ly = y / 9.0 + 1.2 * noise_value2(vec2f(y / 26.0, x * 0.004)) + 0.25 * noise_value2(vec2f(x * 0.03, 1.0)) + 0.002 * x;
+    let li = floor(ly);
+    let hl = hash_f(bitcast<u32>(i32(li)) * 0x68e31da4u);
+    return vec3f(ly, li, smoothstep(0.3, 0.6, hl) * (0.6 + 0.4 * noise_value2(vec2f(x * 0.05, li))));
+}
+// how much of the face is bare rock (vs. the old sea cliff grassed over)
+fn bareness(x: f32) -> f32 {
+    let dx = abs(x - FALL_X);
+    return max(smoothstep(60.0, 24.0, dx), smoothstep(0.4, 0.62, noise_value2(vec2f(x * 0.018, 5.0))));
+}
+
 // z of the cliff face at (x, y): the old coastline, an alcove carved behind
-// the fall, grassy talus fans at the foot away from the plunge pool
-fn face_z(x: f32, y: f32) -> f32 {
+// the fall, grassy talus fans at the foot away from the plunge pool; the
+// flows stacked up it, each a wall of columns over a rubbly, mossy ledge
+fn face_coarse(x: f32, y: f32) -> f32 {
     let dx = abs(x - FALL_X);
     var z = -134.0 + 7.0 * noise_value2(vec2f(x * 0.015, 3.0)) - 0.02 * x;
     z -= 9.0 * smoothstep(30.0, 13.0, dx);
     // the old sea cliff leans back and is grassed over; beside the fall the
     // spray has kept a near-vertical wall of bare basalt
-    let lean = mix(0.08, 0.36, smoothstep(14.0, 40.0, dx));
-    z -= max(y, 0.0) * lean;
-    // vertical ribs and gullies
-    z += 3.2 * noise_value2(vec2f(x * 0.11, y * 0.012)) + 1.3 * noise_value2(vec2f(x * 0.45, y * 0.04));
+    z -= max(y, 0.0) * mix(0.3, 0.1, smoothstep(40.0, 18.0, dx));
     let talus = smoothstep(16.0, 34.0, dx) * clamp(16.0 - y, 0.0, 17.0) * 1.3 * (0.8 + 0.4 * noise_value2(vec2f(x * 0.04, 7.0)));
     return z + talus;
 }
+// what the ribs, flows and columns add (within -2.8 .. +6.2 m)
+fn face_detail(x: f32, y: f32) -> f32 {
+    let bare = bareness(x);
+    // buttresses and gullies: sharp ribs between rounded hollows
+    var z = 4.5 * (1.0 - abs(noise_value2(vec2f(x * 0.09, y * 0.012)) * 2.0 - 1.0)) + 1.3 * noise_value2(vec2f(x * 0.45, y * 0.04));
+    if (y < 0.0) { return z; }
+    // each flow's rubbly top weathers back under the next one's columns
+    let st = strata(x, y);
+    let lf = st.x - st.y;
+    z -= (2.8 * (smoothstep(0.5, 0.9, lf) - smoothstep(0.9, 1.0, lf))) * bare * st.z;
+    // columnar joints: columns 1.4-2.4 m across, each standing a little
+    // proud or sunk
+    let hl = hash_f(bitcast<u32>(i32(st.y)) * 0x9e3779b9u);
+    let cx = x / (1.4 + hl) + hl * 13.0;
+    let cf = fract(cx) - 0.5;
+    let hc = hash_f(bitcast<u32>(i32(floor(cx))) ^ (bitcast<u32>(i32(st.y)) * 0x85ebca6bu));
+    z += (0.45 * (hc - 0.5) + 0.35 * (0.25 - cf * cf) * 4.0) * bare * smoothstep(0.9, 0.5, lf);
+    return z;
+}
+fn face_z(x: f32, y: f32) -> f32 { return face_coarse(x, y) + face_detail(x, y); }
 
 fn cliff_top(x: f32, z: f32) -> f32 {
     return LIP_Y + 1.0 - 16.0 * smoothstep(35.0, 170.0, x) - 6.0 * smoothstep(-60.0, -190.0, x) + 7.0 * noise_value2(vec2f(x * 0.018, z * 0.03)) + 2.0 * noise_value2(vec2f(x * 0.09, 3.0)) + 0.06 * (-z - 140.0);
 }
 
 fn cliff_sdf(p: vec3f) -> f32 {
-    let dz = p.z - face_z(p.x, p.y);
     let dy = p.y - cliff_top(p.x, p.z);
+    var dz = p.z - face_coarse(p.x, p.y);
+    // well in front of the face the detail cannot matter: a bound will do
+    if (dz > 8.0) { return max((dz - 6.5) * 0.55, dy * 0.8); }
+    dz -= face_detail(p.x, p.y);
     // rounded lip where the face meets the plateau
     let k = 4.0;
     let h = max(k - abs(dz * 0.55 - dy * 0.8), 0.0) / k;
@@ -214,12 +251,19 @@ fn shade_ground(p: vec3f, rd: vec3f, t: f32, l: Look, ctx: Ctx) -> vec3f {
     let rx = abs(p.x - river_x(p.z));
     // black volcanic gravel by the water, grass on the banks
     let pebble = 0.6 + 0.6 * noise_value2(p.xz * 5.0) * noise_value2(p.xz * 1.3 + 3.0);
-    var alb = col_hex(0x5e5a55u) * pebble;
+    var alb = col_hex(0x3a3836u) * pebble;
     let grass = smoothstep(0.45, 0.7, noise_fbm2(p.xz * 0.04, 4) + 0.4 * smoothstep(river_hw(p.z) + 10.0, river_hw(p.z) + 45.0, rx) - 0.2);
-    let tuft = 0.7 + 0.6 * noise_value2(p.xz * 1.5) * noise_value2(p.xz * 0.37);
-    alb = mix(alb, col_hex(0x4f6a2au) * tuft, grass);
-    // pebbles at several scales, wet and dark nearer the water
+    // tussocky grass: dark hollows between tufts, paler dry blades
+    let tuft = 0.55 + 0.75 * noise_value2(p.xz * 1.5) * noise_value2(p.xz * 0.37);
+    var gc = mix(col_hex(0x3c5620u), col_hex(0x5e6e2cu), noise_fbm2(p.xz * 0.09 + 4.0, 3));
+    gc = mix(gc, col_hex(0x7a7440u), smoothstep(0.65, 0.85, noise_value2(p.xz * 0.6)) * 0.4);
+    alb = mix(alb, gc * tuft, grass);
+    // pebbles and stones at several scales, wet and dark nearer the water
     alb *= 0.75 + 0.5 * noise_value2(p.xz * 13.0) * (0.6 + 0.4 * noise_value2(p.xz * 0.6));
+    let sq2 = rot2(0.7) * p.xz;
+    let stone = smoothstep(0.66, 0.78, noise_value2(sq2 * vec2f(2.0, 2.6) + 5.0) * 0.7 + noise_value2(sq2 * 5.3) * 0.3 + 0.08);
+    alb = mix(alb, col_hex(0x55524cu) * (0.7 + 0.5 * noise_value2(p.xz * 9.0)), stone * (1.0 - grass) * 0.55);
+    alb *= 0.8 + 0.35 * noise_value2(p.xz * 0.35);
     alb *= mix(0.6, 1.0, smoothstep(river_hw(p.z), river_hw(p.z) + 3.0, rx));
     if (l.snow > 0.5) {
         let bank = smoothstep(river_hw(p.z) + 0.5, river_hw(p.z) + 4.0 + 3.0 * noise_value2(p.xz * 0.2), rx);
@@ -333,38 +377,52 @@ fn bow_color(th: f32) -> vec3f {
 fn shade_cliff(p: vec3f, rd: vec3f, t: f32, l: Look, ctx: Ctx) -> vec3f {
     let n = cliff_normal(p, t);
     let dx = abs(p.x - FALL_X);
-    // black basalt, vivid moss where spray and ledges let it hold, grass on top
-    let ledge = smoothstep(0.12, 0.4, n.y);
-    // stacked lava flows: dark layers with rubbly partings between them
-    let strata = sin(p.y * 0.55 + 5.0 * noise_value2(vec2f(p.x * 0.02, p.y * 0.035)) + 1.5 * noise_value2(vec2f(p.x * 0.12, p.y * 0.2)));
-    let wet = smoothstep(40.0, 14.0, dx);
-    let outcrop = smoothstep(0.55, 0.75, noise_fbm2(vec2f(p.x * 0.06, p.y * 0.025), 4));
-    var mossy = saturate(ledge * 1.3 - outcrop * 0.9 + 0.25 * noise_value2(vec2f(p.x * 0.3, p.y * 0.06)) + wet * 0.25 - 0.1);
-    // moss clings to the partings of the lava layers on the steep walls
-    mossy = max(mossy, smoothstep(0.8, 0.97, strata) * wet * 0.55 * smoothstep(0.35, 0.65, noise_value2(vec2f(p.x * 0.25, p.y * 0.1))));
-    var alb = col_hex(0x2c2b2au) * (0.7 + 0.5 * noise_value2(vec2f(p.x * 0.5, p.y * 0.08))) * (0.72 + 0.4 * smoothstep(-0.2, 0.6, strata));
+    // (a ragged edge where the grass gives way to rock)
+    let bare = saturate(bareness(p.x) + (noise_value2(vec2f(p.x * 0.06, p.y * 0.07)) - 0.5) * 0.9 * (1.0 - smoothstep(40.0, 24.0, dx)));
+    let st = strata(p.x, p.y);
+    let lf = st.x - st.y;
+    let ctop = cliff_top(p.x, p.z);
+    let wet = smoothstep(38.0, 12.0, dx);
+    // black basalt, each column its own tone; the flows' rubbly tops rusty
+    let hl = hash_f(bitcast<u32>(i32(st.y)) * 0x9e3779b9u);
+    let cx = p.x / (1.4 + hl) + hl * 13.0;
+    let hc = hash_f(bitcast<u32>(i32(floor(cx))) ^ (bitcast<u32>(i32(st.y)) * 0x85ebca6bu));
+    var alb = col_hex(0x1d1e22u) * (0.7 + 0.5 * hc) * (0.8 + 0.4 * noise_value2(vec2f(p.x * 0.3, p.y * 0.5)));
+    alb = mix(alb, col_hex(0x3a2e27u), smoothstep(0.5, 0.85, lf) * 0.6 * st.z);
+    // moss and grass: on the ledges and flow tops, over the leaning slopes;
+    // the column walls beside the fall stay bare
+    let up = smoothstep(0.4, 0.75, n.y);
+    let patchy = noise_fbm2(vec2f(p.x * 0.07, p.y * 0.09), 3);
+    var mossy = saturate(up * 1.1 + smoothstep(0.55, 0.85, lf) * 0.55 * bare * st.z + (1.0 - bare) * 0.9 + (patchy - 0.5) * 1.1 - 0.2);
+    mossy *= 1.0 - 0.75 * smoothstep(0.55, 0.25, lf) * bare * (1.0 - up);
+    // Icelandic moss: deep and saturated, yellower in drier tufts
     let mv = noise_fbm2(vec2f(p.x * 0.05, p.y * 0.04), 3);
-    let moss = mix(col_hex(0x3a5a20u), col_hex(0x5a7c2cu), mv) * (0.8 + 0.25 * noise_value2(vec2f(p.x * 0.7, p.y * 0.35)) + 0.15 * noise_value2(p.xz * 1.9 + p.y));
-    // a band of bare basalt just under the lip
-    let band = smoothstep(9.0, 4.0, cliff_top(p.x, p.z) - p.y) * smoothstep(0.5, 2.0, cliff_top(p.x, p.z) - p.y);
-    alb = mix(alb, moss, mossy * (1.0 - band * 0.8));
-    alb *= mix(1.0, 0.55, wet * (1.0 - mossy));
-    let top = smoothstep(cliff_top(p.x, p.z) - 3.0, cliff_top(p.x, p.z) - 0.5, p.y);
-    alb = mix(alb, col_hex(0x5a7a30u), top * ledge);
+    var moss = mix(col_hex(0x173212u), col_hex(0x2c561cu), mv);
+    moss = mix(moss, col_hex(0x4a6424u), smoothstep(0.6, 0.85, noise_value2(p.xz * 0.2 + p.y * 0.1)) * 0.4);
+    // tussocks
+    moss *= 0.72 + 0.5 * noise_value2(vec2f(p.x * 0.9, p.y * 0.7)) * noise_value2(vec2f(p.x * 0.23, p.y * 0.31) + 3.0);
+    alb = mix(alb, moss, mossy);
+    // wet rock by the fall: darker, glistening
+    alb *= mix(1.0, 0.55, wet * (1.0 - mossy * 0.6));
+    let top = smoothstep(ctop - 3.0, ctop - 0.5, p.y);
+    alb = mix(alb, col_hex(0x2e521cu), top * up);
+    // boulders fallen onto the grassy talus
+    let bld = smoothstep(0.7, 0.8, noise_value2(rot2(0.6) * p.xz * 0.9 + 3.0)) * smoothstep(18.0, 6.0, p.y) * smoothstep(14.0, 24.0, dx);
+    alb = mix(alb, col_hex(0x3a3936u) * (0.7 + 0.5 * noise_value2(p.xz * 4.0)), bld);
     if (l.snow > 0.5) {
-        alb = mix(alb, vec3f(0.86, 0.9, 0.95), saturate(smoothstep(0.18, 0.45, n.y + 0.15 * noise_value2(vec2f(p.x * 0.3, p.y * 0.2))) + top * 0.8));
+        alb = mix(alb, vec3f(0.86, 0.9, 0.95), saturate(smoothstep(0.18, 0.45, n.y + 0.15 * noise_value2(vec2f(p.x * 0.3, p.y * 0.2))) + top * 0.8 + smoothstep(0.6, 0.9, lf) * 0.5 * (1.0 - wet)));
         // icicle curtains streak the wet walls beside the fall
         alb = mix(alb, vec3f(0.62, 0.72, 0.8), step(0.5, n.z) * wet * smoothstep(0.55, 0.75, noise_value2(vec2f(p.x * 2.0, p.y * 0.05))));
     }
     var dif = saturate(dot(n, l.sun));
     if (dif > 0.0 && l.snow < 0.5) { dif *= cliff_shadow(p + n * 0.3, l.sun); }
-    // gullies are darker: occlusion from the rib noise
+    // gullies darker, and the shade right under each flow's overhang
     let gully = noise_value2(vec2f(p.x * 0.11, p.y * 0.012));
-    let occ = (0.6 + 0.4 * saturate(n.y * 0.5 + 0.5)) * (0.65 + 0.5 * gully);
+    let occ = (0.55 + 0.45 * saturate(n.y * 0.5 + 0.5)) * (0.65 + 0.5 * gully) * mix(1.0, 0.7, smoothstep(0.8, 0.97, lf) * bare * st.z);
     var c = alb * (l.sun_c * dif * (0.75 + 0.35 * gully) + l.amb * occ);
     // wet rock glistens
     let r = reflect(rd, n);
-    c += dome(r, l, ctx, false) * wet * 0.06 * (1.0 - mossy);
+    c += dome(r, l, ctx, false) * wet * 0.07 * (1.0 - mossy);
     return c;
 }
 
