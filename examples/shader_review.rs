@@ -174,15 +174,21 @@ fn main() {
         println!("{name} — {} [{}] themes: {}", meta.title, meta.cost, meta.themes.join(", "));
         if o.bench {
             let mut samples = Vec::new();
+            let mut failed = false;
             for i in 0..24 {
                 let theme = (i % meta.themes.len()) as u32;
                 match render_at(&mut g, &name, &composed, (544, 132), theme, 30.0 + i as f64 * 0.25, 1, Detail::Medium) {
                     Ok(p) => samples.extend(p.gpu_ms),
                     Err(e) => {
                         println!("  {e}");
+                        failed = true;
                         break;
                     }
                 }
+            }
+            if failed {
+                failures += 1;
+                continue;
             }
             samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
             if let Some(med) = samples.get(samples.len() / 2) {

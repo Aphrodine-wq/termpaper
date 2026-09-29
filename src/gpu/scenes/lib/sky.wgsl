@@ -113,7 +113,7 @@ fn sky_sun_disk(rd: vec3f, sun: vec3f, radius_deg: f32) -> vec3f {
     return sky_sun_light(sun) * 60.0 * limb * edge;
 }
 // Moon disk: phase 0 = new, 0.5 = full, 1 = new; lit from the side the
-// phase implies, with faint maria. `light` scales brightness.
+// phase implies, with faint maria. Scale the result for brightness.
 fn sky_moon(rd: vec3f, moon: vec3f, phase: f32, radius_deg: f32) -> vec3f {
     let r = radians(radius_deg);
     let right = normalize(cross(moon, vec3f(0.0, 1.0, 0.0)));
