@@ -114,7 +114,9 @@ sample count: panes of one wall may run different counts.
 
 Reserved prefixes (scenes must not define these names): `hash_ noise_ col_
 tm_ dither_ cam_ sdf_ sdf2_ op_ rm_ sky_ star_ cloud_ vol_ fog_ water_ wet_
-rain_ snow_ bokeh_ light_ fire_ l2d_ entry_`. The modules live in
+rain_ snow_ bokeh_ light_ fire_ l2d_ entry_`. The name `F` is taken too: the
+entry point declares `var<uniform> F: Frame`, so a scene's own constant
+called `F` (a focal length, say) fails to compile — call it `FOCAL`. The modules live in
 `src/gpu/scenes/lib/`; read them, they are short. Highlights:
 
 - `sky_atmosphere(rd, sun, ctx)`, `sky_sun_dir(elev, azim)`, `sky_sun_light`,
@@ -263,30 +265,95 @@ then collapses onto that floor and does nothing. Pick one area term, not two.
 
 ## Post-processing
 
-Users can stack filters and global color grading at runtime (Settings menu or
-`c` overlay). Scenes should look good unfiltered; filters are optional seasoning.
+People stack effects and grade the picture at runtime (the menu, the colour
+studio, themes). Scenes should look good with none of it; effects are
+seasoning.
 
-Available filters live in `src/filter.rs`. To add one:
+The order, on the CPU and the GPU alike: effects → grade (hue, saturation,
+contrast) → the look's 3D lookup table (exposure, white balance, gamma,
+vibrance, tone wheels, matte, palette map or tint) → palette snap → the `f`
+preview effect → dim and the scene transition → smoothing → cell packing.
+The CPU is the reference: every pass mirrored in `src/gpu/shaders/post.wgsl`
+has a parity test in `tests/gpu_parity.rs`, run with `--ignored` on a GPU.
 
-1. Implement `pub fn my_filter(canvas: &mut Canvas) { ... }`
-2. Add the name to `FILTER_CYCLE`
-3. Wire it in `apply()` match arm
-4. Add a unit test
+To add an effect:
 
-## Color grading
+1. Implement it in `src/filter.rs` as `fn my_effect(canvas: &mut Canvas, …)`
+   taking what its strength means (see `params`: strength 1 is the effect's
+   usual, 0–2 the range), and dispatch it in `apply_with`.
+2. Add the name to `FILTER_CYCLE`, a line to `filter_help` in
+   `src/menu/settings.rs`, and it to `reads_neighbours` if it samples
+   neighbouring pixels (walls then render an apron for it).
+3. Mirror it in `post.wgsl` and extend the parity test.
+4. Add a unit test.
 
-Global hue / saturation / contrast is applied in `src/color_grade.rs` after
-scene render and before dim/smooth. Scenes do not need to know about it.
+## Writing a theme
+
+A theme is data, not code: a TOML file with a colour grade, an optional
+palette and an effect stack. The easiest way to make one is in termpaper —
+dial in a look (`c` for the colour studio, `?` → Look → Effects…), then
+`n` on the Themes page — or in the browser at the site's theme studio.
+Then it is a file in `~/.config/termpaper/themes/` to refine by hand:
+
+```toml
+format = 1                    # the file format; termpaper refuses newer ones
+name = "Late Shift"           # up to 40 characters
+author = "you"                # up to 32
+description = "What it does, in a line."   # up to 160
+tags = ["warm", "film"]       # up to 8, lower case
+
+[grade]                       # every key optional; the neutral value is shown
+hue = 0.0                     # 0–360, turns every colour round the wheel
+saturation = 1.0              # 0–2.5
+contrast = 1.0                # 0.5–2.5
+exposure = 0.0                # -2–2, in stops
+vibrance = 0.0                # -1–1
+temperature = 0.0             # -1 cool … 1 warm
+tint = 0.0                    # -1 green … 1 magenta
+gamma = 1.0                   # 0.5–2, above 1 lifts the midtones
+fade = 0.0                    # 0–0.5, lifts the blacks (matte)
+shadows = { hue = 215.0, amount = 0.0 }      # tone wheels: amount 0–1
+midtones = { hue = 30.0, amount = 0.0 }
+highlights = { hue = 40.0, amount = 0.0 }
+balance = 0.0                 # -1–1, where shadows end and highlights begin
+
+[palette]
+mode = "map"                  # off | map (by brightness) | tint | snap
+colors = ["#1a1b26", "#7aa2f7", "#e0af68"]   # 2–8, darkest first for map
+strength = 1.0                # 0–1
+dither = false                # snap only
+
+[effects]
+stack = ["halation", "grain"] # applied in this order
+grain = 0.5                   # a strength per effect, 0–2; 1 when left out
+
+[scene]                       # optional: the scene it was made for
+name = "tokyo"
+variant = "rain"
+
+[display]                     # optional
+dim = 0.8                     # a brightness to go with it
+```
+
+`termpaper theme check FILE` loads it the way termpaper will and says what
+it clamped or dropped. `termpaper theme export NAME --code` gives the share
+code, and `termpaper theme publish NAME` puts it in the gallery.
+
+The built-in themes are the same files in `src/themes/`, compiled in by
+`build.rs` (their `tags` start with their shelf: cinematic, terminal, retro
+or mood). A new one there needs nothing else; the site's copy of the list
+comes from `termpaper theme list --json`.
 
 ## Pull requests
 
 - Keep scenes focused — one file, one visual idea
 - Include a short README highlight if the scene is substantial
-- Run `cargo test --lib` before opening a PR
+- Run `cargo test --all-targets` (and with `--no-default-features`) before
+  opening a PR; with a GPU, the `--ignored` GPU tests too
 - MIT license — your scene code is contributed under the same license
 
 ## Ideas welcome
 
 Scenes that are distinct from existing ones — new motion, perspective, or mood —
-are the most valuable contributions. Check `termpaper --list` first to avoid
+are the most valuable contributions. Check `termpaper list` first to avoid
 duplicating something already in the catalog.

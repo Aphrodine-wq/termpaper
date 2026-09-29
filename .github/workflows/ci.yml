@@ -29,6 +29,28 @@ jobs:
       - run: cargo test --all-targets --locked
       - run: cargo build --release --locked
 
+  release-targets:
+    # The release cross-compiles these two (ring, for the gallery's TLS,
+    # needs clang for ARM64 Windows): build them here so a tag is never the
+    # first to find out.
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+
   gpu:
     # The real-device tests (`--ignored`) on whatever each runner offers:
     # Mesa's software Vulkan (lavapipe) on Linux, Metal on the Apple Silicon
@@ -55,6 +77,17 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
       - name: GPU tests
+        if: matrix.name != 'windows-warp'
         run: cargo test --release --locked --test gpu_shader_scenes --test gpu_world --test gpu_parity -- --ignored --test-threads=1 --nocapture
+        env:
+          RUST_BACKTRACE: "1"
+      # WARP is a software rasterizer: the raymarched scenes take minutes
+      # each (bigsur 3.5 min for three small frames) and the process died
+      # of heap corruption inside the next one (harbor). So here: the
+      # parity of every post pass and the pipeline end to end, not every
+      # scene; naga's HLSL writer checks every scene on the other runners.
+      - name: GPU tests (WARP subset)
+        if: matrix.name == 'windows-warp'
+        run: cargo test --release --locked --test gpu_shader_scenes --test gpu_parity -- --ignored --test-threads=1 --nocapture --skip crops_stitch_into_the_full_frame --skip every_scene_renders_animates_and_honours_its_themes
         env:
           RUST_BACKTRACE: "1"
