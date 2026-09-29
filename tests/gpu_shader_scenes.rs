@@ -1,11 +1,23 @@
-//! Studio shader scenes on a real GPU. Ignored by default (CI has no Vulkan
+//! Studio shader scenes on a real GPU. Ignored by default (they need a
 //! device): `cargo test --release --test gpu_shader_scenes -- --ignored`.
+//! CI runs them on lavapipe (Linux), Metal (macOS) and WARP (Windows).
 #![cfg(feature = "gpu")]
 use std::time::{Duration, Instant};
 use termpaper::engine::{Renderer, Request, SimKey, ViewKey, Worker, DEFAULT_CELL_ASPECT, DEFAULT_GPU_BUDGET_MS};
 use termpaper::gpu::{self, Gpu};
 use termpaper::render::Pixels;
 use termpaper::scene::{shader, Detail, SceneOptions};
+
+/// For the tests of machinery (seams, hysteresis, the worker): any Studio
+/// scene will do, and a light one compiles and renders in reasonable time
+/// even on a software rasterizer (WARP took over a minute to compile the
+/// first scene, bigsur).
+fn light_scene() -> Option<&'static shader::ShaderSpec> {
+    shader::SHADER_SCENES.iter().find(|s| s.cost == shader::Cost::Light).or(shader::SHADER_SCENES.first())
+}
+
+/// How long a scene may take to compile before a test gives up.
+const COMPILE_LIMIT: Duration = Duration::from_secs(180);
 
 fn desc(size: (usize, usize), win: (usize, usize), window: (usize, usize), theme: u32, ms: u64) -> gpu::FrameDesc {
     gpu::FrameDesc {
@@ -119,7 +131,7 @@ fn pane_cells(
     g.resize(window.0, window.1, grid.0 * grid.1);
     let start = Instant::now();
     while g.shader_status(spec) != gpu::ShaderStatus::Ready {
-        assert!(start.elapsed() < Duration::from_secs(60), "{} never compiled", spec.name);
+        assert!(start.elapsed() < COMPILE_LIMIT, "{} never compiled", spec.name);
         std::thread::sleep(Duration::from_millis(5));
     }
     let mut d = desc(canvas, (0, 0), window, 0, 30_000);
@@ -149,7 +161,7 @@ fn pane_cells(
 #[test]
 #[ignore]
 fn post_filters_stay_seamless_across_panes() {
-    let Some(spec) = shader::SHADER_SCENES.first() else { return };
+    let Some(spec) = light_scene() else { return };
     let mut g = Gpu::new(1, 1, 1).expect("Vulkan GPU");
     let canvas = (160, 72);
     let (cols, rows) = (160, 36);
@@ -180,12 +192,14 @@ fn post_filters_stay_seamless_across_panes() {
 #[test]
 #[ignore]
 fn hysteresis_holds_small_changes_and_passes_big_ones() {
-    let Some(spec) = shader::SHADER_SCENES.first() else { return };
+    let Some(spec) = light_scene() else { return };
     let mut g = Gpu::new(1, 1, 1).expect("Vulkan GPU");
     let size = (96, 48);
     let grid = (96, 24);
     g.resize(size.0, size.1, grid.0 * grid.1);
+    let start = Instant::now();
     while g.shader_status(spec) != gpu::ShaderStatus::Ready {
+        assert!(start.elapsed() < COMPILE_LIMIT, "{} never compiled", spec.name);
         std::thread::sleep(Duration::from_millis(5));
     }
     let frame = |g: &mut Gpu, ms: u64, dim: f32, hysteresis: u8| {
@@ -208,6 +222,8 @@ fn hysteresis_holds_small_changes_and_passes_big_ones() {
         g.run_blocking(&termpaper::canvas::Canvas::new(1, 1), &plan).expect("frame")
     };
     let a = frame(&mut g, 10_000, 1.0, 3);
+    let lit = a.chunks(3).filter(|c| c[1] & 0xffffff != 0 || c[2] & 0xffffff != 0).count();
+    assert!(lit > grid.0 * grid.1 / 2, "{}: {lit} of {} cells have any colour: the scene rendered black", spec.name, grid.0 * grid.1);
     // 1% dimmer: every channel moves by at most 2-3 levels — held
     let held = frame(&mut g, 10_000, 0.99, 3);
     assert_eq!(a, held, "sub-threshold changes must re-emit the previous cells");
@@ -233,7 +249,7 @@ fn a_broken_scene_does_not_poison_the_device() {
         .expect_err("invalid WGSL must fail to compile");
     assert!(err.contains("bad.wgsl"), "error should point at the scene file: {err}");
     assert!(!g.failed(), "a compile error must not mark the device failed");
-    if let Some(spec) = shader::SHADER_SCENES.first() {
+    if let Some(spec) = light_scene() {
         render(&mut g, spec, &desc(size, (0, 0), size, 0, 0));
     }
 }
@@ -243,7 +259,7 @@ fn a_broken_scene_does_not_poison_the_device() {
 #[test]
 #[ignore]
 fn the_worker_delivers_cells_for_a_studio_scene() {
-    let Some(spec) = shader::SHADER_SCENES.first() else { return };
+    let Some(spec) = light_scene() else { return };
     let mut worker = Worker::new(Renderer::Auto);
     let start = Instant::now();
     let grid = (80, 24);
@@ -276,10 +292,10 @@ fn the_worker_delivers_cells_for_a_studio_scene() {
             assert_eq!(cells.len(), grid.0 * grid.1 * 3);
             assert!(frame.backend.starts_with("GPU shader"), "{}", frame.backend);
             let lit = cells.chunks(3).filter(|c| c[1] & 0xffffff != 0 || c[2] & 0xffffff != 0).count();
-            assert!(lit > grid.0 * grid.1 / 2, "most cells should carry colour");
+            assert!(lit > grid.0 * grid.1 / 2, "{}: most cells should carry colour, {lit} do", spec.name);
             break;
         }
-        assert!(start.elapsed() < Duration::from_secs(60), "no frame from the worker");
+        assert!(start.elapsed() < COMPILE_LIMIT, "no frame from the worker");
         std::thread::sleep(Duration::from_millis(5));
     }
 }
