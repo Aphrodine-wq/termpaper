@@ -11,6 +11,7 @@ pub mod aquarium;
 pub mod aurora;
 pub mod boids;
 pub mod bump;
+pub mod campfire;
 pub mod candy;
 pub mod canopy;
 pub mod circuits;
@@ -465,6 +466,12 @@ pub const SCENES: &[SceneDef] = &[
         desc: "alpine lake at dusk: parallax ridges under a sinking sun, a mirrored lake, a lone canoe",
         themes: &["dusk", "dawn", "storm"],
         make: |rng, o| Box::new(alpine::Alpine::new(rng, o.theme.as_deref(), o.detail, o.pixels)),
+    },
+    SceneDef {
+        name: "campfire",
+        desc: "night campfire in the forest: flame, embers, smoke, and a figure poking the fire",
+        themes: &["pine", "autumn", "snow"],
+        make: |rng, o| Box::new(campfire::Campfire::new(rng, o.theme.as_deref(), o.detail, o.pixels)),
     },
 ];
 
