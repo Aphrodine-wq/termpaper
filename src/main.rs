@@ -793,12 +793,26 @@ fn begin_switch(
     guard: &mut Option<link::Guard>,
     transition: &mut transition::Transition,
     names: &[&str],
+    a: link::Anchor,
+    publish: bool,
+) {
+    begin_switch_paused(st, guard, transition, names, a, publish, false);
+}
+
+/// `begin_switch`, optionally keeping a paused anchor paused (frozen on the
+/// new start): a re-anchor must not unpause a wall the user paused.
+fn begin_switch_paused(
+    st: &mut SimState,
+    guard: &mut Option<link::Guard>,
+    transition: &mut transition::Transition,
+    names: &[&str],
     mut a: link::Anchor,
     publish: bool,
+    keep_pause: bool,
 ) {
     let linked = publish && guard.is_some();
     a.t0_ms = link::epoch_now_ms() + transition.fade_ms() + if linked { SWITCH_MARGIN_MS } else { 0 };
-    a.paused_at_ms = None;
+    a.paused_at_ms = (keep_pause && a.paused_at_ms.is_some()).then_some(a.t0_ms);
     if let (true, Some(g)) = (linked, guard.as_mut()) {
         g.publish_anchor(&mut a);
     }
@@ -1183,15 +1197,21 @@ fn run(
         next: None,
     };
     if let Some(g) = &mut guard {
-        match g.latest_anchor(&st.cur).filter(|a| names.contains(&a.scene.as_str())) {
-            Some(a) => {
+        match g.latest_anchor(&st.cur) {
+            Some(a) if names.contains(&a.scene.as_str()) => {
                 adopt_settings(&a, &mut settings, &mut opts);
                 idx = names.iter().position(|n| *n == a.scene).unwrap_or(idx);
                 st.cur = a;
+                st.synced = true;
             }
-            None => g.publish_anchor(&mut st.cur),
+            // the group runs a scene this build lacks: show ours locally and
+            // leave the group's anchor alone (as `receive_anchor` does)
+            Some(_) => {}
+            None => {
+                g.publish_anchor(&mut st.cur);
+                st.synced = true;
+            }
         }
-        st.synced = true;
         g.set_scene(names[idx]);
     }
     let mut worker = termpaper::engine::Worker::new(settings.renderer);
@@ -1498,17 +1518,22 @@ fn run(
                 }
                 // placeholder until the alignment tool lands
                 Effect::OpenCalibration => {
-                    let ctl = link::group_dir(&settings.link_group).and_then(|d| {
-                        let _ = std::fs::create_dir_all(&d);
-                        termpaper::calibrate::Controller::start(d)
-                    });
-                    match ctl {
-                        Some(c) if settings.link_enabled => {
-                            calib_ctl = Some(c);
-                            menu.close();
+                    // check first: starting a controller publishes the
+                    // pattern to the whole group
+                    if !settings.link_enabled {
+                        menu.flash("Align monitors: turn Link on first");
+                    } else {
+                        let ctl = link::group_dir(&settings.link_group).and_then(|d| {
+                            let _ = std::fs::create_dir_all(&d);
+                            termpaper::calibrate::Controller::start(d)
+                        });
+                        match ctl {
+                            Some(c) => {
+                                calib_ctl = Some(c);
+                                menu.close();
+                            }
+                            None => menu.flash("Align monitors needs Hyprland"),
                         }
-                        Some(_) => menu.flash("Align monitors: turn Link on first"),
-                        None => menu.flash("Align monitors needs Hyprland"),
                     }
                 }
             }
@@ -1996,7 +2021,7 @@ fn run(
                 None => {
                     let mut a = st.cur.clone();
                     a.seed = rand::rng().random();
-                    begin_switch(&mut st, &mut guard, &mut transition, &names, a, false);
+                    begin_switch_paused(&mut st, &mut guard, &mut transition, &names, a, false, true);
                 }
             }
         }
@@ -2007,7 +2032,7 @@ fn run(
             if wanted {
                 let mut a = st.cur.clone();
                 a.seed = rand::rng().random();
-                begin_switch(&mut st, &mut guard, &mut transition, &names, a, true);
+                begin_switch_paused(&mut st, &mut guard, &mut transition, &names, a, true, true);
             }
         }
 

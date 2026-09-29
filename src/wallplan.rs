@@ -245,11 +245,14 @@ impl Planner {
                 let desk = Desk::from_hypr(&mons, &cfg);
                 let Some(next) = plan(&desk, &cfg, &clients, &panes(), leader) else { continue };
                 let stable = candidate.as_ref().is_some_and(|c| c.same_layout(&next));
-                let changed = !published.as_ref().is_some_and(|p| p.same_layout(&next));
+                // compare with what is actually on disk: another leader may
+                // have published while this one was idle
+                let on_disk = WallPlan::load(&dir);
+                let changed = !on_disk.as_ref().is_some_and(|p| p.same_layout(&next));
                 if stable && changed {
-                    let on_disk = WallPlan::load(&dir).map(|p| p.rev).unwrap_or(0);
+                    let disk_rev = on_disk.as_ref().map(|p| p.rev).unwrap_or(0);
                     let mut out = next.clone();
-                    out.rev = on_disk.max(published.as_ref().map(|p| p.rev).unwrap_or(0)) + 1;
+                    out.rev = disk_rev.max(published.as_ref().map(|p| p.rev).unwrap_or(0)) + 1;
                     out.computed_ms = crate::link::epoch_now_ms();
                     if out.store(&dir).is_ok() {
                         published = Some(out);
