@@ -32,6 +32,77 @@ time budget), tonemapped with AgX, and dithered once, statically, so they
 cost the terminal as little bandwidth as possible.
 
 <!-- studio-catalog:begin -->
+**Coast & Water** (8)
+
+| scene | | themes |
+|---|---|---|
+| `bigsur` | Big Sur Coast — headlands of the Big Sur coast dropping into Pacific swells as marine fog rolls in | sunset · fog · noon · moonlight |
+| `harbor` | Fishing Harbor at Dawn — lobster boats riding at their moorings in a misty cove of fish shacks and a wooden pier | dawn · dusk · night |
+| `icebergs` | Jökulsárlón — blue icebergs drift in a glacier lagoon below Vatnajökull, ice glinting on black sand | day · twilight · aurora |
+| `jellyfish` | Moon Jelly Gallery — translucent moon jellies pulse and drift through the blue of an aquarium gallery tank | blue · sunset · deep |
+| `kelp` | Monterey Kelp Forest — looking up through swaying giant kelp as sun shafts pour down and a school of fish mills | sunlit · deep · twilight |
+| `lagoon` | Bora Bora Lagoon — turquoise shallows off an overwater-bungalow deck, Mount Otemanu rising across the lagoon | noon · golden · night |
+| `lighthouse` | Lighthouse in the Storm — a Maine lighthouse on a granite headland, its beam sweeping through rain, spray and storm | storm · fog · dusk |
+| `waterfall` | Skógafoss — a 60 m curtain of water pours off a mossy basalt cliff into mist, a rainbow in the spray | summer · winter · midnight |
+
+**Mountains & Wild** (9)
+
+| scene | | themes |
+|---|---|---|
+| `bamboo` | Arashiyama Bamboo — the path through Kyoto's bamboo grove, tall culms swaying and meeting overhead | day · rain · lantern |
+| `dolomites` | Dolomites Alpenglow — the Tre Cime towers above green alpine meadows and a lone hut as cloud drifts past | alpenglow · midday · starry |
+| `dunes` | Sahara Dunes — knife-edged Saharan dunes, sand streaming off the crests, a camel caravan crossing | golden · noon · moonlit |
+| `fjord` | Norwegian Fjord — sheer walls dropping into a still green fjord as a ferry draws its wake past the falls | summer · winter · overcast |
+| `kilauea` | Kilauea Lava — a lava channel crossing black pahoehoe to the sea, the steam plume glowing above the surf | night · dusk · eruption |
+| `mesa` | Monument Valley — the Mittens and Merrick Butte rising from red sand, a dirt road leading in | sunset · noon · night |
+| `redwoods` | Redwood Fog — shafts of morning sun slanting through fog between old-growth redwood trunks | morning · overcast · dusk |
+| `tuscany` | Tuscan Hills — rolling Val d'Orcia hills, a cypress-lined road up to a farmhouse, fog in the valleys | dawn · summer · autumn |
+| `yosemite` | Yosemite Valley — El Capitan, Half Dome and Bridalveil Fall from Tunnel View as cloud drifts up the valley | morning · sunset · winter |
+
+**Weather & Sky** (7)
+
+| scene | | themes |
+|---|---|---|
+| `cloudsea` | Above the Cloud Sea — sunrise from a rocky summit over a sea of cloud, far peaks standing out like islands | sunrise · sunset · moon |
+| `eclipse` | Total Solar Eclipse — totality over open country: the corona, the diamond ring, a sunset on every horizon | totality · desert · mountain |
+| `goldengate` | Fog over the Golden Gate — the Golden Gate's towers rising out of a rolling fog bank, the city faint beyond | morning · sunset · night |
+| `milkyway` | Milky Way over Joshua Tree — the galactic core rising over Joshua trees and granite boulders in the Mojave | summer · winter · moonrise |
+| `snowfall` | Snowfall in the Pines — an old lamp by a footpath in a snowy pine wood, its warm cone full of falling snow | night · bluehour · blizzard |
+| `supercell` | Great Plains Supercell — a rotating supercell towers over golden wheat, rain shaft and wall cloud, a lone farm | afternoon · dusk · night |
+| `windowrain` | Rain on the Window — a rain-streaked window at night, the wet city street beyond melted into bokeh | city · dusk · neon |
+
+**Cities & Streets** (9)
+
+| scene | | themes |
+|---|---|---|
+| `freeway` | LA Freeway Timelapse — long-exposure light trails on a curving LA freeway, downtown towers glowing in the haze | dusk · night · rain |
+| `havana` | Havana Malecón — waves bursting over Havana's seawall at sunset, 1950s cars under faded colonial arcades | sunset · day · storm |
+| `hongkong` | Victoria Harbour — Hong Kong Island's towers across Victoria Harbour, lights streaking on the water | night · bluehour · fog |
+| `manhattan` | Manhattan Rooftops — wooden water towers over Chelsea rooftops as dusk settles on the Midtown skyline | dusk · night · snow |
+| `paris` | Paris Café Street — a Haussmann street running to the Eiffel Tower, a café glowing under its awning | rain · autumn · night |
+| `shibuya` | Shibuya Scramble — the Shibuya scramble from above: crowds surge across every stripe when the lights change | rain · night · day |
+| `tokyo` | Shinjuku Alley in the Rain — a narrow Shinjuku yokocho at night: stacked signs, red lanterns, wet asphalt mirroring it | rain · clear · snow |
+| `trainwindow` | Train Window — golden-hour countryside streaming past a train window, poles flicking by, the sun low | golden · night · snow |
+| `venice` | Venice Canal — a narrow Venetian rio between weathered palazzi, a gondola drifting under a stone bridge | morning · sunset · night |
+
+**Cozy & Interiors** (4)
+
+| scene | | themes |
+|---|---|---|
+| `cafe` | Coffee Shop Window — a steaming cup at a cafe window, the rainy street outside melting into bokeh | rain · snow · morning |
+| `fireplace` | Cabin Fireplace — a crackling fire in a fieldstone hearth, snow falling past the cabin window | snow · rain · autumn |
+| `library` | Candlelit Library — an old reading room: towering shelves, a green banker's lamp, a candle, dust in the air | candle · dawn · storm |
+| `porch` | Summer Storm Porch — a screened Southern porch at dusk: rain off the eaves, a rocking chair, fireflies after | storm · fireflies · night |
+
+**Space** (4)
+
+| scene | | themes |
+|---|---|---|
+| `iss` | Earth from the ISS — the curved limb of the Earth from orbit: city lights, clouds, airglow, an orbital sunrise | night · sunrise · day |
+| `moonrise` | Moonrise over the Ocean — a huge orange moon lifting off the sea, its glittering path running in to a dark shore | harvest · full · crescent |
+| `saturn` | Cassini at Saturn — Saturn and its rings from Cassini: ring shadows on the clouds, a moon on its orbit | sunlit · backlit · equinox |
+| `tromso` | Aurora over Tromsø — green aurora curtains rippling over a snowy Norwegian fjord and its village lights | green · vivid · faint |
+
 <!-- studio-catalog:end -->
 
 No GPU? Studio scenes fall back to a related Classic scene, and linked
