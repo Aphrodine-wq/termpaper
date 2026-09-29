@@ -391,7 +391,7 @@ impl Alpine {
             y,
             vx: dir * self.rng.random_range(4.0..7.0) * st.pick(1.0, 0.8),
             n,
-            phase: self.rng.random_range(0.0..6.28),
+            phase: self.rng.random_range(0.0..std::f32::consts::TAU),
             alive: true,
         });
     }
@@ -695,7 +695,7 @@ impl Scene for Alpine {
             let lean_x = self.canoe.dir * lean * torso_h * 0.5;
             capsule(canvas, px, cy - hull_h * 0.4, hull_h * 0.45, px + lean_x, cy - hull_h * 0.4 - torso_h, hull_h * 0.32, ink, 1.0);
             ellipse_f(canvas, px + lean_x, cy - hull_h * 0.4 - torso_h - hull_h * 0.35, hull_h * 0.36, hull_h * 0.36 * 1.1, 0.0, ink, 1.0);
-            let pa = (stroke * 6.28).sin();
+            let pa = (stroke * std::f32::consts::TAU).sin();
             let paddle_x = px + lean_x + self.canoe.dir * len * (0.12 + 0.12 * pa);
             capsule(canvas, px + lean_x, cy - hull_h * 0.4 - torso_h * 0.6, 0.3, paddle_x, cy + hull_h * 0.6 + (1.0 - stroke) * hull_h * 0.4, 0.3, ink, 0.9);
             // reflection: the same silhouette mirrored and wobbled

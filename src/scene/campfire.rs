@@ -381,7 +381,7 @@ impl Campfire {
                 y: hash2(i as i32, 2, seed) * st.hf,
                 vx: 0.0,
                 vy: 0.0,
-                phase: hash2(i as i32, 3, seed) * 6.28,
+                phase: hash2(i as i32, 3, seed) * std::f32::consts::TAU,
                 size: 0.6 + hash2(i as i32, 4, seed) * 0.8,
             });
         }
