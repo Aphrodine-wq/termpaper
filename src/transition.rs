@@ -55,6 +55,9 @@ impl Mask {
             TransitionStyle::Wipe => 0.06,
             TransitionStyle::Iris => 0.05,
             TransitionStyle::Blinds => 0.2,
+            TransitionStyle::Diagonal => 0.06,
+            TransitionStyle::Checker => 0.15,
+            TransitionStyle::Clock => 0.04,
         };
         let (vw, vh) = (vw.max(1), vh.max(1));
         let half = (vw as f32 * 0.5, vh as f32 * 0.5);
@@ -94,6 +97,32 @@ impl Mask {
                 (dx * dx + dy * dy).sqrt() * self.inv_r
             }
             TransitionStyle::Blinds => (y.rem_euclid(self.slat as i32) as f32 + 0.5) * self.inv_span,
+            // corner to corner: the mean of the two normalised coordinates
+            TransitionStyle::Diagonal => {
+                let u = (x as f32 + 0.5) * self.inv_span;
+                let v = (y as f32 + 0.5) * (0.5 / self.half.1.max(0.5));
+                let d = 0.5 * (u + v);
+                if self.arriving {
+                    d
+                } else {
+                    1.0 - d
+                }
+            }
+            // tiles (a slat square) in a hashed order, each wiping across itself
+            TransitionStyle::Checker => {
+                let s = self.slat as i32;
+                let (tx, ty) = (x.div_euclid(s), y.div_euclid(s));
+                let tile = (hash2(tx as u32, ty as u32) >> 8) as f32 * (1.0 / 16_777_216.0);
+                let within = (x.rem_euclid(s) as f32 + 0.5) / s as f32;
+                tile * 0.85 + within * 0.15
+            }
+            // a hand sweeping round from twelve o'clock
+            TransitionStyle::Clock => {
+                let dx = x as f32 + 0.5 - self.half.0;
+                let dy = y as f32 + 0.5 - self.half.1;
+                let a = dx.atan2(-dy);
+                (a + std::f32::consts::PI) / std::f32::consts::TAU
+            }
         };
         t.clamp(0.0, 1.0)
     }
@@ -111,6 +140,9 @@ impl Mask {
             TransitionStyle::Wipe => 2,
             TransitionStyle::Iris => 3,
             TransitionStyle::Blinds => 4,
+            TransitionStyle::Diagonal => 5,
+            TransitionStyle::Checker => 6,
+            TransitionStyle::Clock => 7,
             TransitionStyle::Random => 1,
         }
     }
@@ -336,7 +368,15 @@ mod tests {
 
     #[test]
     fn masks_open_fully_and_close_fully() {
-        for style in [TransitionStyle::Dissolve, TransitionStyle::Wipe, TransitionStyle::Iris, TransitionStyle::Blinds] {
+        for style in [
+            TransitionStyle::Dissolve,
+            TransitionStyle::Wipe,
+            TransitionStyle::Iris,
+            TransitionStyle::Blinds,
+            TransitionStyle::Diagonal,
+            TransitionStyle::Checker,
+            TransitionStyle::Clock,
+        ] {
             for arriving in [false, true] {
                 assert!(Mask::new(style, 1.0, arriving, 160, 90).is_none(), "nothing hidden at 1");
                 let nearly = Mask::new(style, 0.999, arriving, 160, 90).unwrap();

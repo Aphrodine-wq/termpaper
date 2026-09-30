@@ -272,9 +272,61 @@ pub fn power_source() -> Power {
     }
 }
 
+/// The battery's charge, 0..=100, when the machine has one and says.
+pub fn battery_percent() -> Option<u8> {
+    #[cfg(target_os = "linux")]
+    {
+        let rd = std::fs::read_dir("/sys/class/power_supply").ok()?;
+        for e in rd.flatten() {
+            let p = e.path();
+            if std::fs::read_to_string(p.join("type")).ok()?.trim() != "Battery" {
+                continue;
+            }
+            if let Some(v) = std::fs::read_to_string(p.join("capacity")).ok().and_then(|s| s.trim().parse::<u8>().ok()) {
+                return Some(v.min(100));
+            }
+        }
+        None
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("pmset").args(["-g", "batt"]).output().ok()?;
+        percent_from_pmset(&String::from_utf8_lossy(&out.stdout))
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+        let mut s: SYSTEM_POWER_STATUS = unsafe { std::mem::zeroed() };
+        if unsafe { GetSystemPowerStatus(&mut s) } == 0 || s.BatteryLifePercent > 100 {
+            return None;
+        }
+        Some(s.BatteryLifePercent)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        None
+    }
+}
+
+/// The first "NN%" in `pmset -g batt` output.
+pub fn percent_from_pmset(text: &str) -> Option<u8> {
+    for line in text.lines().skip(1) {
+        if let Some(i) = line.find('%') {
+            let digits: String = line[..i].chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+            let v: String = digits.chars().rev().collect();
+            if let Ok(n) = v.parse::<u8>() {
+                return Some(n.min(100));
+            }
+        }
+    }
+    None
+}
+
 /// Polls the power source on a background thread; reading it is free.
 pub struct PowerWatcher {
     state: Arc<AtomicU8>,
+    /// 0..=100, 255 when unknown
+    percent: Arc<AtomicU8>,
 }
 
 impl PowerWatcher {
@@ -282,20 +334,30 @@ impl PowerWatcher {
 
     pub fn spawn() -> Self {
         let state = Arc::new(AtomicU8::new(Power::Unknown.to_u8()));
-        let slot = Arc::clone(&state);
+        let percent = Arc::new(AtomicU8::new(255));
+        let (slot, pslot) = (Arc::clone(&state), Arc::clone(&percent));
         let _ = std::thread::Builder::new()
             .name("termpaper-power".into())
             .spawn(move || loop {
                 slot.store(power_source().to_u8(), Ordering::Relaxed);
+                pslot.store(battery_percent().unwrap_or(255), Ordering::Relaxed);
                 // the watcher is dropped with the process; a detached thread
                 // sleeping between polls costs nothing
                 std::thread::sleep(Self::PERIOD);
             });
-        PowerWatcher { state }
+        PowerWatcher { state, percent }
     }
 
     pub fn get(&self) -> Power {
         Power::from_u8(self.state.load(Ordering::Relaxed))
+    }
+
+    /// The battery's charge, when there is one.
+    pub fn percent(&self) -> Option<u8> {
+        match self.percent.load(Ordering::Relaxed) {
+            255 => None,
+            v => Some(v),
+        }
     }
 }
 

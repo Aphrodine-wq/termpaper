@@ -1986,6 +1986,7 @@ fn menu_ctx(
         truecolor: settings.truecolor,
         favorites: settings.cfg.favorites.clone(),
         recents: settings.cfg.recents.clone(),
+        playlist: settings.cfg.playlist.clone(),
         scene_themes: settings.cfg.themes.clone(),
         themes: settings.theme_rows.clone(),
         active_theme: settings.look_theme.clone(),
@@ -2252,6 +2253,8 @@ fn run(
     // Light output on Classic scenes: the cells last sent
     let mut sent_cells: Vec<ratatui::buffer::Cell> = Vec::new();
     let power = termpaper::platform::PowerWatcher::spawn();
+    // Pause behind apps: our own window (and its terminal) never count
+    let mut fullscreen_watcher = None;
     let mut mouse_on = settings.display.mouse;
     // the terminal check, and the welcome a fresh install opens with (not
     // in screensaver mode, and not on a pane joining panes already up)
@@ -2675,6 +2678,11 @@ fn run(
                 }
                 Effect::OpenColorGrade => studio.open_on(studio::Tab::Colour),
                 Effect::OpenPalette => studio.open_on(studio::Tab::Palette),
+                Effect::TogglePlaylist(name) => {
+                    let on = menu::browser::toggle_playlist(&mut settings.cfg.playlist, name);
+                    menu.flash(if on { format!("{name} is on the playlist") } else { format!("{name} is off the playlist") });
+                    save.mark(now);
+                }
                 Effect::SetParams(p) => {
                     let scene = st.cur.scene.clone();
                     config::set_tune(&mut settings.cfg, &scene, p);
@@ -3059,7 +3067,7 @@ fn run(
                         idx
                     })
                 } else {
-                    let i = menu::browser::cycle_next(&names, idx, settings.cycle_scope, &settings.cfg.favorites, settings.playback.order, pick);
+                    let i = menu::browser::cycle_next(&names, idx, settings.cycle_scope, &settings.cfg.favorites, &settings.cfg.playlist, settings.playback.order, pick);
                     o.theme = settings.cfg.themes.get(names[i]).cloned().or_else(|| settings.theme.clone());
                     (i != idx).then_some(i)
                 };
@@ -3321,8 +3329,13 @@ fn run(
         // unfocused with Pause: hold the picture and keep listening. A
         // scene of its own resumes where it stopped; one the group runs
         // carries on, and this pane catches up when it comes back.
-        let hold = !focused
-            && settings.display.unfocused == termpaper::prefs::Unfocused::Pause
+        // another window fullscreen on this desk (a game, a film): hold too
+        if settings.display.pause_behind_fullscreen && settings.hypr && fullscreen_watcher.is_none() {
+            fullscreen_watcher = Some(termpaper::hypr::FullscreenWatcher::spawn());
+        }
+        let behind_fullscreen = settings.display.pause_behind_fullscreen
+            && fullscreen_watcher.as_ref().is_some_and(|w| w.covered());
+        let hold = ((!focused && settings.display.unfocused == termpaper::prefs::Unfocused::Pause) || behind_fullscreen)
             && !(menu.open || studio.open || welcome.open || check.open);
         match (hold, held_since) {
             (true, None) => held_since = Some(now),
@@ -3535,13 +3548,22 @@ fn run(
 
                 // the clock (dim text, or large frosted digits), as bright as
                 // the picture
+                let clock_rgb = settings.display.clock_color.rgb(settings.display.menu_accent);
                 if settings.clock && !clock_text.is_empty() {
                     let d = &settings.display;
-                    termpaper::overlay::draw_clock(f.buffer_mut(), area, &clock_text, d.clock_style, d.clock_corner, settings.dim * night);
+                    termpaper::overlay::draw_clock(f.buffer_mut(), area, &clock_text, d.clock_style, d.clock_corner, settings.dim * night * d.clock_level, clock_rgb);
+                }
+                // the battery, across from the clock
+                if settings.display.battery_meter {
+                    if let Some(pct) = power.percent() {
+                        let d = &settings.display;
+                        let corner = termpaper::overlay::opposite(d.clock_corner);
+                        termpaper::overlay::draw_meter(f.buffer_mut(), area, pct, !settings.on_battery, corner, settings.dim * night * d.clock_level, clock_rgb);
+                    }
                 }
                 // the scene's name for a moment after it changes
                 if let Some(at) = caption_at.filter(|_| settings.display.caption && !menu.open) {
-                    let alpha = termpaper::overlay::caption_alpha(at.elapsed().as_secs_f32()) * settings.dim * night;
+                    let alpha = termpaper::overlay::caption_alpha(at.elapsed().as_secs_f32(), settings.display.caption_secs) * settings.dim * night;
                     let title = scene::lookup(&st.cur.scene).map_or(st.cur.scene.as_str(), |e| e.title());
                     termpaper::overlay::draw_caption(f.buffer_mut(), area, title, st.cur.theme.as_deref(), alpha);
                 }
@@ -3575,7 +3597,7 @@ fn run(
                 if studio.open {
                     // round wheels need the real cell shape
                     let aspect = cell_aspect;
-                    studio::render(f, area, &studio, settings.look.get(), settings.truecolor, aspect);
+                    studio::render(f, area, &studio, settings.look.get(), settings.truecolor, aspect, settings.display.menu_accent, settings.display.menu_side);
                 }
                 if welcome.open {
                     termpaper::check::render_welcome(f, area, &welcome, &check_ctx(&settings), &welcome_keys(&settings));

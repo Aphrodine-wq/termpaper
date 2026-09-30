@@ -41,15 +41,17 @@ struct Pal {
     warn: Color,
 }
 
-fn pal(truecolor: bool) -> Pal {
+fn pal(truecolor: bool, accent: crate::prefs::Accent) -> Pal {
     if truecolor {
+        let (ar, ag, ab) = accent.rgb();
+        let (hr, hg, hb) = accent.hi_bg();
         Pal {
             text: Color::Rgb(220, 224, 234),
             muted: Color::Rgb(146, 153, 170),
             faint: Color::Rgb(88, 94, 110),
-            accent: Color::Rgb(122, 196, 236),
+            accent: Color::Rgb(ar, ag, ab),
             on_accent: Color::Rgb(10, 14, 22),
-            hi_bg: Color::Rgb(36, 46, 68),
+            hi_bg: Color::Rgb(hr, hg, hb),
             panel: Color::Rgb(12, 13, 18),
             track: Color::Rgb(56, 62, 78),
             fav: Color::Rgb(240, 196, 92),
@@ -61,7 +63,7 @@ fn pal(truecolor: bool) -> Pal {
             text: Color::White,
             muted: Color::Gray,
             faint: Color::DarkGray,
-            accent: Color::Cyan,
+            accent: accent_indexed(accent),
             on_accent: Color::Black,
             hi_bg: Color::Indexed(237),
             panel: Color::Indexed(233),
@@ -135,15 +137,43 @@ fn line_at(f: &mut Frame, x: u16, y: u16, w: u16, line: Line<'static>) {
 
 /// The drawer: the left ~46% of the screen, at least 44 columns, and the
 /// full width below 70 columns.
-pub fn drawer_rect(area: Rect) -> Rect {
+pub fn drawer_rect(area: Rect, side: crate::prefs::Side) -> Rect {
     let w = if area.width < 70 {
         area.width
     } else {
         ((area.width as u32 * 46 / 100) as u16).max(44)
     };
-    Rect {
-        width: w.min(area.width),
-        ..area
+    let w = w.min(area.width);
+    let x = match side {
+        crate::prefs::Side::Left => area.x,
+        crate::prefs::Side::Right => area.x + area.width - w,
+    };
+    Rect { x, width: w, ..area }
+}
+
+/// The accent on a 256-colour terminal.
+pub fn accent_indexed(accent: crate::prefs::Accent) -> Color {
+    use crate::prefs::Accent as A;
+    match accent {
+        A::Blue | A::Teal => Color::Cyan,
+        A::Amber => Color::Yellow,
+        A::Rose | A::Violet => Color::Magenta,
+        A::Green => Color::Green,
+        A::Mono => Color::White,
+    }
+}
+
+/// Blank the scene under the drawer (Menu glass off): a plain dark panel.
+fn blank(buf: &mut Buffer, rect: Rect, truecolor: bool) {
+    let rect = rect.intersection(buf.area);
+    let bg = if truecolor { Color::Rgb(12, 13, 18) } else { Color::Indexed(233) };
+    for y in rect.top()..rect.bottom() {
+        for x in rect.left()..rect.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.reset();
+                cell.set_bg(bg);
+            }
+        }
     }
 }
 
@@ -179,8 +209,8 @@ fn frost(buf: &mut Buffer, rect: Rect, truecolor: bool) {
 
 pub fn render(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx) {
     m.hits.borrow_mut().clear();
-    let p = pal(ctx.truecolor);
-    let rect = drawer_rect(area);
+    let p = pal(ctx.truecolor, ctx.display.menu_accent);
+    let rect = drawer_rect(area, ctx.display.menu_side);
     if rect.width < 12 || rect.height < 5 {
         return;
     }
@@ -188,7 +218,11 @@ pub fn render(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx) {
     // drawer's own empty space does nothing
     hit(m, area, Hit::Outside);
     hit(m, rect, Hit::Drawer);
-    frost(f.buffer_mut(), rect, ctx.truecolor);
+    if ctx.display.menu_frost {
+        frost(f.buffer_mut(), rect, ctx.truecolor);
+    } else {
+        blank(f.buffer_mut(), rect, ctx.truecolor);
+    }
 
     let shown = scene::lookup(ctx.scene_name).map_or(ctx.scene_name, |e| e.title());
     let variant = ctx.theme.clone().or_else(|| scene::themes(ctx.scene_name).first().map(|t| t.to_string()));
@@ -444,6 +478,7 @@ fn draw_scene_list(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal, 
             match b.current_shelf() {
                 Shelf::Favorites => "press f on a scene to star it",
                 Shelf::Recent => "scenes you switch to land here",
+                Shelf::Playlist => "press p on a scene to put it on the playlist",
                 _ => "nothing here yet",
             }
         };
@@ -1172,7 +1207,7 @@ pub fn key_hints(m: &Menu, ctx: &MenuCtx) -> Vec<(&'static str, &'static str)> {
                 v.extend([("→", "scenes"), ("/", "search")]);
             } else {
                 if let Some(e) = hit {
-                    v.extend([("Enter", "switch"), ("f", "star")]);
+                    v.extend([("Enter", "switch"), ("f", "star"), ("p", "playlist")]);
                     if e.themes().len() > 1 {
                         v.push(("t", "variant"));
                     }
@@ -1288,6 +1323,7 @@ const MENU_KEYS: &[(&str, &str)] = &[
     ("u", "undo the last change"),
     ("/", "search scenes"),
     ("f", "star the highlighted scene"),
+    ("p", "put it on the playlist, or take it off"),
     ("t", "next variant for it"),
     ("mouse", "click anything · drag sliders · wheel scrolls"),
     ("?", "this help"),

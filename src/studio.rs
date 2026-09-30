@@ -777,15 +777,17 @@ struct Pal {
     panel: (u8, u8, u8),
 }
 
-fn pal(truecolor: bool) -> Pal {
+fn pal(truecolor: bool, accent: crate::prefs::Accent) -> Pal {
     if truecolor {
+        let (ar, ag, ab) = accent.rgb();
+        let (hr, hg, hb) = accent.hi_bg();
         Pal {
             text: Color::Rgb(220, 224, 234),
             muted: Color::Rgb(146, 153, 170),
             faint: Color::Rgb(88, 94, 110),
-            accent: Color::Rgb(122, 196, 236),
+            accent: Color::Rgb(ar, ag, ab),
             on_accent: Color::Rgb(10, 14, 22),
-            hi_bg: Color::Rgb(36, 46, 68),
+            hi_bg: Color::Rgb(hr, hg, hb),
             track: Color::Rgb(56, 62, 78),
             live: Color::Rgb(126, 212, 146),
             panel: (13, 15, 22),
@@ -795,7 +797,7 @@ fn pal(truecolor: bool) -> Pal {
             text: Color::White,
             muted: Color::Gray,
             faint: Color::DarkGray,
-            accent: Color::Cyan,
+            accent: crate::menu::view::accent_indexed(accent),
             on_accent: Color::Black,
             hi_bg: Color::Indexed(237),
             track: Color::Indexed(239),
@@ -968,13 +970,17 @@ fn slider_spans(frac: f32, neutral: f32, w: usize, focused: bool, on: bool, bg: 
 }
 
 /// The studio's panel: the left of the screen, like the menu's drawer.
-pub fn panel_rect(area: Rect) -> Rect {
+pub fn panel_rect(area: Rect, side: crate::prefs::Side) -> Rect {
     let w = if area.width < 76 {
         area.width
     } else {
         ((area.width as u32 * 54 / 100) as u16).max(72).min(area.width)
     };
-    Rect { width: w, ..area }
+    let x = match side {
+        crate::prefs::Side::Left => area.x,
+        crate::prefs::Side::Right => area.x + area.width - w,
+    };
+    Rect { x, width: w, ..area }
 }
 
 /// Rows a round wheel `w` cells wide needs (half blocks, this cell shape).
@@ -1015,10 +1021,19 @@ fn keys_line(w: usize, p: &Pal) -> Line<'static> {
     Line::from(spans)
 }
 
-pub fn render(f: &mut Frame, area: Rect, st: &Studio, look: &Look, truecolor: bool, cell_aspect: f32) {
+pub fn render(
+    f: &mut Frame,
+    area: Rect,
+    st: &Studio,
+    look: &Look,
+    truecolor: bool,
+    cell_aspect: f32,
+    accent: crate::prefs::Accent,
+    side: crate::prefs::Side,
+) {
     st.hits.borrow_mut().clear();
-    let p = pal(truecolor);
-    let full = panel_rect(area);
+    let p = pal(truecolor, accent);
+    let full = panel_rect(area, side);
     if full.width < 30 || full.height < 12 {
         return;
     }
@@ -1397,7 +1412,7 @@ mod tests {
             s.open_on(tab);
             for (w, h) in [(40, 14), (80, 24), (200, 60), (10, 4)] {
                 let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-                term.draw(|f| render(f, f.area(), &s, &l, true, 2.1)).unwrap();
+                term.draw(|f| render(f, f.area(), &s, &l, true, 2.1, crate::prefs::Accent::Blue, crate::prefs::Side::Left)).unwrap();
             }
         }
     }

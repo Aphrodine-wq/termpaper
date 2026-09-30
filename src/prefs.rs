@@ -97,6 +97,9 @@ choice!(
         Wipe => "wipe", "wipe";
         Iris => "iris", "iris";
         Blinds => "blinds", "blinds";
+        Diagonal => "diagonal", "diagonal";
+        Checker => "checker", "checker";
+        Clock => "clock", "clock sweep";
         /// a different style each switch (never itself at render time)
         Random => "random", "random";
     }
@@ -104,8 +107,16 @@ choice!(
 
 impl TransitionStyle {
     /// The styles `Random` chooses among.
-    pub const CONCRETE: &'static [TransitionStyle] =
-        &[TransitionStyle::Fade, TransitionStyle::Dissolve, TransitionStyle::Wipe, TransitionStyle::Iris, TransitionStyle::Blinds];
+    pub const CONCRETE: &'static [TransitionStyle] = &[
+        TransitionStyle::Fade,
+        TransitionStyle::Dissolve,
+        TransitionStyle::Wipe,
+        TransitionStyle::Iris,
+        TransitionStyle::Blinds,
+        TransitionStyle::Diagonal,
+        TransitionStyle::Checker,
+        TransitionStyle::Clock,
+    ];
 
     /// The style to draw: `Random` resolved by `pick` (the same number on
     /// every pane of a wall gives the same style everywhere).
@@ -174,10 +185,84 @@ choice!(
 );
 
 choice!(
-    /// The clock's size.
+    /// The clock's style.
     ClockStyle {
         Small => "small", "small";
-        Large => "large", "large";
+        Large => "large", "large frosted";
+        Solid => "solid", "large solid";
+        Outline => "outline", "large outline";
+    }
+);
+
+choice!(
+    /// The clock's colour.
+    ClockColor {
+        Auto => "auto", "grey";
+        White => "white", "white";
+        Warm => "warm", "warm";
+        Cool => "cool", "cool";
+        Green => "green", "green";
+        Amber => "amber", "amber";
+    }
+);
+
+choice!(
+    /// The menu's accent colour.
+    Accent {
+        Blue => "blue", "blue";
+        Teal => "teal", "teal";
+        Amber => "amber", "amber";
+        Rose => "rose", "rose";
+        Violet => "violet", "violet";
+        Green => "green", "green";
+        Mono => "mono", "mono";
+    }
+);
+
+impl Accent {
+    /// The accent as RGB (24-bit terminals).
+    pub fn rgb(self) -> (u8, u8, u8) {
+        match self {
+            Accent::Blue => (122, 196, 236),
+            Accent::Teal => (94, 214, 190),
+            Accent::Amber => (240, 186, 92),
+            Accent::Rose => (238, 132, 168),
+            Accent::Violet => (176, 142, 240),
+            Accent::Green => (126, 212, 146),
+            Accent::Mono => (214, 214, 220),
+        }
+    }
+
+    /// The focused-row background that goes with it.
+    pub fn hi_bg(self) -> (u8, u8, u8) {
+        let (r, g, b) = self.rgb();
+        (18 + r / 12, 22 + g / 12, 30 + b / 12)
+    }
+}
+
+impl ClockColor {
+    /// The clock's colour at full brightness.
+    pub fn rgb(self, accent: Accent) -> (u8, u8, u8) {
+        match self {
+            ClockColor::Auto => (92, 92, 102),
+            ClockColor::White => (236, 236, 240),
+            ClockColor::Warm => (240, 196, 140),
+            ClockColor::Cool => (150, 190, 236),
+            ClockColor::Green => (120, 220, 140),
+            ClockColor::Amber => accent_or(accent, (255, 176, 0)),
+        }
+    }
+}
+
+fn accent_or(_a: Accent, c: (u8, u8, u8)) -> (u8, u8, u8) {
+    c
+}
+
+choice!(
+    /// Which side of the screen the menu drawer opens on.
+    Side {
+        Left => "left", "left";
+        Right => "right", "right";
     }
 );
 
@@ -341,6 +426,39 @@ pub struct DisplayPrefs {
     /// ask the terminal window to fill the screen while termpaper runs
     #[serde(skip_serializing_if = "is_true")]
     pub fullscreen: bool,
+    #[serde(skip_serializing_if = "is_default")]
+    pub clock_color: ClockColor,
+    /// the clock's brightness, 0.2 ..= 1
+    #[serde(skip_serializing_if = "is_clock_level")]
+    pub clock_level: f32,
+    /// how long the scene's name stays after a switch, seconds
+    #[serde(skip_serializing_if = "is_caption_secs")]
+    pub caption_secs: f32,
+    /// the battery's charge in a corner (laptops)
+    #[serde(skip_serializing_if = "is_default")]
+    pub battery_meter: bool,
+    /// hold the picture while another window is fullscreen on the same
+    /// screen (Hyprland)
+    #[serde(skip_serializing_if = "is_default")]
+    pub pause_behind_fullscreen: bool,
+    #[serde(skip_serializing_if = "is_default")]
+    pub menu_accent: Accent,
+    #[serde(skip_serializing_if = "is_default")]
+    pub menu_side: Side,
+    /// the drawer tints the picture under it instead of blanking it
+    #[serde(skip_serializing_if = "is_true")]
+    pub menu_frost: bool,
+}
+
+pub const CLOCK_LEVEL: f32 = 1.0;
+pub const CAPTION_SECS: f32 = 4.0;
+
+fn is_clock_level(v: &f32) -> bool {
+    (*v - CLOCK_LEVEL).abs() < 1e-6
+}
+
+fn is_caption_secs(v: &f32) -> bool {
+    (*v - CAPTION_SECS).abs() < 1e-6
 }
 
 pub const STUDIO_BUDGET_MS: f32 = 3.0;
@@ -393,6 +511,14 @@ impl Default for DisplayPrefs {
             studio_budget_ms: STUDIO_BUDGET_MS,
             studio_fps: STUDIO_FPS,
             fullscreen: true,
+            clock_color: ClockColor::Auto,
+            clock_level: CLOCK_LEVEL,
+            caption_secs: CAPTION_SECS,
+            battery_meter: false,
+            pause_behind_fullscreen: false,
+            menu_accent: Accent::Blue,
+            menu_side: Side::Left,
+            menu_frost: true,
         }
     }
 }
@@ -412,6 +538,14 @@ impl DisplayPrefs {
         }
         self.studio_budget_ms = self.studio_budget_ms.clamp(0.5, 16.0);
         self.studio_fps = self.studio_fps.clamp(10, 240);
+        if !self.clock_level.is_finite() {
+            self.clock_level = CLOCK_LEVEL;
+        }
+        self.clock_level = self.clock_level.clamp(0.2, 1.0);
+        if !self.caption_secs.is_finite() {
+            self.caption_secs = CAPTION_SECS;
+        }
+        self.caption_secs = self.caption_secs.clamp(1.0, 15.0);
     }
 
     /// Take a peer's settings for what the whole wall shows alike (the
@@ -421,7 +555,10 @@ impl DisplayPrefs {
         self.clock_style = peer.clock_style;
         self.clock_format = peer.clock_format;
         self.clock_corner = peer.clock_corner;
+        self.clock_color = peer.clock_color;
+        self.clock_level = peer.clock_level;
         self.caption = peer.caption;
+        self.caption_secs = peer.caption_secs;
         self.night = peer.night;
         self.night_from = peer.night_from;
         self.night_to = peer.night_to;
@@ -547,6 +684,27 @@ mod tests {
         let off: DisplayPrefs = toml::from_str("fullscreen = false").unwrap();
         assert!(!off.fullscreen);
         assert!(toml::to_string(&off).unwrap().contains("fullscreen = false"));
+    }
+
+    #[test]
+    fn custom_display_round_trips_and_preserves_local_preferences() {
+        let d = DisplayPrefs {
+            clock_style: ClockStyle::Outline, clock_color: ClockColor::Cool,
+            clock_level: 0.6, caption_secs: 9.0, battery_meter: true,
+            pause_behind_fullscreen: true, menu_accent: Accent::Teal,
+            menu_side: Side::Right, menu_frost: false, ..Default::default()
+        };
+        let text = toml::to_string(&d).unwrap();
+        assert_eq!(toml::from_str::<DisplayPrefs>(&text).unwrap(), d);
+        let mut local = DisplayPrefs::default();
+        local.adopt_shared(&d);
+        assert_eq!((local.clock_color, local.clock_level, local.caption_secs), (ClockColor::Cool, 0.6, 9.0));
+        assert_eq!((local.menu_accent, local.menu_side), (Accent::Blue, Side::Left));
+        assert!(!local.battery_meter && !local.pause_behind_fullscreen && local.menu_frost);
+        local.clock_level = f32::NAN;
+        local.caption_secs = 99.0;
+        local.sanitize();
+        assert_eq!((local.clock_level, local.caption_secs), (CLOCK_LEVEL, 15.0));
     }
 
     #[test]

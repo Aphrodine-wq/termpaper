@@ -29,6 +29,8 @@ pub enum Shelf {
     Recent,
     /// a handful of scenes picked at random when the menu opens
     Surprise,
+    /// scenes put on the playlist with `p`, in order
+    Playlist,
     Category(Category),
     /// a Classic sub-group ("nature", "water", …), nested under Classic
     Group(&'static str),
@@ -40,6 +42,7 @@ impl Shelf {
             Shelf::Favorites => "★ Favorites",
             Shelf::Recent => "◷ Recent",
             Shelf::Surprise => "✦ Surprise",
+            Shelf::Playlist => "≡ Playlist",
             Shelf::Category(c) => c.label(),
             Shelf::Group(g) => g,
         }
@@ -68,7 +71,7 @@ pub const SURPRISE: usize = 8;
 /// that has scenes — Classic followed by its sub-groups. Empty categories
 /// are left out until scenes land in them.
 pub fn shelves() -> Vec<Shelf> {
-    let mut v = vec![Shelf::Favorites, Shelf::Recent, Shelf::Surprise];
+    let mut v = vec![Shelf::Favorites, Shelf::Recent, Shelf::Surprise, Shelf::Playlist];
     for c in Category::ALL {
         if !scene::entries().any(|e| e.category() == c) {
             continue;
@@ -98,6 +101,7 @@ pub fn shelf_scenes(shelf: Shelf, ctx: &MenuCtx) -> Vec<Entry> {
         Shelf::Favorites => named(&ctx.favorites),
         Shelf::Recent => named(&ctx.recents),
         Shelf::Surprise => Vec::new(),
+        Shelf::Playlist => named(&ctx.playlist),
         Shelf::Category(Category::Classic) => {
             let mut v: Vec<Entry> = classic().collect();
             v.sort_by_key(|e| group_rank(e.group()));
@@ -296,6 +300,11 @@ pub fn push_recent(recents: &mut Vec<String>, name: &str) {
     recents.truncate(RECENTS);
 }
 
+/// Put a scene on the playlist or take it off; true if it is on it now.
+pub fn toggle_playlist(playlist: &mut Vec<String>, name: &str) -> bool {
+    toggle_favorite(playlist, name)
+}
+
 /// Star or unstar a scene; true if it is now a favourite.
 pub fn toggle_favorite(favorites: &mut Vec<String>, name: &str) -> bool {
     if let Some(i) = favorites.iter().position(|n| n == name) {
@@ -317,6 +326,7 @@ pub fn cycle_next(
     current: usize,
     scope: CycleScope,
     favorites: &[String],
+    playlist: &[String],
     order: CycleOrder,
     pick: u64,
 ) -> usize {
@@ -343,9 +353,29 @@ pub fn cycle_next(
         let in_cat: Vec<usize> = (1..n).map(|step| (current + step) % n).filter(|&i| category(names[i]) == Some(cat)).collect();
         return in_cat[((pick / cats.len() as u64) % in_cat.len() as u64) as usize];
     }
+    if scope == CycleScope::Playlist && !playlist.is_empty() {
+        // the playlist's own order (or any other entry when shuffled)
+        let entries: Vec<usize> = playlist.iter().filter_map(|p| names.iter().position(|n| n == p)).collect();
+        if entries.is_empty() {
+            return current;
+        }
+        let at = entries.iter().position(|&i| i == current);
+        return match (order, at) {
+            (CycleOrder::InOrder, Some(k)) => entries[(k + 1) % entries.len()],
+            (CycleOrder::InOrder, None) => entries[0],
+            (CycleOrder::Shuffle, _) => {
+                let others: Vec<usize> = entries.iter().copied().filter(|&i| i != current).collect();
+                if others.is_empty() {
+                    current
+                } else {
+                    others[(pick % others.len() as u64) as usize]
+                }
+            }
+        };
+    }
     let here = category(names[current]);
     let in_scope = |name: &str| match scope {
-        CycleScope::All | CycleScope::Variants | CycleScope::Surprise => true,
+        CycleScope::All | CycleScope::Variants | CycleScope::Surprise | CycleScope::Playlist => true,
         CycleScope::Category => category(name) == here,
         CycleScope::Favorites => favorites.iter().any(|f| f == name),
         CycleScope::Studio => scene::lookup(name).is_some_and(|e| e.needs_gpu()),

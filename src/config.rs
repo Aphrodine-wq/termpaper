@@ -92,6 +92,10 @@ pub struct Config {
     /// scenes last switched to from the menu, newest first
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recents: Vec<String>,
+    /// scenes put on the playlist (`p` in the browser), in order; Cycle
+    /// through: playlist plays them
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub playlist: Vec<String>,
     /// per-scene remembered theme
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub themes: HashMap<String, String>,
@@ -273,13 +277,16 @@ pub enum CycleScope {
     Variants,
     /// a random category, then a random scene in it
     Surprise,
+    /// the scenes on the playlist, in its order
+    Playlist,
 }
 
 impl CycleScope {
-    pub const ALL: [CycleScope; 7] = [
+    pub const ALL: [CycleScope; 8] = [
         CycleScope::All,
         CycleScope::Category,
         CycleScope::Favorites,
+        CycleScope::Playlist,
         CycleScope::Studio,
         CycleScope::Classic,
         CycleScope::Variants,
@@ -295,6 +302,7 @@ impl CycleScope {
             CycleScope::Classic => "classic",
             CycleScope::Variants => "variants",
             CycleScope::Surprise => "surprise",
+            CycleScope::Playlist => "playlist",
         }
     }
 
@@ -308,6 +316,7 @@ impl CycleScope {
             "classic" => CycleScope::Classic,
             "variants" => CycleScope::Variants,
             "surprise" => CycleScope::Surprise,
+            "playlist" => CycleScope::Playlist,
             _ => CycleScope::All,
         }
     }
@@ -319,10 +328,12 @@ pub fn reset_stored_defaults(cfg: &mut Config, scene: &str) {
     let keys = std::mem::take(&mut cfg.keys);
     let favorites = std::mem::take(&mut cfg.favorites);
     let recents = std::mem::take(&mut cfg.recents);
+    let playlist = std::mem::take(&mut cfg.playlist);
     *cfg = Config::default();
     cfg.keys = keys;
     cfg.favorites = favorites;
     cfg.recents = recents;
+    cfg.playlist = playlist;
     cfg.scene = Some(scene.to_string());
 }
 

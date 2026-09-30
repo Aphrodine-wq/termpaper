@@ -190,11 +190,35 @@ fn surprise_cycle_moves_between_categories() {
     let cat = |i: usize| scene::lookup(names[i]).unwrap().category();
     let mut seen = std::collections::HashSet::new();
     for pick in 0..40u64 {
-        let next = browser::cycle_next(&names, cur, CycleScope::Surprise, &[], CycleOrder::Shuffle, pick);
+        let next = browser::cycle_next(&names, cur, CycleScope::Surprise, &[], &[], CycleOrder::Shuffle, pick);
         assert_ne!(next, cur, "never the scene showing");
         seen.insert(cat(next));
     }
     assert!(seen.len() >= 3, "surprise ranges over categories, saw {seen:?}");
+}
+
+#[test]
+fn playlist_cycles_in_its_own_order() {
+    let names = scene::all_names();
+    let at = |n: &str| names.iter().position(|x| *x == n).unwrap();
+    let list: Vec<String> = ["koi", "bigsur", "fire"].iter().map(|s| s.to_string()).collect();
+    // in order: koi -> bigsur -> fire -> koi; from outside the list, its first
+    assert_eq!(browser::cycle_next(&names, at("koi"), CycleScope::Playlist, &[], &list, CycleOrder::InOrder, 0), at("bigsur"));
+    assert_eq!(browser::cycle_next(&names, at("fire"), CycleScope::Playlist, &[], &list, CycleOrder::InOrder, 0), at("koi"));
+    assert_eq!(browser::cycle_next(&names, at("rain"), CycleScope::Playlist, &[], &list, CycleOrder::InOrder, 0), at("koi"));
+    // shuffled: another entry of the list, never the one showing
+    for pick in 0..20u64 {
+        let i = browser::cycle_next(&names, at("koi"), CycleScope::Playlist, &[], &list, CycleOrder::Shuffle, pick);
+        assert!(i == at("bigsur") || i == at("fire"));
+    }
+    // an empty playlist cycles through everything
+    assert_ne!(browser::cycle_next(&names, at("koi"), CycleScope::Playlist, &[], &[], CycleOrder::InOrder, 0), at("koi"));
+    // p toggles membership
+    let mut pl = Vec::new();
+    assert!(browser::toggle_playlist(&mut pl, "koi"));
+    assert!(!browser::toggle_playlist(&mut pl, "koi"));
+    assert!(pl.is_empty());
+    assert_eq!(browser::shelves()[3], Shelf::Playlist);
 }
 
 // ── search ──────────────────────────────────────────────────────────────
@@ -691,7 +715,7 @@ fn mid() -> MenuCtx {
         link_group: "wallpaper".into(),
         active_theme: Some("nord".into()),
         // the night rows only work with night dimming on
-        display: crate::prefs::DisplayPrefs { night: true, ..Default::default() },
+        display: crate::prefs::DisplayPrefs { night: true, caption: true, clock_level: 0.6, ..Default::default() },
         hypr: true,
         wall: crate::prefs::WallPrefs { pad: 6.0, bezel_mm: 4.0, ..Default::default() },
         // every look slider mid-range, so it can move both ways
@@ -761,7 +785,7 @@ fn every_setting_steps_both_ways() {
                         s.id
                     );
                     // a choice of two lands on the other either way
-                    let two_way = matches!(s.id, SettingId::Order | SettingId::Battery | SettingId::ClockSize | SettingId::Placement);
+                    let two_way = matches!(s.id, SettingId::Order | SettingId::Battery | SettingId::MenuSide | SettingId::Placement);
                     assert!(two_way || back != fwd, "{:?}: ← and → should differ", s.id);
                 }
                 Kind::Toggle => {
@@ -1142,37 +1166,37 @@ fn cycle_next_respects_scope() {
     let names = scene::all_names();
     let at = |n: &str| names.iter().position(|x| *x == n).unwrap();
     let favs = vec!["koi".to_string(), "fire".to_string()];
-    let i = browser::cycle_next(&names, at("rain"), CycleScope::All, &favs, CycleOrder::InOrder, 0);
+    let i = browser::cycle_next(&names, at("rain"), CycleScope::All, &favs, &[], CycleOrder::InOrder, 0);
     assert_eq!(i, (at("rain") + 1) % names.len());
     // favourites: only starred scenes, wrapping round
-    let a = browser::cycle_next(&names, at("rain"), CycleScope::Favorites, &favs, CycleOrder::InOrder, 0);
-    let b = browser::cycle_next(&names, a, CycleScope::Favorites, &favs, CycleOrder::InOrder, 0);
+    let a = browser::cycle_next(&names, at("rain"), CycleScope::Favorites, &favs, &[], CycleOrder::InOrder, 0);
+    let b = browser::cycle_next(&names, a, CycleScope::Favorites, &favs, &[], CycleOrder::InOrder, 0);
     let mut got = vec![names[a], names[b]];
     got.sort_unstable();
     assert_eq!(got, vec!["fire", "koi"]);
     // no favourites yet: every scene
-    let i = browser::cycle_next(&names, at("rain"), CycleScope::Favorites, &[], CycleOrder::InOrder, 0);
+    let i = browser::cycle_next(&names, at("rain"), CycleScope::Favorites, &[], &[], CycleOrder::InOrder, 0);
     assert_eq!(i, (at("rain") + 1) % names.len());
     // category: stays inside the current scene's category
-    let i = browser::cycle_next(&names, at("rain"), CycleScope::Category, &[], CycleOrder::InOrder, 0);
+    let i = browser::cycle_next(&names, at("rain"), CycleScope::Category, &[], &[], CycleOrder::InOrder, 0);
     assert_eq!(
         scene::lookup(names[i]).unwrap().category(),
         Category::Classic
     );
     // Studio and Classic scenes only, however it shuffles
     for pick in 0..40 {
-        let i = browser::cycle_next(&names, at("rain"), CycleScope::Studio, &[], CycleOrder::Shuffle, pick);
+        let i = browser::cycle_next(&names, at("rain"), CycleScope::Studio, &[], &[], CycleOrder::Shuffle, pick);
         assert!(scene::lookup(names[i]).unwrap().needs_gpu(), "{}", names[i]);
-        let j = browser::cycle_next(&names, at("hongkong"), CycleScope::Classic, &[], CycleOrder::Shuffle, pick);
+        let j = browser::cycle_next(&names, at("hongkong"), CycleScope::Classic, &[], &[], CycleOrder::Shuffle, pick);
         assert!(!scene::lookup(names[j]).unwrap().needs_gpu(), "{}", names[j]);
-        assert_ne!(browser::cycle_next(&names, at("rain"), CycleScope::All, &[], CycleOrder::Shuffle, pick), at("rain"));
+        assert_ne!(browser::cycle_next(&names, at("rain"), CycleScope::All, &[], &[], CycleOrder::Shuffle, pick), at("rain"));
     }
     // shuffle reaches everything in scope
     let seen: std::collections::HashSet<usize> =
-        (0..200).map(|p| browser::cycle_next(&names, at("rain"), CycleScope::Favorites, &favs, CycleOrder::Shuffle, p)).collect();
+        (0..200).map(|p| browser::cycle_next(&names, at("rain"), CycleScope::Favorites, &favs, &[], CycleOrder::Shuffle, p)).collect();
     assert_eq!(seen.len(), 2);
     // variants: the scene stays, its variants take turns
-    assert_eq!(browser::cycle_next(&names, at("rain"), CycleScope::Variants, &[], CycleOrder::Shuffle, 7), at("rain"));
+    assert_eq!(browser::cycle_next(&names, at("rain"), CycleScope::Variants, &[], &[], CycleOrder::Shuffle, 7), at("rain"));
     let v = scene::themes("rain");
     assert_eq!(browser::cycle_variant(v, None, CycleOrder::InOrder, 0), Some(v[1]));
     assert_eq!(browser::cycle_variant(v, Some(v[v.len() - 1]), CycleOrder::InOrder, 0), Some(v[0]));
@@ -1293,15 +1317,17 @@ fn layout_degrades_sanely() {
 #[test]
 fn drawer_leaves_the_scene_visible() {
     use ratatui::layout::Rect;
-    let r = view::drawer_rect(Rect::new(0, 0, 200, 60));
+    let r = view::drawer_rect(Rect::new(0, 0, 200, 60), crate::prefs::Side::Left);
+    let right = view::drawer_rect(Rect::new(0, 0, 200, 60), crate::prefs::Side::Right);
+    assert_eq!((right.width, right.x + right.width), (r.width, 200), "the right-hand drawer hugs the right edge");
     assert_eq!(r.width, 92, "46% of the width");
     assert_eq!(
-        view::drawer_rect(Rect::new(0, 0, 80, 24)).width,
+        view::drawer_rect(Rect::new(0, 0, 80, 24), crate::prefs::Side::Left).width,
         44,
         "never under 44"
     );
     assert_eq!(
-        view::drawer_rect(Rect::new(0, 0, 60, 24)).width,
+        view::drawer_rect(Rect::new(0, 0, 60, 24), crate::prefs::Side::Left).width,
         60,
         "full width when narrow"
     );

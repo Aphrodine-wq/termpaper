@@ -352,6 +352,26 @@ fn transition_mask(x: i32, y: i32) -> f32 {
             let s = i32(P.flags.w);
             t = (f32(((y % s) + s) % s) + 0.5) * P.fp2.x;
         }
+        case 5u: {
+            let u = (f32(x) + 0.5) * P.fp2.x;
+            let v = (f32(y) + 0.5) * (0.5 / max(P.fp2.w, 0.5));
+            let d = 0.5 * (u + v);
+            t = select(1.0 - d, d, P.flags.z != 0u);
+        }
+        case 6u: {
+            let s = i32(P.flags.w);
+            let tx = (x - (((x % s) + s) % s)) / s;
+            let ty = (y - (((y % s) + s) % s)) / s;
+            let tile = f32(mask_hash(bitcast<u32>(tx), bitcast<u32>(ty)) >> 8u) * (1.0 / 16777216.0);
+            let within = (f32(((x % s) + s) % s) + 0.5) / f32(s);
+            t = tile * 0.85 + within * 0.15;
+        }
+        case 7u: {
+            let dx = f32(x) + 0.5 - P.fp2.z;
+            let dy = f32(y) + 0.5 - P.fp2.w;
+            let a = atan2(dx, -dy);
+            t = (a + 3.14159265) / 6.28318531;
+        }
         default: {
             return 1.0;
         }

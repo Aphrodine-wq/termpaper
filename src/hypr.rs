@@ -306,3 +306,55 @@ mod tests {
         assert!(window_for(&c, &[7]).is_none());
     }
 }
+
+/// Poll coverage off the frame loop: compositor IPC can take hundreds of ms.
+pub struct FullscreenWatcher(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl FullscreenWatcher {
+    pub fn spawn() -> Self {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        let state = Arc::new(AtomicBool::new(false));
+        let slot = Arc::clone(&state);
+        let chain = ancestors(std::process::id());
+        let _ = std::thread::Builder::new().name("termpaper-cover".into()).spawn(move || loop {
+            let covered = clients().and_then(|list| {
+                let own = window_for(&list, &chain)?;
+                let active = active_window()?;
+                Some(covers_window(own, &active))
+            }).unwrap_or(false);
+            slot.store(covered, Ordering::Relaxed);
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        });
+        Self(state)
+    }
+
+    pub fn covered(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+fn covers_window(own: &HyprClient, active: &HyprClient) -> bool {
+    active.fullscreen == 2 && active.mapped && !active.hidden
+        && active.pid != own.pid && active.monitor == own.monitor
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    #[test]
+    fn only_another_fullscreen_window_on_our_monitor_covers_us() {
+        let own: HyprClient = serde_json::from_str(r#"{"pid":1,"at":[0,0],"size":[100,100],"monitor":0}"#).unwrap();
+        let mut other = own.clone();
+        other.pid = 2;
+        other.fullscreen = 2;
+        assert!(covers_window(&own, &other));
+        other.monitor = 1;
+        assert!(!covers_window(&own, &other));
+        other.monitor = 0;
+        other.fullscreen = 1;
+        assert!(!covers_window(&own, &other));
+        other.fullscreen = 2;
+        other.pid = own.pid;
+        assert!(!covers_window(&own, &other));
+    }
+}

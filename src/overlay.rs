@@ -57,14 +57,48 @@ fn grey(level: f32) -> Color {
     Color::Rgb(g, g, g.saturating_add(10))
 }
 
-/// Small text in a corner, dim grey scaled by `brightness`.
-pub fn draw_text(buf: &mut Buffer, area: Rect, text: &str, corner: Corner, brightness: f32) {
+/// A colour scaled by `level` (0 black .. 1 the colour).
+fn tint(c: (u8, u8, u8), level: f32) -> Color {
+    let k = level.clamp(0.0, 1.0);
+    Color::Rgb((c.0 as f32 * k) as u8, (c.1 as f32 * k) as u8, (c.2 as f32 * k) as u8)
+}
+
+/// The corner across from `c` (the battery meter sits opposite the clock).
+pub fn opposite(c: Corner) -> Corner {
+    match c {
+        Corner::TopRight => Corner::TopLeft,
+        Corner::TopLeft => Corner::TopRight,
+        Corner::BottomRight => Corner::BottomLeft,
+        Corner::BottomLeft => Corner::BottomRight,
+        Corner::Center => Corner::BottomRight,
+    }
+}
+
+/// Small text in a corner, in `color` scaled by `brightness`.
+pub fn draw_text(buf: &mut Buffer, area: Rect, text: &str, corner: Corner, brightness: f32, color: (u8, u8, u8)) {
     let w = text.chars().count() as u16;
-    if w == 0 || area.width == 0 || area.height == 0 || brightness * 0.36 < 0.03 {
+    if w == 0 || area.width == 0 || area.height == 0 || brightness < 0.05 {
         return;
     }
     let r = place(area, w, 1, corner);
-    buf.set_stringn(r.x, r.y, text, r.width as usize, Style::new().fg(grey(0.36 * brightness)));
+    buf.set_stringn(r.x, r.y, text, r.width as usize, Style::new().fg(tint(color, brightness)));
+}
+
+/// The battery's charge as a small bar and a percentage: `▮▮▮▮▯▯▯▯ 48%`,
+/// with a bolt while charging.
+pub fn draw_meter(buf: &mut Buffer, area: Rect, percent: u8, charging: bool, corner: Corner, brightness: f32, color: (u8, u8, u8)) {
+    let pct = percent.min(100);
+    let full = (pct as usize + 6) / 12; // 0..=8 cells
+    let mut s = String::new();
+    for i in 0..8 {
+        s.push(if i < full { '▮' } else { '▯' });
+    }
+    s.push_str(&format!(" {pct}%"));
+    if charging {
+        s.push_str(" ⚡");
+    }
+    let c = if pct <= 15 && !charging { (236, 110, 100) } else { color };
+    draw_text(buf, area, &s, corner, brightness, c);
 }
 
 /// 3×5 digits for the large clock, a row per string, `#` lit.
@@ -104,19 +138,30 @@ pub fn large_size(text: &str) -> (u16, u16) {
     (w.saturating_sub(2) as u16, 5)
 }
 
-/// Large digits that lighten the scene under them: frosted glass, legible
-/// on any picture. Only digits, colons and spaces are drawn (12-hour and
-/// date suffixes go small, under the digits).
-pub fn draw_large(buf: &mut Buffer, area: Rect, text: &str, corner: Corner, brightness: f32) {
+/// Edge of the glyph at twice its native resolution, for thin outlines.
+fn on_edge(g: &[&str; 5], row: usize, col: usize) -> bool {
+    let lit = |r: isize, c: isize| {
+        r >= 0 && c >= 0 && (r as usize) < 10 && (c as usize) < g[0].len() * 2
+            && g[r as usize / 2].as_bytes()[c as usize / 2] == b'#'
+    };
+    let (r, c) = (row as isize, col as isize);
+    lit(r, c) && !(lit(r - 1, c) && lit(r + 1, c) && lit(r, c - 1) && lit(r, c + 1))
+}
+
+/// Large digits: frosted (they lighten the scene under them), solid blocks
+/// in the clock's colour, or outlines. Only digits, colons and spaces are
+/// drawn large (12-hour and date suffixes go small, under the digits).
+pub fn draw_large(buf: &mut Buffer, area: Rect, text: &str, corner: Corner, brightness: f32, style: ClockStyle, color: (u8, u8, u8)) {
     let digits: String = text.chars().take_while(|c| glyph(*c).is_some()).collect();
     let digits = digits.trim_end();
     let rest = text[digits.len()..].trim();
     let (w, h) = large_size(digits);
     if w == 0 || area.width < w || area.height < h + 1 {
-        return draw_text(buf, area, text, corner, brightness);
+        return draw_text(buf, area, text, corner, brightness, color);
     }
     let r = place(area, w, h + u16::from(!rest.is_empty()), corner);
     let k = 0.42 * brightness.clamp(0.0, 1.0);
+    let solid = tint(color, brightness);
     let mut x = r.x;
     for c in digits.chars() {
         let Some(g) = glyph(c) else {
@@ -130,8 +175,22 @@ pub fn draw_large(buf: &mut Buffer, area: Rect, text: &str, corner: Corner, brig
                 for dx in 0..2 {
                     let (cx, cy) = (x + col as u16 * 2 + dx, r.y + row as u16);
                     if let Some(cell) = buf.cell_mut((cx, cy)) {
-                        cell.fg = lighten(cell.fg, k);
-                        cell.bg = lighten(cell.bg, k);
+                        if style == ClockStyle::Solid {
+                            cell.set_symbol(" ");
+                            cell.set_bg(solid);
+                            cell.set_fg(solid);
+                        } else if style == ClockStyle::Outline {
+                            let top = on_edge(&g, row * 2, col * 2 + dx as usize);
+                            let bottom = on_edge(&g, row * 2 + 1, col * 2 + dx as usize);
+                            let symbol = match (top, bottom) {
+                                (true, true) => "█", (true, false) => "▀",
+                                (false, true) => "▄", (false, false) => continue,
+                            };
+                            cell.set_symbol(symbol).set_fg(solid);
+                        } else {
+                            cell.fg = lighten(cell.fg, k);
+                            cell.bg = lighten(cell.bg, k);
+                        }
                     }
                 }
             }
@@ -141,29 +200,31 @@ pub fn draw_large(buf: &mut Buffer, area: Rect, text: &str, corner: Corner, brig
     if !rest.is_empty() {
         let tr = Rect::new(r.x, r.y + h, r.width, 1);
         let x = tr.x + tr.width.saturating_sub(rest.chars().count() as u16);
-        buf.set_stringn(x, tr.y, rest, tr.width as usize, Style::new().fg(grey(0.5 * brightness)));
+        buf.set_stringn(x, tr.y, rest, tr.width as usize, Style::new().fg(tint(color, 0.9 * brightness)));
     }
 }
 
-/// The clock in its style.
-pub fn draw_clock(buf: &mut Buffer, area: Rect, text: &str, style: ClockStyle, corner: Corner, brightness: f32) {
+/// The clock in its style and colour.
+pub fn draw_clock(buf: &mut Buffer, area: Rect, text: &str, style: ClockStyle, corner: Corner, brightness: f32, color: (u8, u8, u8)) {
     match style {
-        ClockStyle::Small => draw_text(buf, area, text, corner, brightness),
-        ClockStyle::Large => draw_large(buf, area, text, corner, brightness),
+        ClockStyle::Small => draw_text(buf, area, text, corner, brightness, color),
+        _ => draw_large(buf, area, text, corner, brightness, style, color),
     }
 }
 
 /// How visible the scene caption is `age` seconds after a switch: in over
-/// half a second, held, out by four.
-pub fn caption_alpha(age: f32) -> f32 {
-    if !(0.0..4.0).contains(&age) {
+/// half a second, held, out over the last second of `total`.
+pub fn caption_alpha(age: f32, total: f32) -> f32 {
+    let total = total.max(1.0);
+    let fade_out = (total - 0.5).min(1.0);
+    if !(0.0..total).contains(&age) {
         0.0
     } else if age < 0.5 {
         age / 0.5
-    } else if age < 3.0 {
+    } else if age < total - fade_out {
         1.0
     } else {
-        4.0 - age
+        (total - age) / fade_out
     }
 }
 
@@ -248,7 +309,7 @@ mod tests {
                 buf[(x, y)].set_symbol("▀").set_fg(Color::Rgb(20, 40, 60)).set_bg(Color::Rgb(20, 40, 60));
             }
         }
-        draw_large(&mut buf, area, "12:30 pm", Corner::TopLeft, 1.0);
+        draw_large(&mut buf, area, "12:30 pm", Corner::TopLeft, 1.0, ClockStyle::Large, (92, 92, 102));
         let lit = (0..12).flat_map(|y| (0..60).map(move |x| (x, y))).filter(|&(x, y)| buf[(x, y)].fg != Color::Rgb(20, 40, 60)).count();
         assert!(lit > 40, "{lit}");
         // the suffix goes small under the digits
@@ -258,18 +319,49 @@ mod tests {
         // too small for digits: the plain text instead
         let tiny = Rect::new(0, 0, 10, 3);
         let mut b = Buffer::empty(tiny);
-        draw_large(&mut b, tiny, "12:30", Corner::TopLeft, 1.0);
+        draw_large(&mut b, tiny, "12:30", Corner::TopLeft, 1.0, ClockStyle::Large, (92, 92, 102));
         let row: String = (0..10).map(|x| b[(x, 0)].symbol().to_string()).collect();
         assert!(row.contains("12:30"), "{row}");
+        // solid digits paint their colour; outlines touch fewer cells than blocks
+        let mut solid = Buffer::empty(area);
+        draw_large(&mut solid, area, "12:30", Corner::TopLeft, 1.0, ClockStyle::Solid, (200, 100, 50));
+        let painted = (0..60).filter(|&x| solid[(x, 0)].bg == Color::Rgb(200, 100, 50)).count();
+        assert!(painted > 10, "{painted}");
+        let count = |st: ClockStyle| {
+            let mut b = Buffer::empty(area);
+            for y in 0..12 {
+                for x in 0..60 {
+                    b[(x, y)].set_symbol("▀").set_fg(Color::Rgb(20, 40, 60)).set_bg(Color::Rgb(20, 40, 60));
+                }
+            }
+            draw_large(&mut b, area, "88:88", Corner::TopLeft, 1.0, st, (92, 92, 102));
+            (0..12).flat_map(|y| (0..60).map(move |x| (x, y))).map(|(x, y)| {
+                let cell = &b[(x, y)];
+                if cell.fg == Color::Rgb(20, 40, 60) { 0 }
+                else if st == ClockStyle::Outline && cell.symbol() != "█" { 1 } else { 2 }
+            }).sum::<usize>()
+        };
+        assert!(count(ClockStyle::Outline) < count(ClockStyle::Large));
+        // the battery meter
+        let mut m = Buffer::empty(area);
+        draw_meter(&mut m, area, 48, false, Corner::BottomLeft, 1.0, (92, 92, 102));
+        let row: String = (0..60).map(|x| m[(x, 11)].symbol().to_string()).collect();
+        assert!(row.contains("▮▮▮▮▯▯▯▯ 48%"), "{row}");
+        assert_eq!(opposite(Corner::TopRight), Corner::TopLeft);
     }
 
     #[test]
     fn caption_fades_in_holds_and_out() {
-        assert_eq!(caption_alpha(-1.0), 0.0);
-        assert!((caption_alpha(0.25) - 0.5).abs() < 1e-6);
-        assert_eq!(caption_alpha(2.0), 1.0);
-        assert!((caption_alpha(3.5) - 0.5).abs() < 1e-6);
-        assert_eq!(caption_alpha(4.5), 0.0);
+        assert_eq!(caption_alpha(-1.0, 4.0), 0.0);
+        assert!((caption_alpha(0.25, 4.0) - 0.5).abs() < 1e-6);
+        assert_eq!(caption_alpha(2.0, 4.0), 1.0);
+        assert!((caption_alpha(3.5, 4.0) - 0.5).abs() < 1e-6);
+        assert_eq!(caption_alpha(4.5, 4.0), 0.0);
+        assert_eq!(caption_alpha(1.0, 1.0), 0.0);
+        assert_eq!(caption_alpha(0.5, 1.0), 1.0);
+        // a longer stay holds longer and fades out over its last second
+        assert_eq!(caption_alpha(7.0, 10.0), 1.0);
+        assert!((caption_alpha(9.5, 10.0) - 0.5).abs() < 1e-6);
         assert_eq!(rate(2_500_000.0), "2.5 MB/s");
         assert_eq!(rate(1234.0), "1 kB/s");
     }

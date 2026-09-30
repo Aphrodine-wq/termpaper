@@ -3,9 +3,8 @@
 **Wallpaper Engine for the terminal.** Real places, rendered live on your GPU —
 Big Sur at sunset, a Shinjuku alley in the rain, the aurora over Tromsø, a
 ramen stall under paper lanterns, a black hole bending its own light — in
-the terminal you already use, on **Linux, macOS and Windows**. **50 Studio
-scenes** are ray-marched, physically lit WGSL shaders with 3–4 time-of-day
-and weather variants each; the **51 Classic** hand-animated CPU scenes are
+the terminal you already use, on **Linux, macOS and Windows**. **62 Studio
+scenes** are GPU-rendered places, aerial views and games with 3–4 variants each; the **51 Classic** hand-animated CPU scenes are
 still here. Give any of them a **theme** — a colour grade, a palette and a
 few effects in one small file — pick from 34, make your own, or install one
 someone shared. Run one terminal per monitor and they become **one
@@ -28,6 +27,26 @@ termpaper theme browse               # themes people shared
 termpaper                            # press ? — browse, preview, tune
 ```
 
+## New in 0.3 (local preview)
+
+113 scenes: 62 Studio and all 51 Classic originals. The new **Drone & Aerial**
+category has Coastline, Rice Terraces, Canyon Flight, Braided River, Atoll and
+City Grid. **Video Games** adds Voxel Valley, Outrun Highway, Arcade Hall,
+Pong, Snake and Falling Blocks.
+
+- **Fullscreen** is on by default; `F` toggles it and `--no-fullscreen` leaves
+  the window as it is. The previous window state is restored on quit.
+- **Tune** adjusts each supported scene's own controls; **Keys** remaps actions.
+- Press `r` for a random scene, or use `termpaper random --category games`.
+  The Surprise shelf offers fresh picks each time the menu opens.
+- Press `p` over a scene to add/remove it from **Playlist**. Set Playback →
+  Cycle through to the playlist to play it in order or shuffled.
+- Display adds menu accent, drawer side and glass, clock styles and colours,
+  clock brightness, caption duration and a laptop battery meter.
+- **Pause behind apps** holds the picture under another fullscreen window on
+  the same monitor (Hyprland). Diagonal, checker and clock-sweep transitions
+  join the existing styles; Random chooses among them.
+
 ## Studio scenes
 
 Each Studio scene is one stateless WGSL shader: every pixel is a pure function
@@ -41,7 +60,7 @@ cost the terminal as little bandwidth as possible.
 <!-- studio-catalog:begin -->
 **Coast & Water** (8)
 
-| scene | | themes |
+| scene | | variants |
 |---|---|---|
 | `bigsur` | Big Sur Coast — headlands of the Big Sur coast dropping into Pacific swells as marine fog rolls in | sunset · fog · noon · moonlight |
 | `harbor` | Fishing Harbor at Dawn — lobster boats riding at their moorings in a misty cove of fish shacks and a wooden pier | dawn · dusk · night |
@@ -54,7 +73,7 @@ cost the terminal as little bandwidth as possible.
 
 **Mountains & Wild** (11)
 
-| scene | | themes |
+| scene | | variants |
 |---|---|---|
 | `autumn` | Maple Lake — red and gold maples around a still lake, mist on the water, leaves drifting down | morning · golden · rain |
 | `bamboo` | Arashiyama Bamboo — the path through Kyoto's bamboo grove, tall culms swaying and meeting overhead | day · rain · lantern |
@@ -70,7 +89,7 @@ cost the terminal as little bandwidth as possible.
 
 **Weather & Sky** (7)
 
-| scene | | themes |
+| scene | | variants |
 |---|---|---|
 | `cloudsea` | Above the Cloud Sea — sunrise from a rocky summit over a sea of cloud, far peaks standing out like islands | sunrise · sunset · moon |
 | `eclipse` | Total Solar Eclipse — totality over open country: the corona, the diamond ring, a sunset on every horizon | totality · desert · mountain |
@@ -82,7 +101,7 @@ cost the terminal as little bandwidth as possible.
 
 **Cities & Streets** (10)
 
-| scene | | themes |
+| scene | | variants |
 |---|---|---|
 | `freeway` | LA Freeway Timelapse — long-exposure light trails on a curving LA freeway, downtown towers glowing in the haze | dusk · night · rain |
 | `havana` | Havana Malecón — waves bursting over Havana's seawall at sunset, 1950s cars under faded colonial arcades | sunset · day · storm |
@@ -97,7 +116,7 @@ cost the terminal as little bandwidth as possible.
 
 **Cozy & Interiors** (7)
 
-| scene | | themes |
+| scene | | variants |
 |---|---|---|
 | `cafe` | Coffee Shop Window — a steaming cup at a cafe window, the rainy street outside melting into bokeh | rain · snow · morning |
 | `fireplace` | Cabin Fireplace — a crackling fire in a fieldstone hearth, snow falling past the cabin window | snow · rain · autumn |
@@ -109,7 +128,7 @@ cost the terminal as little bandwidth as possible.
 
 **Space** (7)
 
-| scene | | themes |
+| scene | | variants |
 |---|---|---|
 | `blackhole` | Black Hole — a black hole's accretion disk bent around its shadow, one side Doppler-bright | amber · blue · edge-on |
 | `earthrise` | Earthrise — the Earth hanging over the lunar horizon, craters stretching long shadows below | apollo · crescent · eclipse |
@@ -119,6 +138,27 @@ cost the terminal as little bandwidth as possible.
 | `saturn` | Cassini at Saturn — Saturn and its rings from Cassini: ring shadows on the clouds, a moon on its orbit | sunlit · backlit · equinox |
 | `tromso` | Aurora over Tromsø — green aurora curtains rippling over a snowy Norwegian fjord and its village lights | green · vivid · faint |
 
+**Drone & Aerial** (6)
+
+| scene | | variants |
+|---|---|---|
+| `atoll` | Atoll from Above — a coral atoll from high above: surf on the ring reef, turquoise lagoon, palm islets | noon · sunset · storm |
+| `braided` | Braided River — straight down at a glacial river braiding over black sand, milky channels split and rejoin | day · dusk · winter |
+| `canyonfly` | Canyon Flight — a slow drone flight up a sandstone canyon, the river winding below, one wall in sun | noon · sunset · dawn |
+| `coastline` | Drone over the Shore — a drone hanging over a beach, lines of surf rolling onto the sand from above | golden · noon · storm |
+| `metrogrid` | City Grid at Night — straight down on a city at night: dark blocks, lamp-dotted streets, a river, headlights | night · rain · dusk |
+| `terraces` | Rice Terraces — a drone over stepped rice terraces, each paddy a mirror of the sky, mist in the valley | dawn · green · mist |
+
+**Video Games** (6)
+
+| scene | | variants |
+|---|---|---|
+| `arcade` | Arcade Hall — a dark arcade hall, cabinets in attract mode under neon marquees on a starry carpet | night · neon · closing |
+| `outrun` | Outrun Highway — a pseudo-3D arcade highway curving into a striped sunset, palms whipping past | sunset · night · neon |
+| `pong` | Pong — two paddles that never miss, a square ball, a dashed net and a score that keeps climbing | classic · neon · crt |
+| `snake` | Snake — a snake that mows the board row by row, eating as it grows, on a glowing grid | classic · neon · handheld |
+| `stackfall` | Falling Blocks — blocks fall into a well and stack up, rows flash and clear, and it starts again | classic · pastel · mono |
+| `voxelvalley` | Voxel Valley — a blocky voxel valley: cube terrain, square trees, a flat lake, a square sun over it all | day · sunset · night · snow |
 <!-- studio-catalog:end -->
 
 No GPU? Studio scenes fall back to a related Classic scene, and linked

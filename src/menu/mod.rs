@@ -289,6 +289,8 @@ pub enum Effect {
         theme: String,
     },
     ToggleFavorite(&'static str),
+    /// put a scene on the playlist, or take it off (`p` in the browser)
+    TogglePlaylist(&'static str),
     SetPixels(Pixels),
     SetDetail(Detail),
     SetTheme(Option<String>),
@@ -428,6 +430,8 @@ pub struct MenuCtx {
     pub favorites: Vec<String>,
     /// newest first
     pub recents: Vec<String>,
+    /// the playlist, in order
+    pub playlist: Vec<String>,
     /// remembered per-scene themes (`[themes]`)
     pub scene_themes: HashMap<String, String>,
     /// (action, key) for every rebindable action
@@ -1195,6 +1199,11 @@ impl Menu {
             Input::Char('f') if on_scenes => {
                 if let Some(e) = self.browser.highlighted(ctx) {
                     return vec![Effect::ToggleFavorite(e.name())];
+                }
+            }
+            Input::Char('p') if on_scenes => {
+                if let Some(e) = self.browser.highlighted(ctx) {
+                    return vec![Effect::TogglePlaylist(e.name())];
                 }
             }
             Input::Char('t') if on_scenes => return self.cycle_theme(ctx),

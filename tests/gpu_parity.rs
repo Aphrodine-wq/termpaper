@@ -206,13 +206,22 @@ fn transition_masks_match_the_cpu() {
     if worst > 0 {
         failures.push(format!("plain dim: worst Δ {worst}"));
     }
-    for style in [TransitionStyle::Dissolve, TransitionStyle::Wipe, TransitionStyle::Iris, TransitionStyle::Blinds] {
+    for style in [
+        TransitionStyle::Dissolve,
+        TransitionStyle::Wipe,
+        TransitionStyle::Iris,
+        TransitionStyle::Blinds,
+        TransitionStyle::Diagonal,
+        TransitionStyle::Checker,
+        TransitionStyle::Clock,
+    ] {
         for (level, arriving) in [(0.3f32, false), (0.7, true), (0.02, true)] {
             let mask = Mask::new(style, level, arriving, cols as u32, (rows * 2) as u32);
             let (worst, share) = compare_dim(&mut gpu, &c, &Look::default(), 0.9, mask);
             eprintln!("{style:?} @{level} {:<8} worst Δ {worst:>3}   differing {:>6.2}%", if arriving { "in" } else { "out" }, share * 100.0);
             // the iris edge rides on sqrt, which WGSL need not round exactly
-            let allowed = if style == TransitionStyle::Iris { 1 } else { 0 };
+            // a square root or an arc tangent may land a level apart
+            let allowed = if matches!(style, TransitionStyle::Iris | TransitionStyle::Clock) { 1 } else { 0 };
             if worst > allowed {
                 failures.push(format!("{style:?} @{level}: worst Δ {worst} > {allowed}"));
             }

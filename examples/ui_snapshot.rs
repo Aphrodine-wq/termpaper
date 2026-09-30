@@ -482,7 +482,7 @@ fn main() {
         let mut term = Terminal::new(TestBackend::new(cols, rows)).unwrap();
         term.draw(|f| {
             render::draw(&canvas, f.area(), f.buffer_mut(), true, Pixels::Half);
-            termpaper::studio::render(f, f.area(), s, &studio_look, true, 2.0);
+            termpaper::studio::render(f, f.area(), s, &studio_look, true, 2.0, termpaper::prefs::Accent::Blue, termpaper::prefs::Side::Left);
         })
         .unwrap();
         let mut p = Painter {
