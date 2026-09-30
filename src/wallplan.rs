@@ -329,7 +329,7 @@ mod tests {
     }
 
     fn client(pid: i64, x: i32, w: i32, h: i32, monitor: i64) -> HyprClient {
-        HyprClient { pid, at: [x, 0], size: [w, h], monitor, class: "kitty".into(), mapped: true, hidden: false }
+        HyprClient { address: String::new(), pid, at: [x, 0], size: [w, h], monitor, class: "kitty".into(), mapped: true, hidden: false, fullscreen: 0 }
     }
 
     fn pane(pid: u32, cols: u16, rows: u16, cell: (u16, u16)) -> PaneGeom {

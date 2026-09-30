@@ -10,6 +10,7 @@ pub mod config;
 pub mod desk;
 pub mod engine;
 pub mod filter;
+pub mod fullscreen;
 pub mod gallery;
 pub mod governor;
 pub mod hypr;

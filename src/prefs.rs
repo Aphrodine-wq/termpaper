@@ -338,6 +338,9 @@ pub struct DisplayPrefs {
     /// frame-rate cap while a Studio scene shows
     #[serde(skip_serializing_if = "is_studio_fps")]
     pub studio_fps: u32,
+    /// ask the terminal window to fill the screen while termpaper runs
+    #[serde(skip_serializing_if = "is_true")]
+    pub fullscreen: bool,
 }
 
 pub const STUDIO_BUDGET_MS: f32 = 3.0;
@@ -389,6 +392,7 @@ impl Default for DisplayPrefs {
             night_level: NIGHT_LEVEL,
             studio_budget_ms: STUDIO_BUDGET_MS,
             studio_fps: STUDIO_FPS,
+            fullscreen: true,
         }
     }
 }
@@ -538,6 +542,11 @@ mod tests {
         assert!(!d.mouse && d.adapt_fps);
         let text = toml::to_string(&d).unwrap();
         assert!(text.contains("mouse = false") && !text.contains("adapt_fps"), "{text}");
+        // fullscreen is on unless the file says otherwise, and only "off" is written
+        assert!(d.fullscreen && !text.contains("fullscreen"));
+        let off: DisplayPrefs = toml::from_str("fullscreen = false").unwrap();
+        assert!(!off.fullscreen);
+        assert!(toml::to_string(&off).unwrap().contains("fullscreen = false"));
     }
 
     #[test]

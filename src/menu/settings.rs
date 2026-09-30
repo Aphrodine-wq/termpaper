@@ -51,6 +51,7 @@ pub enum SettingId {
     Fade,
     ResetPlayback,
     // Display
+    Fullscreen,
     Colors,
     Pixels,
     Quality,
@@ -173,6 +174,7 @@ pub const PLAYBACK: &[Setting] = &[
 
 #[rustfmt::skip]
 pub const DISPLAY: &[Setting] = &[
+    row(S::Fullscreen, "Fullscreen", Toggle, "Fill the screen with the terminal window while termpaper runs; F toggles it. Put back when you quit."),
     row(S::Colors, "Colours", Choice, "24-bit colour, or 256 colours for terminals that cannot show more. Auto asks the terminal."),
     row(S::Pixels, "Pixels", Choice, "How each cell splits into pixels: half blocks, quadrants, braille, sextants, text shading, or solid blocks."),
     row(S::Quality, "Quality", Choice, "Particle and layer density; lower it on laptops. Also d."),
@@ -237,7 +239,7 @@ pub fn sections(p: Page) -> &'static [(usize, &'static str)] {
     match p {
         Page::Look => &[(0, "Presets"), (2, "Colour"), (11, "Palette"), (14, "Effects"), (19, "Light & text")],
         Page::Playback => &[(0, "Scenes"), (6, "Transitions")],
-        Page::Display => &[(0, "Picture"), (5, "Speed & power"), (14, "On screen"), (21, "Night"), (25, "Terminal")],
+        Page::Display => &[(0, "Picture"), (6, "Speed & power"), (15, "On screen"), (22, "Night"), (26, "Terminal")],
         Page::Wall => &[(0, "Linking"), (4, "Layout"), (10, "The wall")],
         _ => &[],
     }
@@ -581,6 +583,7 @@ pub fn enabled(id: SettingId, ctx: &MenuCtx) -> bool {
         S::NightFrom | S::NightTo | S::NightLevel => ctx.display.night,
         S::Order => ctx.cycle.is_some(),
         S::Gpu | S::StudioBudget | S::StudioFps => cfg!(feature = "gpu"),
+        S::Fullscreen => ctx.fullscreen_available,
         _ => true,
     }
 }
@@ -654,6 +657,8 @@ pub fn value(id: SettingId, ctx: &MenuCtx) -> String {
         S::OnLaunch => ctx.playback.on_launch.label().into(),
         S::Transition => ctx.playback.transition.label().into(),
         S::Fade => format!("{} s", short(ctx.fade)),
+        S::Fullscreen if !ctx.fullscreen_available => "not available here".into(),
+        S::Fullscreen => ctx.fullscreen_status.clone(),
         S::Colors if ctx.display.colors == crate::prefs::Colors::Auto => {
             format!("auto ({})", if ctx.term_truecolor { "24-bit" } else { "256" })
         }
@@ -783,6 +788,7 @@ pub fn step(id: SettingId, ctx: &MenuCtx, dir: i32) -> Option<Effect> {
         S::TimeOfDay => with_playback(ctx, |p| p.time_of_day = !p.time_of_day),
         S::OnLaunch => with_playback(ctx, |p| p.on_launch = step_in(crate::prefs::OnLaunch::ALL, p.on_launch, dir)),
         S::Transition => with_playback(ctx, |p| p.transition = step_in(crate::prefs::TransitionStyle::ALL, p.transition, dir)),
+        S::Fullscreen => with_display(ctx, |d| d.fullscreen = !d.fullscreen),
         S::Colors => with_display(ctx, |d| d.colors = step_in(crate::prefs::Colors::ALL, d.colors, dir)),
         S::CellShape => with_display(ctx, |d| {
             // auto, then the shapes

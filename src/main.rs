@@ -67,6 +67,15 @@ struct Args {
     #[arg(long, help_heading = "Look")]
     no_truecolor: bool,
 
+    /// Fill the screen with the terminal window while termpaper runs (the
+    /// default; Display → Fullscreen remembers your choice)
+    #[arg(long, overrides_with = "no_fullscreen", help_heading = "Look")]
+    fullscreen: bool,
+
+    /// Leave the terminal window as it is
+    #[arg(long, help_heading = "Look")]
+    no_fullscreen: bool,
+
     /// Target frames per second
     #[arg(long, help_heading = "Performance")]
     fps: Option<u32>,
@@ -1030,7 +1039,7 @@ fn main() -> std::io::Result<()> {
         // layout px: Hyprland geometry is logical, and so are points
         .map(|p| p.to_px(1.0))
         .unwrap_or((0.0, 0.0));
-    let settings = Settings {
+    let mut settings = Settings {
         link_enabled,
         link_group,
         wall_spec: if args.no_wall { None } else { args.wall.clone().or_else(|| cfg.wall_grid.clone()) },
@@ -1079,12 +1088,23 @@ fn main() -> std::io::Result<()> {
         first_run: !config::config_path().is_some_and(|p| p.exists()),
         playback,
         display,
+        fullscreen_available: false,
+        fullscreen_status: String::new(),
     };
 
     // 1 ms timed waits on Windows (frame pacing); a no-op elsewhere
     let _timer = termpaper::platform::TimerResolution::raise();
     let (mut terminal, meter) = init_terminal()?;
     terminal.hide_cursor()?;
+    // the window fills the screen unless told not to (a launch flag is for
+    // this launch only; the Display page remembers)
+    let mut fullscreen = termpaper::fullscreen::Fullscreen::detect(caps.terminal);
+    let want_fullscreen = if args.no_fullscreen { false } else { args.fullscreen || settings.display.fullscreen };
+    if want_fullscreen {
+        fullscreen.enter(&mut std::io::stdout());
+    }
+    settings.fullscreen_available = fullscreen.method() != termpaper::fullscreen::Method::None;
+    settings.fullscreen_status = fullscreen.status();
     // focus reporting lets unfocused instances skip the pacing spin (and
     // honor --idle-fps); terminals without support just never send events.
     // The mouse drives the menu (click, drag sliders, scroll) unless
@@ -1093,8 +1113,9 @@ fn main() -> std::io::Result<()> {
     if settings.display.mouse {
         let _ = crossterm::execute!(terminal.backend_mut(), event::EnableMouseCapture);
     }
-    let result = run(&mut terminal, &scene_name, settings, meter);
+    let result = run(&mut terminal, &scene_name, settings, meter, &mut fullscreen);
     let _ = crossterm::execute!(terminal.backend_mut(), event::DisableFocusChange);
+    fullscreen.leave(&mut std::io::stdout());
     restore_terminal();
     result
 }
@@ -1220,6 +1241,10 @@ struct Settings {
     paused: bool,
     /// no config file yet: a fresh install gets the welcome
     first_run: bool,
+    /// a way to make the window fullscreen exists here
+    fullscreen_available: bool,
+    /// the fullscreen module's one-line status, for the menu
+    fullscreen_status: String,
 }
 
 impl Settings {
@@ -1944,6 +1969,8 @@ fn menu_ctx(
         wall: wall_prefs(settings),
         hypr: settings.hypr,
         paused: settings.paused,
+        fullscreen_available: settings.fullscreen_available,
+        fullscreen_status: settings.fullscreen_status.clone(),
         theme_modified: settings.look_theme.as_deref().and_then(|t| settings.themes.get(t)).is_some_and(|e| {
             let real = settings.look_preview.as_ref().map_or(settings.look.get(), |(o, _)| o.get());
             e.theme.look != *real
@@ -2046,6 +2073,7 @@ fn run(
     start_scene: &str,
     mut settings: Settings,
     meter: termpaper::pace::Reading,
+    fullscreen: &mut termpaper::fullscreen::Fullscreen,
 ) -> std::io::Result<()> {
     let names = scene::all_names();
     // the terminal's true cell size (layout px), when it reports one
@@ -2581,6 +2609,14 @@ fn run(
                     }
                     if d.hud != old.hud {
                         hud = Hud::default();
+                    }
+                    if d.fullscreen != old.fullscreen {
+                        if d.fullscreen {
+                            fullscreen.enter(&mut std::io::stdout());
+                        } else {
+                            fullscreen.leave(&mut std::io::stdout());
+                        }
+                        settings.fullscreen_status = fullscreen.status();
                     }
                     // what a wall shows alike goes to the group
                     let mut probe = old.clone();
@@ -3733,6 +3769,11 @@ fn run(
                         switch_to(base + 1);
                     } else if km.matches("prev", key.code) {
                         switch_to(base + names.len() - 1);
+                    } else if km.matches("fullscreen", key.code) {
+                        let on = fullscreen.toggle(&mut std::io::stdout());
+                        settings.display.fullscreen = on;
+                        settings.fullscreen_status = fullscreen.status();
+                        save.mark(Instant::now());
                     } else if km.matches("random", key.code) && names.len() > 1 {
                         // any scene but the one a pending switch lands on
                         switch_to(base + 1 + rand::random_range(0..names.len() - 1));

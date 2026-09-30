@@ -44,6 +44,9 @@ fn one() -> f64 {
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct HyprClient {
+    /// the window's address, `0x…`
+    #[serde(default)]
+    pub address: String,
     #[serde(default)]
     pub pid: i64,
     pub at: [i32; 2],
@@ -56,10 +59,22 @@ pub struct HyprClient {
     pub mapped: bool,
     #[serde(default)]
     pub hidden: bool,
+    /// 0 windowed, 1 maximised, 2 fullscreen (a bool before Hyprland 0.42)
+    #[serde(default, deserialize_with = "fullscreen_level")]
+    pub fullscreen: u8,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn fullscreen_level<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(match v {
+        serde_json::Value::Bool(b) => 2 * b as u8,
+        serde_json::Value::Number(n) => n.as_u64().unwrap_or(0).min(2) as u8,
+        _ => 0,
+    })
 }
 
 /// The instance signature: from the environment, or the only instance
@@ -143,6 +158,73 @@ pub fn clients() -> Option<Vec<HyprClient>> {
     parse_clients(&query("clients")?)
 }
 
+pub fn parse_client(json: &str) -> Option<HyprClient> {
+    serde_json::from_str(json).ok()
+}
+
+/// The focused window, or None when not under Hyprland or nothing is focused.
+pub fn active_window() -> Option<HyprClient> {
+    parse_client(&query("activewindow")?)
+}
+
+/// Run a dispatcher: the Lua spelling first (Hyprland 0.55+ with a Lua
+/// config takes `hl.dsp.…(...)`), then the classic one. True when Hyprland
+/// answered "ok". The socket first, then the `hyprctl` binary.
+pub fn dispatch(lua: &str, legacy: &str) -> bool {
+    if !present() {
+        return false;
+    }
+    let ok = |reply: &str| reply.trim_start().starts_with("ok");
+    let mut socket_seen = false;
+    for cmd in [lua, legacy] {
+        if let Some(reply) = via_socket(&format!("dispatch {cmd}")) {
+            socket_seen = true;
+            if ok(&reply) {
+                return true;
+            }
+        }
+    }
+    if socket_seen {
+        return false;
+    }
+    for cmd in [lua, legacy] {
+        let mut c = std::process::Command::new("hyprctl");
+        c.arg("dispatch");
+        if cmd.starts_with("hl.") {
+            c.arg(cmd);
+        } else {
+            c.args(cmd.split_whitespace());
+        }
+        if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
+            if let Some(sig) = signature() {
+                c.env("HYPRLAND_INSTANCE_SIGNATURE", sig);
+            }
+        }
+        if c.output().ok().is_some_and(|o| o.status.success() && ok(&String::from_utf8_lossy(&o.stdout))) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Give a window (by `0x…` address) the focus.
+pub fn focus_window(address: &str) -> bool {
+    dispatch(
+        &format!("hl.dsp.focus({{ window = \"address:{address}\" }})"),
+        &format!("focuswindow address:{address}"),
+    )
+}
+
+/// Put a window (by address) into fullscreen, or take it out. The classic
+/// spelling works on the focused window, so focus it first when it is not.
+pub fn set_fullscreen(address: &str, on: bool) -> bool {
+    let (internal, client) = if on { (2, 2) } else { (0, 0) };
+    dispatch(
+        &format!("hl.dsp.window.fullscreen_state({{ internal = {internal}, client = {client}, window = \"address:{address}\" }})"),
+        &format!("fullscreenstate {internal} {client}"),
+    )
+}
+
 /// Parent pid of `pid` from /proc.
 pub fn ppid_of(pid: u32) -> Option<u32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -196,6 +278,21 @@ mod tests {
         assert_eq!(m[0].reserved, [0, 30, 0, 0]);
         assert_eq!((m[1].physical_width, m[1].physical_height), (480, 270));
         assert_eq!(m[1].description, "");
+    }
+
+    #[test]
+    fn reads_the_active_window_and_its_fullscreen_state() {
+        let w = parse_client(
+            r#"{"address":"0x564902694cc0","pid":2658391,"at":[0,0],"size":[1920,1080],"class":"kitty","title":"termpaper","fullscreen":2,"fullscreenClient":0}"#,
+        )
+        .unwrap();
+        assert_eq!((w.address.as_str(), w.pid, w.fullscreen), ("0x564902694cc0", 2658391, 2));
+        // older Hyprland says true/false
+        let old = parse_client(r#"{"pid":1,"at":[0,0],"size":[1,1],"fullscreen":true}"#).unwrap();
+        assert_eq!(old.fullscreen, 2);
+        let none = parse_client(r#"{"pid":1,"at":[0,0],"size":[1,1]}"#).unwrap();
+        assert_eq!((none.fullscreen, none.address.as_str()), (0, ""));
+        assert!(parse_client("Invalid").is_none(), "no active window");
     }
 
     #[test]

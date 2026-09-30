@@ -426,6 +426,10 @@ pub struct MenuCtx {
     pub paused: bool,
     /// the terminal says it shows 24-bit colour (what Colours: auto means)
     pub term_truecolor: bool,
+    /// a way to make the window fullscreen exists here
+    pub fullscreen_available: bool,
+    /// what the fullscreen module says: the way it uses, or why not
+    pub fullscreen_status: String,
 }
 
 /// Whether Studio (GPU) scenes can render, from what the host knows: the

@@ -1302,6 +1302,7 @@ fn action_help(action: &str) -> &'static str {
         "speed_up" => "faster",
         "speed_down" => "slower",
         "random" => "a random scene",
+        "fullscreen" => "fullscreen window on or off",
         _ => "",
     }
 }
@@ -1336,6 +1337,7 @@ fn help_lines(ctx: &MenuCtx, p: &Pal, w: u16) -> Vec<Line<'static>> {
         &format!("{total}: {studio} Studio (GPU), {} Classic", total - studio),
     ));
     v.push(row("renderer", &ctx.renderer_status));
+    v.push(row("fullscreen", &ctx.fullscreen_status));
     v.push(row("wall", ctx.wall_status.trim_start_matches("wall: ")));
     let path = config::config_path().map_or("—".into(), |p| p.display().to_string());
     v.push(row("config", &path));

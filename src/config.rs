@@ -507,6 +507,7 @@ pub const ACTIONS: &[&str] = &[
     "speed_up",
     "speed_down",
     "random",
+    "fullscreen",
 ];
 
 pub fn default_key(action: &str) -> &'static str {
@@ -525,6 +526,7 @@ pub fn default_key(action: &str) -> &'static str {
         "speed_up" => ".",
         "speed_down" => ",",
         "random" => "r",
+        "fullscreen" => "F",
         _ => "",
     }
 }

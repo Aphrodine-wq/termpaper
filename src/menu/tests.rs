@@ -31,6 +31,8 @@ fn ctx() -> MenuCtx {
         key_display: vec![("quit".into(), "q".into()), ("next".into(), "right".into())],
         instances: vec!["pid 1234     rain         up 5s (you)".into()],
         themes: std::sync::Arc::new(themes::rows(&crate::theme::Store::load_from(None))),
+        fullscreen_available: true,
+        fullscreen_status: "on · Hyprland".into(),
         ..Default::default()
     }
 }
