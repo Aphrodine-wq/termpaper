@@ -8,7 +8,7 @@
 //! is dimmed a plane back so the star reads as a true occluder.
 
 use super::{Detail, Scene};
-use crate::canvas::{density_for, ease_smooth, glow, lerp, scale, Canvas};
+use crate::canvas::{density_for, ease_smooth, glow, lerp, scale, Canvas, dot, glow_f};
 use rand::{rngs::StdRng, RngExt};
 
 const TAU: f32 = std::f32::consts::TAU;
@@ -25,6 +25,9 @@ enum Transit {
     Release(f32),
 }
 
+/// Trail sampling interval: what one frame was at 60 fps.
+const TRAIL_DT: f32 = 1.0 / 60.0;
+
 struct Planet {
     a: f32,      // semi-major axis, fraction of the scene radius
     e: f32,      // eccentricity
@@ -36,6 +39,8 @@ struct Planet {
     size: i32, // glow radius when lit
     trail: Vec<(f32, f32)>,
     trail_cap: usize,
+    /// time since the last trail sample
+    trail_t: f32,
     jitter: f32, // per-planet offset from the syzygy line during transit
 }
 
@@ -236,6 +241,7 @@ impl Scene for Orbits {
                         size: if self.rng.random::<f32>() < 0.3 { 2 } else { 1 },
                         trail: Vec::with_capacity(trail_cap),
                         trail_cap,
+                        trail_t: 0.0,
                         jitter: 0.0,
                     }
                 })
@@ -387,14 +393,14 @@ impl Scene for Orbits {
             for (i, &(tx, ty)) in p.trail.iter().enumerate() {
                 let age = (i + 1) as f32 / len as f32; // 1 = newest
                 let b = age * age * 0.5 * boost;
-                canvas.add(tx as i32, ty as i32, scale(p.color, b));
+                dot(canvas, tx, ty, p.color, b);
             }
             let bright = (0.75 + sw * 0.6 + pulse * 0.5).min(1.6) * lit;
             let core = lerp(p.color, (255, 255, 255), 0.35 + pulse * 0.2);
-            let (ix, iy) = (sx as i32, sy as i32);
-            canvas.set(ix, iy, scale(core, bright.min(1.0)));
+            // sub-cell position: a slow planet glides instead of stepping
+            dot(canvas, sx, sy, core, bright.min(1.0));
             let gr = p.size + if sw > 0.25 || pulse > 0.4 { 1 } else { 0 };
-            glow(canvas, ix, iy, gr, p.color, (0.30 * bright).min(0.7));
+            glow_f(canvas, sx, sy, gr as f32, p.color, (0.30 * bright).min(0.7));
         };
 
         // behind the star first, dimmed a plane back
@@ -427,13 +433,18 @@ impl Scene for Orbits {
             }
         }
 
-        // push trail samples after drawing (newest = current position)
+        // push trail samples after drawing (newest = current position), at
+        // 60 Hz whatever the frame rate, so a trail spans the same seconds
         for p in self.planets.iter_mut() {
-            let (sx, sy, _) = Self::project(cx, cy, r, p.a, p.e, p.squash, p.tilt, p.m);
-            if p.trail.len() >= p.trail_cap {
-                p.trail.remove(0);
+            p.trail_t += dt;
+            while p.trail_t >= TRAIL_DT {
+                p.trail_t -= TRAIL_DT;
+                let (sx, sy, _) = Self::project(cx, cy, r, p.a, p.e, p.squash, p.tilt, p.m);
+                if p.trail.len() >= p.trail_cap {
+                    p.trail.remove(0);
+                }
+                p.trail.push((sx, sy));
             }
-            p.trail.push((sx, sy));
         }
     }
 }

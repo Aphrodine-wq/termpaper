@@ -308,9 +308,9 @@ impl Scene for Aquarium {
             f.retarget -= dt;
             if f.retarget <= 0.0 {
                 f.tx = self.rng.random_range(w as f32 * 0.1..w as f32 * 0.9);
-                f.ty = self
-                    .rng
-                    .random_range(h as f32 * 0.2..sand_top - h as f32 * 0.05);
+                // a tiny tank: the swimming band must not close up
+                let lo = h as f32 * 0.2;
+                f.ty = self.rng.random_range(lo..(sand_top - h as f32 * 0.05).max(lo + 1.0));
                 f.retarget = self.rng.random_range(2.0..5.0);
             }
             let target_h = (f.ty - f.y).atan2(f.tx - f.x);

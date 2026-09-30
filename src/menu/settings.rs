@@ -40,6 +40,13 @@ pub enum SettingId {
     Dim,
     TextScale,
     ResetLook,
+    // Tune: the scene's own sliders
+    Param0,
+    Param1,
+    Param2,
+    Param3,
+    TuneRandom,
+    TuneReset,
     // Playback
     Speed,
     Cycle,
@@ -95,6 +102,9 @@ pub enum SettingId {
     WallDown,
     Align,
     Instances,
+    // Keys: one row per action in `config::ACTIONS`, then a reset
+    Key(u8),
+    ResetKeys,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -113,6 +123,7 @@ pub enum Kind {
     Info,
 }
 
+#[derive(Clone, Copy)]
 pub struct Setting {
     pub id: SettingId,
     pub label: &'static str,
@@ -158,6 +169,28 @@ pub const LOOK: &[Setting] = &[
     row(S::TextScale, "Text size", Choice, "Caption size for text scenes such as bump; auto fits the pane."),
     row(S::ResetLook, "Reset look", Action, "Back to neutral: no theme, grade, palette or effects."),
 ];
+
+#[rustfmt::skip]
+pub const TUNE: &[Setting] = &[
+    row(S::Param0, "Slider 1", Slider, "This scene's own control: the label is the scene's. The middle is the scene as its author made it."),
+    row(S::Param1, "Slider 2", Slider, "This scene's own control: the label is the scene's. The middle is the scene as its author made it."),
+    row(S::Param2, "Slider 3", Slider, "This scene's own control: the label is the scene's. The middle is the scene as its author made it."),
+    row(S::Param3, "Slider 4", Slider, "This scene's own control: the label is the scene's. The middle is the scene as its author made it."),
+    row(S::TuneRandom, "Randomize", Action, "Roll every slider of this scene at random. u undoes it."),
+    row(S::TuneReset, "Reset", Action, "Every slider of this scene back to the middle."),
+];
+
+/// The Keys page: an `Open` row per action (Enter, then press the key), and
+/// a reset. Built from `config::ACTIONS`, so a new action is a new row.
+pub const KEYS: [Setting; crate::config::ACTIONS.len() + 1] = {
+    let mut rows = [row(S::ResetKeys, "Reset keys", Action, "Every action back to its default key."); crate::config::ACTIONS.len() + 1];
+    let mut i = 0;
+    while i < crate::config::ACTIONS.len() {
+        rows[i] = row(S::Key(i as u8), "", Open, "Enter, then press the key you want for this. A key another action holds swaps over.");
+        i += 1;
+    }
+    rows
+};
 
 #[rustfmt::skip]
 pub const PLAYBACK: &[Setting] = &[
@@ -228,10 +261,63 @@ pub fn page(p: Page) -> &'static [Setting] {
     match p {
         Page::Scenes | Page::Themes => &[],
         Page::Look => LOOK,
+        Page::Tune => TUNE,
         Page::Playback => PLAYBACK,
         Page::Display => DISPLAY,
         Page::Wall => WALL,
+        Page::Keys => &KEYS,
     }
+}
+
+/// A row's label as shown: Tune rows carry the scene's own slider names,
+/// Keys rows the action they bind.
+pub fn label(s: &Setting, ctx: &MenuCtx) -> String {
+    match s.id {
+        S::Param0 | S::Param1 | S::Param2 | S::Param3 => {
+            let i = param_index(s.id);
+            ctx.param_labels.get(i).cloned().unwrap_or_else(|| "—".to_string())
+        }
+        S::Key(i) => crate::config::ACTIONS
+            .get(i as usize)
+            .map(|a| {
+                let l = crate::config::action_label(a);
+                let mut c = l.chars();
+                match c.next() {
+                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                    None => a.to_string(),
+                }
+            })
+            .unwrap_or_default(),
+        _ => s.label.to_string(),
+    }
+}
+
+/// A row's help line as shown.
+pub fn help(s: &Setting, ctx: &MenuCtx) -> &'static str {
+    if matches!(s.id, S::Param0 | S::Param1 | S::Param2 | S::Param3 | S::TuneRandom | S::TuneReset) && ctx.param_labels.is_empty() {
+        return "This scene has no sliders of its own. Studio scenes that declare params get them here.";
+    }
+    s.help
+}
+
+fn param_index(id: SettingId) -> usize {
+    match id {
+        S::Param0 => 0,
+        S::Param1 => 1,
+        S::Param2 => 2,
+        _ => 3,
+    }
+}
+
+/// Every slider of the scene set at random (the ones it has).
+fn random_params(ctx: &MenuCtx) -> [f32; 4] {
+    let mut p = [crate::scene::shader::PARAM_NEUTRAL; 4];
+    for (i, slot) in p.iter_mut().enumerate() {
+        if i < ctx.param_labels.len() {
+            *slot = round_dec(rand::random_range(0.0f32..=1.0), 2);
+        }
+    }
+    p
 }
 
 /// Section headings drawn above rows: (index of the first row, heading).
@@ -241,6 +327,8 @@ pub fn sections(p: Page) -> &'static [(usize, &'static str)] {
         Page::Playback => &[(0, "Scenes"), (6, "Transitions")],
         Page::Display => &[(0, "Picture"), (6, "Speed & power"), (15, "On screen"), (22, "Night"), (26, "Terminal")],
         Page::Wall => &[(0, "Linking"), (4, "Layout"), (10, "The wall")],
+        Page::Tune => &[(0, "This scene")],
+        Page::Keys => &[(0, "Actions")],
         _ => &[],
     }
 }
@@ -320,6 +408,21 @@ fn with_playback(ctx: &MenuCtx, f: impl FnOnce(&mut crate::prefs::PlaybackPrefs)
 
 fn hour_label(h: u8) -> String {
     format!("{h:02}:00")
+}
+
+/// A key as the Keys page shows it.
+pub fn pretty_key(k: &str) -> String {
+    match k.to_lowercase().as_str() {
+        "right" => "→".into(),
+        "left" => "←".into(),
+        "up" => "↑".into(),
+        "down" => "↓".into(),
+        "space" => "Space".into(),
+        "esc" | "escape" => "Esc".into(),
+        "tab" => "Tab".into(),
+        "enter" | "return" => "Enter".into(),
+        _ => k.to_string(),
+    }
 }
 
 /// Speeds and scales without trailing zeros: 1×, 0.25×, 1.5×.
@@ -425,6 +528,7 @@ pub fn num(id: SettingId) -> Option<Num> {
         S::NightLevel => n(0.1, 1.0, 0.05, 1.0, 2),
         S::Padding => n(0.0, 24.0, 1.0, 0.0, 0),
         S::Bezel => n(0.0, 30.0, 0.5, 0.0, 1),
+        S::Param0 | S::Param1 | S::Param2 | S::Param3 => n(0.0, 1.0, 0.05, crate::scene::shader::PARAM_NEUTRAL, 2),
         _ => return None,
     })
 }
@@ -460,6 +564,7 @@ pub fn num_value(id: SettingId, ctx: &MenuCtx) -> Option<f32> {
         S::NightLevel => ctx.display.night_level,
         S::Padding => ctx.wall.pad,
         S::Bezel => ctx.wall.bezel_mm,
+        S::Param0 | S::Param1 | S::Param2 | S::Param3 => ctx.params[param_index(id)],
         _ => {
             let fx = quick_effect(id)?;
             let e = &ctx.look.effects;
@@ -511,6 +616,11 @@ fn set_num(id: SettingId, ctx: &MenuCtx, v: f32) -> Option<Effect> {
         S::NightLevel => return with_display(ctx, |d| d.night_level = v),
         S::Padding => return with_wall(ctx, |w| w.pad = v),
         S::Bezel => return with_wall(ctx, |w| w.bezel_mm = v),
+        S::Param0 | S::Param1 | S::Param2 | S::Param3 => {
+            let mut p = ctx.params;
+            p[param_index(id)] = v;
+            return Some(Effect::SetParams(p));
+        }
         _ => return quick_effect(id).map(|fx| Effect::SetLook(with_effect(&ctx.look, fx, v))),
     }
     Some(Effect::SetLook(look))
@@ -584,6 +694,8 @@ pub fn enabled(id: SettingId, ctx: &MenuCtx) -> bool {
         S::Order => ctx.cycle.is_some(),
         S::Gpu | S::StudioBudget | S::StudioFps => cfg!(feature = "gpu"),
         S::Fullscreen => ctx.fullscreen_available,
+        S::Param0 | S::Param1 | S::Param2 | S::Param3 => param_index(id) < ctx.param_labels.len(),
+        S::TuneRandom | S::TuneReset => !ctx.param_labels.is_empty(),
         _ => true,
     }
 }
@@ -640,7 +752,12 @@ pub fn value(id: SettingId, ctx: &MenuCtx) -> String {
         S::Dim => format!("{:.0}%", ctx.dim * 100.0),
         S::TextScale => ctx.text_scale.map_or("auto".into(), |t| format!("{t}×")),
         S::ResetLook if ctx.look.is_neutral() => "neutral".into(),
-        S::ResetLook | S::ResetPlayback | S::ResetDisplay => String::new(),
+        S::ResetLook | S::ResetPlayback | S::ResetDisplay | S::TuneRandom | S::ResetKeys => String::new(),
+        S::Param0 | S::Param1 | S::Param2 | S::Param3 if param_index(id) >= ctx.param_labels.len() => "—".into(),
+        S::Param0 | S::Param1 | S::Param2 | S::Param3 => format!("{:.0}%", ctx.params[param_index(id)] * 100.0),
+        S::TuneReset if ctx.params.iter().all(|v| (v - crate::scene::shader::PARAM_NEUTRAL).abs() < 1e-3) => "as designed".into(),
+        S::TuneReset => String::new(),
+        S::Key(i) => ctx.key_display.get(i as usize).map(|(_, k)| pretty_key(k)).unwrap_or_default(),
         S::Speed => format!("{}×", short(ctx.speed)),
         S::Cycle => cycle_label(ctx.cycle),
         S::CycleScope => match ctx.cycle_scope {
@@ -861,6 +978,9 @@ pub fn step(id: SettingId, ctx: &MenuCtx, dir: i32) -> Option<Effect> {
 pub fn action(id: SettingId, ctx: &MenuCtx) -> Option<Effect> {
     match id {
         S::ResetLook => (!ctx.look.is_neutral()).then(|| Effect::SetLook(Look::default())),
+        S::TuneRandom => Some(Effect::SetParams(random_params(ctx))),
+        S::TuneReset => Some(Effect::SetParams([crate::scene::shader::PARAM_NEUTRAL; 4])),
+        S::ResetKeys => Some(Effect::ResetKeys),
         S::ResetPlayback => Some(Effect::ResetPage(Page::Playback)),
         S::ResetDisplay => Some(Effect::ResetPage(Page::Display)),
         S::PauseWall => Some(Effect::PauseWall),

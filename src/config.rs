@@ -108,6 +108,10 @@ pub struct Config {
     /// website; `$TERMPAPER_GALLERY` wins)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gallery_url: Option<String>,
+    /// each scene's Tune sliders (0..1, 0.5 = as designed), by scene name;
+    /// only scenes with a slider moved are written
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tune: HashMap<String, Vec<f32>>,
     /// a manual wall layout for this machine's panes, `COLSxROWS:INDEX`
     /// (what `--wall` takes), set from the Wall page
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -509,6 +513,51 @@ pub const ACTIONS: &[&str] = &[
     "random",
     "fullscreen",
 ];
+
+/// What an action does, for the Keys page and the help overlay.
+pub fn action_label(action: &str) -> &'static str {
+    match action {
+        "quit" => "quit",
+        "menu" => "open the menu",
+        "next" => "next scene",
+        "prev" => "previous scene",
+        "filter_next" => "try effects one by one",
+        "detail_next" => "cycle quality",
+        "pause" => "pause",
+        "color" => "colour studio",
+        "reset" => "reset every setting",
+        "fps_up" => "raise the FPS cap",
+        "fps_down" => "lower the FPS cap",
+        "speed_up" => "faster",
+        "speed_down" => "slower",
+        "random" => "a random scene",
+        "fullscreen" => "fullscreen window on or off",
+        _ => "",
+    }
+}
+
+/// A scene's Tune sliders from the config: four values, 0.5 where unset.
+pub fn tune_for(cfg: &Config, scene: &str) -> [f32; 4] {
+    let mut p = [crate::scene::shader::PARAM_NEUTRAL; 4];
+    if let Some(v) = cfg.tune.get(scene) {
+        for (slot, val) in p.iter_mut().zip(v) {
+            if val.is_finite() {
+                *slot = val.clamp(0.0, 1.0);
+            }
+        }
+    }
+    p
+}
+
+/// Remember a scene's sliders; all at rest means no entry at all.
+pub fn set_tune(cfg: &mut Config, scene: &str, params: [f32; 4]) {
+    let neutral = params.iter().all(|v| (v - crate::scene::shader::PARAM_NEUTRAL).abs() < 1e-3);
+    if neutral {
+        cfg.tune.remove(scene);
+    } else {
+        cfg.tune.insert(scene.to_string(), params.iter().map(|v| round2(*v)).collect());
+    }
+}
 
 pub fn default_key(action: &str) -> &'static str {
     match action {
@@ -926,6 +975,25 @@ mod tests {
         assert_eq!(back.hysteresis, Some(2));
         let tl: Config = toml::from_str("placement = \"top-left\"").unwrap();
         assert_eq!(tl.placement, Some(crate::wall::Placement::TopLeft));
+    }
+
+    #[test]
+    fn tune_round_trips_and_rests_at_the_middle() {
+        let mut cfg = Config::default();
+        assert_eq!(tune_for(&cfg, "pong"), [0.5; 4]);
+        set_tune(&mut cfg, "pong", [0.8, 0.5, 0.25, 0.5]);
+        assert_eq!(tune_for(&cfg, "pong"), [0.8, 0.5, 0.25, 0.5]);
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(text.contains("[tune]") && text.contains("pong = ["), "{text}");
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(tune_for(&back, "pong"), [0.8, 0.5, 0.25, 0.5]);
+        // back to the middle: the entry goes away
+        set_tune(&mut cfg, "pong", [0.5; 4]);
+        assert!(cfg.tune.is_empty());
+        // a hand-edited file: short, long, wild values
+        let odd: Config = toml::from_str("[tune]\nkoi = [2.0, -1.0]\n").unwrap();
+        assert_eq!(tune_for(&odd, "koi"), [1.0, 0.0, 0.5, 0.5]);
+        assert_eq!(action_label("fullscreen"), "fullscreen window on or off");
     }
 
     #[test]

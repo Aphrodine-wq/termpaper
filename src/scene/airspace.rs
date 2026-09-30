@@ -44,6 +44,8 @@ struct Aircraft {
     layer: u8, // 0 far, 1 mid, 2 near
     phase: f32,
     trail: Vec<(f32, f32, f32)>, // x, y, brightness
+    /// time since the last trail point
+    trail_t: f32,
     formation: bool,
 }
 #[derive(Clone, Copy)]
@@ -53,6 +55,9 @@ enum Event {
     LowPass(f32), // elapsed
     Formation(f32),
 }
+
+/// Contrail sampling interval: what one frame was at 60 fps.
+const TRAIL_DT: f32 = 1.0 / 60.0;
 
 pub struct Airspace {
     rng: StdRng,
@@ -274,6 +279,7 @@ impl Airspace {
             layer,
             phase: self.rng.random_range(0.0..std::f32::consts::TAU),
             trail: Vec::new(),
+            trail_t: 0.0,
             formation,
         });
     }
@@ -604,13 +610,20 @@ impl Scene for Airspace {
                 return false;
             }
             if p.layer >= 1 && cfg.contrail_str > 0.0 {
+                // a point every 1/60 s and a fade per second, so the trail's
+                // length and its dissolve are the same at any frame rate
                 let boost = if p.formation { 1.4 } else { 1.0 };
-                p.trail.push((p.x, p.y, boost));
-                if p.trail.len() > max_trail {
-                    p.trail.remove(0);
+                p.trail_t += dt;
+                while p.trail_t >= TRAIL_DT {
+                    p.trail_t -= TRAIL_DT;
+                    p.trail.push((p.x, p.y, boost));
+                    if p.trail.len() > max_trail {
+                        p.trail.remove(0);
+                    }
                 }
+                let fade = 0.96f32.powf(dt * 60.0);
                 for tp in &mut p.trail {
-                    tp.2 *= 0.96;
+                    tp.2 *= fade;
                 }
             }
             true

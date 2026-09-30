@@ -110,6 +110,8 @@ pub struct Fire {
     flare_dur: f32,
     /// eased flare envelope 0..1, recomputed each frame
     flare_k: f32,
+    /// 60 Hz sim steps owed: whole steps run, the remainder waits for the next frame
+    step_acc: f32,
     next_flare: f32,
     shimmer_t: f32,
     seed: u32,
@@ -132,6 +134,7 @@ impl Fire {
             flare_t: 1.0,
             flare_dur: 1.0, // idle
             flare_k: 0.0,
+            step_acc: 0.0,
             next_flare: 6.0,
             shimmer_t: 0.0,
             seed,
@@ -280,8 +283,12 @@ impl Scene for Fire {
         self.flare_k = self.flare_envelope();
         let flare_k = self.flare_k;
 
-        // run the sim at a fixed 60 Hz regardless of render fps
-        let steps = ((dt * 60.0).round() as usize).clamp(1, 6);
+        // run the sim at a fixed 60 Hz regardless of render fps: the frame
+        // time accumulates whole steps (every other frame at 120 fps, two a
+        // frame at 30), so the fire burns at one speed everywhere
+        self.step_acc = (self.step_acc + dt * 60.0 + 1e-4).min(6.0);
+        let steps = self.step_acc.floor() as usize;
+        self.step_acc -= steps as f32;
         for _ in 0..steps {
             self.step();
         }

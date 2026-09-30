@@ -1090,6 +1090,7 @@ fn main() -> std::io::Result<()> {
         display,
         fullscreen_available: false,
         fullscreen_status: String::new(),
+        current_scene: scene_name.clone(),
     };
 
     // 1 ms timed waits on Windows (frame pacing); a no-op elsewhere
@@ -1245,6 +1246,8 @@ struct Settings {
     fullscreen_available: bool,
     /// the fullscreen module's one-line status, for the menu
     fullscreen_status: String,
+    /// the scene on show, for the Tune sliders that travel and are undone
+    current_scene: String,
 }
 
 impl Settings {
@@ -1340,6 +1343,7 @@ fn settings_msg(settings: &Settings, _opts: &SceneOptions, quick: &Option<String
         transition: Some(settings.playback.transition),
         display: Some(settings.display.clone()),
         look_shared: settings.sync_look,
+        tune: Some(config::tune_for(&settings.cfg, &settings.current_scene)),
     }
 }
 
@@ -1391,6 +1395,10 @@ fn apply_appearance(
     }
     if let Some(d) = &m.display {
         settings.display.adopt_shared(d);
+    }
+    if let Some(t) = m.tune {
+        let scene = settings.current_scene.clone();
+        config::set_tune(&mut settings.cfg, &scene, t);
     }
     settings.fps = m.fps.clamp(1, 240);
     settings.smooth = m.smooth;
@@ -1722,6 +1730,8 @@ struct Snapshot {
     renderer: termpaper::engine::Renderer,
     playback: termpaper::prefs::PlaybackPrefs,
     display: termpaper::prefs::DisplayPrefs,
+    /// the Tune sliders of the scene on show
+    tune: (String, [f32; 4]),
 }
 
 impl Snapshot {
@@ -1749,6 +1759,7 @@ impl Snapshot {
             renderer: s.renderer,
             playback: s.playback.clone(),
             display: s.display.clone(),
+            tune: (s.current_scene.clone(), config::tune_for(&s.cfg, &s.current_scene)),
         }
     }
 
@@ -1776,7 +1787,22 @@ impl Snapshot {
         s.playback = self.playback;
         s.display = self.display;
         s.truecolor = Settings::truecolor_for(s.display.colors, s.term_truecolor, s.cli_no_truecolor);
+        config::set_tune(&mut s.cfg, &self.tune.0, self.tune.1);
     }
+}
+
+/// Bind `action` to `key` in the config: the default key means no entry.
+fn set_key(cfg: &mut config::Config, action: &str, key: &str) {
+    if key == config::default_key(action) {
+        cfg.keys.remove(action);
+    } else {
+        cfg.keys.insert(action.to_string(), key.to_string());
+    }
+}
+
+/// The key an action is on, default or rebound.
+fn key_of(cfg: &config::Config, action: &str) -> String {
+    cfg.keys.get(action).cloned().unwrap_or_else(|| config::default_key(action).to_string())
 }
 
 /// What a browser preview replaced: restored when the preview is dropped,
@@ -1971,6 +1997,8 @@ fn menu_ctx(
         paused: settings.paused,
         fullscreen_available: settings.fullscreen_available,
         fullscreen_status: settings.fullscreen_status.clone(),
+        param_labels: scene::lookup(scene_name).map(|e| e.params().iter().map(|s| s.to_string()).collect()).unwrap_or_default(),
+        params: config::tune_for(&settings.cfg, scene_name),
         theme_modified: settings.look_theme.as_deref().and_then(|t| settings.themes.get(t)).is_some_and(|e| {
             let real = settings.look_preview.as_ref().map_or(settings.look.get(), |(o, _)| o.get());
             e.theme.look != *real
@@ -2647,6 +2675,44 @@ fn run(
                 }
                 Effect::OpenColorGrade => studio.open_on(studio::Tab::Colour),
                 Effect::OpenPalette => studio.open_on(studio::Tab::Palette),
+                Effect::SetParams(p) => {
+                    let scene = st.cur.scene.clone();
+                    config::set_tune(&mut settings.cfg, &scene, p);
+                    if let Some(g) = &mut guard {
+                        g.publish_settings(&settings_msg(&settings, &opts, &quick_filter));
+                    }
+                    save.mark(now);
+                }
+                Effect::SetKey { action, key } => {
+                    let old = key_of(&settings.cfg, action);
+                    if old == key {
+                        continue;
+                    }
+                    // the action that held this key takes the old one
+                    let holder = config::ACTIONS.iter().copied().find(|a| *a != action && key_of(&settings.cfg, a) == key);
+                    set_key(&mut settings.cfg, action, &key);
+                    match holder {
+                        Some(h) => {
+                            set_key(&mut settings.cfg, h, &old);
+                            menu.flash(format!(
+                                "{} is now {} · {} moved to {}",
+                                config::action_label(action),
+                                menu::settings::pretty_key(&key),
+                                config::action_label(h),
+                                menu::settings::pretty_key(&old)
+                            ));
+                        }
+                        None => menu.flash(format!("{} is now {}", config::action_label(action), menu::settings::pretty_key(&key))),
+                    }
+                    settings.keymap = config::KeyMap::new(&settings.cfg);
+                    save.mark(now);
+                }
+                Effect::ResetKeys => {
+                    settings.cfg.keys.clear();
+                    settings.keymap = config::KeyMap::new(&settings.cfg);
+                    menu.flash("Every key back to its default");
+                    save.mark(now);
+                }
                 Effect::Undo => {
                     match undo.pop() {
                         Some(snap) => {
@@ -3314,6 +3380,9 @@ fn run(
                 } else {
                     (local, (0, 0), None)
                 };
+                if settings.current_scene != st.cur.scene {
+                    settings.current_scene = st.cur.scene.clone();
+                }
                 // a styled transition shapes the dim across the wall; a plain
                 // fade (and every style at rest) is a uniform one
                 let mask = termpaper::transition::Mask::new(
@@ -3357,7 +3426,7 @@ fn run(
                     } else {
                         0
                     },
-                    params: [scene::shader::PARAM_NEUTRAL; 4],
+                    params: config::tune_for(&settings.cfg, &st.cur.scene),
                 };
                 if let Some(frame) = worker.submit(request) {
                     lead.on_frame(frame.elapsed_ms, slot);

@@ -714,6 +714,8 @@ fn mid() -> MenuCtx {
             }
             l
         },
+        param_labels: vec!["Swell".into(), "Altitude".into()],
+        params: [0.5, 0.8, 0.5, 0.5],
         ..ctx()
     }
 }
@@ -742,12 +744,11 @@ fn every_setting_steps_both_ways() {
             let c = if matches!(s.id, SettingId::Grid | SettingId::GridPos) { &grid } else { &mid };
             let c = c.clone();
             if !settings::enabled(s.id, &c) {
-                // only the GPU rows, and only in a build without the GPU
-                assert!(
-                    !cfg!(feature = "gpu") && matches!(s.id, SettingId::Gpu | SettingId::StudioBudget | SettingId::StudioFps),
-                    "{:?} is off in the mid context",
-                    s.id
-                );
+                // only the GPU rows (in a build without the GPU), and the
+                // Tune sliders the scene does not have (mid has two)
+                let gpu_row = !cfg!(feature = "gpu") && matches!(s.id, SettingId::Gpu | SettingId::StudioBudget | SettingId::StudioFps);
+                let spare_slider = matches!(s.id, SettingId::Param2 | SettingId::Param3);
+                assert!(gpu_row || spare_slider, "{:?} is off in the mid context", s.id);
                 continue;
             }
             let back = settings::step(s.id, &c, -1);
@@ -937,8 +938,11 @@ fn settings_navigation_and_actions() {
     assert!(m.filters_open);
     keys(&mut m, &c, &[Input::Esc]);
     assert!(!m.filters_open && m.open);
-    // Shift-Tab wraps round to the last page; Wall's Align emits its placeholder
+    // Shift-Tab wraps round past the last page (Keys) to Wall; Wall's Align
+    // emits its placeholder
     keys(&mut m, &c, &[Input::BackTab, Input::BackTab, Input::BackTab]);
+    assert_eq!(m.page, Page::Keys);
+    keys(&mut m, &c, &[Input::BackTab]);
     assert_eq!(m.page, Page::Wall);
     focus(&mut m, &c, SettingId::Align);
     assert_eq!(
@@ -1269,6 +1273,8 @@ fn layout_degrades_sanely() {
                 "Playback" => "Speed",
                 "Display" => "Quality",
                 "Wall" => "Link",
+                "Tune" => "THIS SCENE",
+                "Keys" => "Quit",
                 "search" => "/ ocean",
                 "theme search" => "Nord",
                 "theme prompt" => "Late night",

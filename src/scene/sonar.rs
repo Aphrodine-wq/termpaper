@@ -8,7 +8,7 @@
 //! each one.
 
 use super::{Detail, Scene};
-use crate::canvas::{density_for, ease_out, ease_smooth, glow, lerp, scale, Canvas};
+use crate::canvas::{density_for, ease_out, ease_smooth, glow, lerp, scale, Canvas, dot, glow_f};
 use rand::{rngs::StdRng, RngExt};
 use std::f32::consts::TAU;
 
@@ -287,14 +287,7 @@ impl Scene for Sonar {
             canvas.add(ax as i32, ay as i32, scale(self.base, 0.65 * (1.0 - u * 0.6)));
         }
         glow(canvas, cx as i32, cy as i32, 2, self.base, 0.5);
-        glow(
-            canvas,
-            (cx + sweep.cos() * rx * 0.98) as i32,
-            (cy + sweep.sin() * ry * 0.98) as i32,
-            1,
-            self.base,
-            0.5,
-        );
+        glow_f(canvas, cx + sweep.cos() * rx * 0.98, cy + sweep.sin() * ry * 0.98, 1.0, self.base, 0.5);
         // ping charge-up: a hot swell gathers at the center before release
         if charge > 0.0 {
             let ci = cx as i32;
@@ -378,9 +371,9 @@ impl Scene for Sonar {
                     scale(col, (1.0 - u) * 0.45),
                 );
             }
-            canvas.set(c.x as i32, c.y as i32, col);
+            dot(canvas, c.x, c.y, col, 1.0);
             if c.flare > 0.4 {
-                glow(canvas, c.x as i32, c.y as i32, 2, base, c.flare * 0.5);
+                glow_f(canvas, c.x, c.y, 2.0, base, c.flare * 0.5);
             }
         }
         self.echoes.append(&mut new_echoes);

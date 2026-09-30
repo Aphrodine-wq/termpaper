@@ -102,19 +102,28 @@ pub enum Page {
     Scenes,
     Themes,
     Look,
+    /// this scene's own sliders
+    Tune,
     Playback,
     Display,
     Wall,
+    /// the keys, and rebinding them
+    Keys,
 }
 
+/// How many pages there are (the size of per-page state).
+pub const PAGES: usize = 8;
+
 impl Page {
-    pub const ALL: [Page; 6] = [
+    pub const ALL: [Page; PAGES] = [
         Page::Scenes,
         Page::Themes,
         Page::Look,
+        Page::Tune,
         Page::Playback,
         Page::Display,
         Page::Wall,
+        Page::Keys,
     ];
 
     pub fn title(self) -> &'static str {
@@ -122,9 +131,11 @@ impl Page {
             Page::Scenes => "Scenes",
             Page::Themes => "Themes",
             Page::Look => "Look",
+            Page::Tune => "Tune",
             Page::Playback => "Playback",
             Page::Display => "Display",
             Page::Wall => "Wall",
+            Page::Keys => "Keys",
         }
     }
 
@@ -134,9 +145,11 @@ impl Page {
             Page::Scenes => "Scenes",
             Page::Themes => "Themes",
             Page::Look => "Look",
+            Page::Tune => "Tune",
             Page::Playback => "Play",
             Page::Display => "Show",
             Page::Wall => "Wall",
+            Page::Keys => "Keys",
         }
     }
 
@@ -344,6 +357,13 @@ pub enum Effect {
     /// everything on a settings page back to how termpaper starts, as one
     /// undo step
     ResetPage(Page),
+    /// this scene's Tune sliders (0..1 each; 0.5 is the scene as designed)
+    SetParams([f32; 4]),
+    /// bind an action to a key (another action holding that key takes the
+    /// old one)
+    SetKey { action: &'static str, key: String },
+    /// every action back to its default key
+    ResetKeys,
 }
 
 impl Effect {
@@ -370,6 +390,7 @@ impl Effect {
                 | Effect::SetDisplay(_)
                 | Effect::SetWallPrefs(_)
                 | Effect::ResetPage(_)
+                | Effect::SetParams(_)
         )
     }
 }
@@ -430,6 +451,10 @@ pub struct MenuCtx {
     pub fullscreen_available: bool,
     /// what the fullscreen module says: the way it uses, or why not
     pub fullscreen_status: String,
+    /// the scene's Tune slider labels (none for a scene without them)
+    pub param_labels: Vec<String>,
+    /// the scene's Tune sliders, 0..1
+    pub params: [f32; 4],
 }
 
 /// Whether Studio (GPU) scenes can render, from what the host knows: the
@@ -470,7 +495,9 @@ pub struct Menu {
     pub filters_open: bool,
     filter_row: usize,
     /// focused row on each settings page, by `Page::index`
-    rows: [usize; 6],
+    rows: [usize; PAGES],
+    /// the Keys page is waiting for a key to bind to this action
+    pub capturing: Option<&'static str>,
     pub browser: Browser,
     /// scene on screen when the menu opened: what Esc returns to
     origin: &'static str,
@@ -510,7 +537,8 @@ impl Menu {
             prompt: None,
             filters_open: false,
             filter_row: 0,
-            rows: [0; 6],
+            rows: [0; PAGES],
+            capturing: None,
             browser: Browser::new(),
             origin: "",
             previewing: None,
@@ -554,6 +582,7 @@ impl Menu {
         self.open = false;
         self.help = false;
         self.prompt = None;
+        self.capturing = None;
         self.filters_open = false;
         self.browser.clear_search();
         let mut fx = self.end_preview();
@@ -594,6 +623,7 @@ impl Menu {
         self.open
             && !self.help
             && (self.prompt.is_some()
+                || self.capturing.is_some()
                 || (self.page == Page::Scenes && self.browser.searching)
                 || (self.page == Page::Themes && self.theme_searching))
     }
@@ -643,6 +673,9 @@ impl Menu {
         if let Input::Mouse { kind, x, y } = input {
             return self.handle_mouse(kind, x, y, ctx);
         }
+        if let Some(action) = self.capturing {
+            return self.handle_capture(action, input);
+        }
         if self.prompt.is_some() {
             return self.handle_prompt(input);
         }
@@ -661,6 +694,30 @@ impl Menu {
             _ if self.filters_open => self.handle_filters(input, ctx),
             _ => self.handle_settings(input, ctx),
         }
+    }
+
+    /// The Keys page waits for a key: the next one binds, Esc keeps the old.
+    fn handle_capture(&mut self, action: &'static str, input: Input) -> Vec<Effect> {
+        let key = match input {
+            Input::Esc => {
+                self.capturing = None;
+                return Vec::new();
+            }
+            Input::Char(' ') => "space".to_string(),
+            Input::Char(c) if !c.is_control() => c.to_string(),
+            Input::Left => "left".into(),
+            Input::Right => "right".into(),
+            Input::Up => "up".into(),
+            Input::Down => "down".into(),
+            Input::Enter => "enter".into(),
+            Input::Tab | Input::BackTab => "tab".into(),
+            _ => {
+                self.flash("That key cannot be bound: letters, digits, punctuation, arrows, Enter, Tab or Space");
+                return Vec::new();
+            }
+        };
+        self.capturing = None;
+        vec![Effect::SetKey { action, key }]
     }
 
     /// Text into the prompt; Enter answers it, Esc drops it.
@@ -1251,6 +1308,10 @@ impl Menu {
             SettingId::TerminalCheck => vec![Effect::OpenTerminalCheck],
             SettingId::NewGroup => {
                 self.prompt = Some(themes::Prompt::new(themes::PromptKind::NewGroup, ""));
+                Vec::new()
+            }
+            SettingId::Key(i) => {
+                self.capturing = crate::config::ACTIONS.get(i as usize).copied();
                 Vec::new()
             }
             _ => Vec::new(),

@@ -7,7 +7,7 @@
 
 use super::noise::{hash2, vnoise};
 use super::{Detail, Scene};
-use crate::canvas::{ease_smooth, glow, lerp, scale, Canvas};
+use crate::canvas::{ease_smooth, glow, lerp, scale, Canvas, dot, glow_f};
 use crate::physics::spring_damper;
 use rand::{rngs::StdRng, RngExt};
 
@@ -377,13 +377,13 @@ impl Scene for Fireflies {
         if self.beacon && matches!(self.swarm, Swarm::Idle) {
             let k = 1.0 - (self.next_gather / BEACON_TIME).clamp(0.0, 1.0);
             let breathe = 0.7 + 0.3 * (self.t * 4.5).sin();
-            glow(canvas, self.gx as i32, self.gy as i32, 2, self.glow_c, 0.09 * k * breathe);
+            glow_f(canvas, self.gx, self.gy, 2.0, self.glow_c, 0.09 * k * breathe);
         }
 
         // swarm heart: a soft shared glow while the ball is lit
         if gathering && sw > 0.02 {
-            let r = (ball_r * 0.7).clamp(2.0, 8.0) as i32;
-            glow(canvas, self.gx as i32, self.gy as i32, r, self.glow_c, sw * 0.16);
+            let r = (ball_r * 0.7).clamp(2.0, 8.0);
+            glow_f(canvas, self.gx, self.gy, r, self.glow_c, sw * 0.16);
         }
 
         for (i, f) in self.flies.iter().enumerate() {
@@ -398,7 +398,8 @@ impl Scene for Fireflies {
             let core = lerp(self.glow_c, self.core_c, b * 0.55);
             let c = scale(core, b);
             let (ix, iy) = (f.x as i32, f.y as i32);
-            canvas.set(ix, iy, c);
+            // a drifting fly glides between cells instead of popping
+            dot(canvas, f.x, f.y, c, 1.0);
             // ground light: a low, lit fly washes the grass beneath it
             let ground_d = h as f32 - f.y;
             if f.layer > 0 && b > 0.35 && ground_d < 8.0 {

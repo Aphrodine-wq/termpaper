@@ -5,7 +5,7 @@
 //! cascade-lights a whole neighborhood: anticipation, payoff, decay.
 
 use super::{Detail, Scene};
-use crate::canvas::{density_for, ease_smooth, glow, lerp, scale, Canvas};
+use crate::canvas::{density_for, ease_smooth, lerp, scale, Canvas, dot, glow_f};
 use crate::physics;
 use rand::{rngs::StdRng, RngExt};
 
@@ -383,10 +383,10 @@ impl Scene for Nexus {
                     scale(self.pulse_c, k),
                 );
             }
-            let px = (na.x + (nb.x - na.x) * p.t) as i32;
-            let py = (na.y + (nb.y - na.y) * p.t) as i32;
-            canvas.set(px, py, scale(self.pulse_c, 0.35 + 0.65 * env));
-            glow(canvas, px, py, 2, self.pulse_c, 0.35 * env);
+            let fx = na.x + (nb.x - na.x) * p.t;
+            let fy = na.y + (nb.y - na.y) * p.t;
+            dot(canvas, fx, fy, self.pulse_c, 0.35 + 0.65 * env);
+            glow_f(canvas, fx, fy, 2.0, self.pulse_c, 0.35 * env);
         }
 
         // nodes: depth-scaled cores, sine breathing, flare bloom
@@ -395,7 +395,8 @@ impl Scene for Nexus {
             let bright = (0.4 + 0.6 * nd.depth) * breathe * (1.0 + nd.flare * 1.8);
             let core = scale(self.node_c, bright.min(1.6));
             let (x, y) = (nd.x as i32, nd.y as i32);
-            canvas.set(x, y, lerp(core, (255, 255, 255), (nd.flare * 0.35).min(0.5)));
+            // nodes drift slowly: a sub-cell core keeps them gliding
+            dot(canvas, nd.x, nd.y, lerp(core, (255, 255, 255), (nd.flare * 0.35).min(0.5)), 1.0);
             if nd.depth > 0.66 {
                 // near plane: cross bloom into the neighbors
                 let halo = scale(core, 0.5);
@@ -406,8 +407,8 @@ impl Scene for Nexus {
             }
             if nd.flare > 0.12 {
                 // flare bleeds light into the surroundings
-                let r = (1.0 + nd.flare * 2.0) as i32;
-                glow(canvas, x, y, r, self.pulse_c, (nd.flare * 0.45).min(0.7));
+                let r = 1.0 + nd.flare * 2.0;
+                glow_f(canvas, nd.x, nd.y, r, self.pulse_c, (nd.flare * 0.45).min(0.7));
             }
         }
 

@@ -838,6 +838,62 @@ mod determinism_tests {
 }
 
 #[cfg(test)]
+mod frame_rate_tests {
+    use super::*;
+    use rand::SeedableRng;
+
+    /// How lit the last second of a run is: the share of pixels above a dim
+    /// threshold, averaged over that second's frames.
+    fn lit_share(name: &str, fps: u32, secs: f32) -> f32 {
+        let opts = SceneOptions::default();
+        let mut s = create(name, &opts, StdRng::seed_from_u64(31)).unwrap();
+        let mut c = Canvas::new(96, 48);
+        let dt = 1.0 / fps as f32;
+        let frames = (secs * fps as f32) as u32;
+        let mut sum = 0.0;
+        let mut counted = 0;
+        for i in 0..frames {
+            s.update(dt, &mut c);
+            if i + fps >= frames {
+                let lit = (0..48i32)
+                    .flat_map(|y| (0..96i32).map(move |x| (x, y)))
+                    .filter(|&(x, y)| {
+                        let (r, g, b) = c.get(x, y).color;
+                        r as u32 * 2 + g as u32 * 3 + b as u32 > 240
+                    })
+                    .count();
+                sum += lit as f32 / (96.0 * 48.0);
+                counted += 1;
+            }
+        }
+        sum / counted.max(1) as f32
+    }
+
+    /// A scene must look the same at 30 and 120 fps: motion scaled by `dt`,
+    /// never by the frame. Scenes that step a discrete world per tick are
+    /// exempt, as are glyph scenes whose content is darkness.
+    #[test]
+    fn scenes_are_frame_rate_independent() {
+        const EXEMPT: &[&str] = &["life", "sand", "pipes", "reaction", "bump", "dvd", "circuits", "mandel"];
+        let mut bad = Vec::new();
+        for name in names() {
+            if EXEMPT.contains(&name) {
+                continue;
+            }
+            let slow = lit_share(name, 30, 4.0);
+            let fast = lit_share(name, 120, 4.0);
+            let (lo, hi) = (slow.min(fast), slow.max(fast));
+            // a loose gate: random events differ between runs, a frame-rate
+            // dependent sim differs by far more
+            if hi > 0.02 && hi > lo * 1.8 + 0.01 {
+                bad.push(format!("{name}: lit {:.3} at 30 fps vs {:.3} at 120 fps", slow, fast));
+            }
+        }
+        assert!(bad.is_empty(), "frame-rate dependent scenes:\n{}", bad.join("\n"));
+    }
+}
+
+#[cfg(test)]
 mod fast_forward_tests {
     use super::*;
     use rand::SeedableRng;

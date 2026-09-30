@@ -241,6 +241,27 @@ pub fn render(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx) {
         _ if m.filters_open => draw_filters(f, body, m, ctx, &p),
         _ => draw_settings(f, body, m, ctx, &p),
     }
+    if let Some(action) = m.capturing {
+        // the Keys page waits for a key
+        let cur = ctx.key_display.iter().find(|(a, _)| a == action).map(|(_, k)| settings::pretty_key(k)).unwrap_or_default();
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled(format!("Press the key for {}", config::action_label(action)), bold(p.accent)),
+                    Span::styled("▏", fg(p.accent)),
+                ]),
+                Line::from(vec![
+                    Span::styled("Esc", bold(p.text)),
+                    Span::styled(format!(" keeps {cur}"), fg(p.faint)),
+                ]),
+            ]),
+            Rect { y: keys.y.saturating_sub(1), height: keys.height + 1, ..keys },
+        );
+        if m.help {
+            draw_help(f, area, m, ctx, &p);
+        }
+        return;
+    }
     match &m.prompt {
         // a question takes the footer: what is being asked, what is typed
         Some(pr) => {
@@ -855,7 +876,7 @@ fn draw_settings(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal) {
                 let bar = if focused { "▌" } else { " " };
                 let mut spans = vec![
                     Span::styled(bar, with_bg(fg(p.accent))),
-                    Span::styled(pad(s.label, lw), with_bg(label_style)),
+                    Span::styled(pad(&settings::label(s, ctx), lw), with_bg(label_style)),
                     Span::styled("  ", with_bg(Style::new())),
                 ];
                 let v = settings::value(s.id, ctx);
@@ -911,7 +932,7 @@ fn draw_settings(f: &mut Frame, area: Rect, m: &Menu, ctx: &MenuCtx, p: &Pal) {
             }
         }
     }
-    draw_help_line(f, help_area, m, rows[sel].help, p);
+    draw_help_line(f, help_area, m, settings::help(&rows[sel], ctx), p);
     // the Wall page lists its peers underneath
     if m.page == Page::Wall && rest.height >= 3 {
         let peers = Rect {
@@ -1176,6 +1197,7 @@ pub fn key_hints(m: &Menu, ctx: &MenuCtx) -> Vec<(&'static str, &'static str)> {
                 Kind::Choice if on => v.push(("←→", "change")),
                 Kind::Slider if on => v.push(("←→", "adjust")),
                 Kind::Toggle => v.push(("←→", "toggle")),
+                Kind::Open if m.page == Page::Keys => v.push(("Enter", "rebind")),
                 Kind::Open => v.push(("Enter", "open")),
                 Kind::Action => v.push(("Enter", "apply")),
                 _ => {}
@@ -1287,24 +1309,7 @@ fn pretty_key(k: &str) -> String {
 }
 
 fn action_help(action: &str) -> &'static str {
-    match action {
-        "quit" => "quit",
-        "menu" => "open this menu",
-        "next" => "next scene",
-        "prev" => "previous scene",
-        "filter_next" => "try effects one by one",
-        "detail_next" => "cycle quality",
-        "pause" => "pause",
-        "color" => "colour studio",
-        "reset" => "reset every setting",
-        "fps_up" => "raise the FPS cap",
-        "fps_down" => "lower the FPS cap",
-        "speed_up" => "faster",
-        "speed_down" => "slower",
-        "random" => "a random scene",
-        "fullscreen" => "fullscreen window on or off",
-        _ => "",
-    }
+    config::action_label(action)
 }
 
 fn help_lines(ctx: &MenuCtx, p: &Pal, w: u16) -> Vec<Line<'static>> {

@@ -545,6 +545,8 @@ impl Scene for Den {
             canvas.clear((0, 0, 0));
             return;
         }
+        // a long stall (a suspend, a stalled terminal) is one frame, not a leap
+        let dt = dt.clamp(0.0, 0.1);
         self.t += dt;
 
         self.draw_room(canvas);

@@ -11,6 +11,10 @@
 //!                    scale in millimetres: `<name>_desk.png`, one row per theme
 //!   --bench          GPU time per frame at 544x132, 1 spp, medium detail,
 //!                    cycling through the themes (needs timestamps)
+//!   --churn          terminal bandwidth: the share of half-block cells that
+//!                    change between two frames 1/60 s apart at a 1080p
+//!                    terminal's resolution, per theme (the contract asks
+//!                    for under 40%)
 //! ```
 //!
 //! Per scene it writes `<name>.png` (rows = themes, columns = times, plus a
@@ -29,6 +33,7 @@ struct Opts {
     spp: u32,
     bench: bool,
     desk: bool,
+    churn: bool,
 }
 
 fn parse() -> Opts {
@@ -40,6 +45,7 @@ fn parse() -> Opts {
         spp: 16,
         bench: false,
         desk: false,
+        churn: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -57,6 +63,7 @@ fn parse() -> Opts {
             "--spp" => o.spp = args.next().expect("--spp N").parse().expect("number"),
             "--bench" => o.bench = true,
             "--desk" => o.desk = true,
+            "--churn" => o.churn = true,
             s if !s.starts_with("--") => o.which = s.to_string(),
             s => panic!("unknown option {s}"),
         }
@@ -200,6 +207,35 @@ fn render_desk(g: &mut Gpu, name: &str, composed: &shader::Composed, themes: usi
     sheet.save(&out.join(format!("{name}_desk.png")));
 }
 
+/// The share of half-block cells (1x2 px) whose colour moves by more than
+/// `levels` in any channel between two frames — what the terminal is asked
+/// to redraw. Balanced output skips changes of up to 3 levels.
+fn churn(a: &gpu::ShaderPixels, b: &gpu::ShaderPixels, levels: i32) -> f32 {
+    let (w, h) = (a.width, a.height);
+    let cells = (w * (h / 2)).max(1);
+    let mut changed = 0usize;
+    for cy in 0..h / 2 {
+        for x in 0..w {
+            let mut moved = false;
+            for dy in 0..2 {
+                let i = (cy * 2 + dy) * w + x;
+                let (pa, pb) = (a.data[i], b.data[i]);
+                for sh in [0, 8, 16] {
+                    if ((pa >> sh) & 0xff) as i32 - ((pb >> sh) & 0xff) as i32 > levels
+                        || ((pb >> sh) & 0xff) as i32 - ((pa >> sh) & 0xff) as i32 > levels
+                    {
+                        moved = true;
+                    }
+                }
+            }
+            if moved {
+                changed += 1;
+            }
+        }
+    }
+    changed as f32 / cells as f32
+}
+
 fn scene_names(o: &Opts) -> Vec<String> {
     if o.which != "all" {
         return vec![o.which.clone()];
@@ -266,6 +302,36 @@ fn main() {
             continue;
         }
         let themes = meta.themes.len();
+        if o.churn {
+            // a 1080p terminal in half blocks: 213x112 px; the median over
+            // three moments, per theme, at the balanced hysteresis
+            let mut worst = 0.0f32;
+            for ti in 0..themes {
+                let mut shares = Vec::new();
+                for &t0 in &[20.0f64, 47.0, 95.0] {
+                    let a = render_at(&mut g, &name, &composed, (213, 112), ti as u32, t0, 1, Detail::Medium);
+                    let b = render_at(&mut g, &name, &composed, (213, 112), ti as u32, t0 + 1.0 / 60.0, 1, Detail::Medium);
+                    match (a, b) {
+                        (Ok(a), Ok(b)) => shares.push(churn(&a, &b, 3)),
+                        (Err(e), _) | (_, Err(e)) => {
+                            println!("  {e}");
+                            failures += 1;
+                            break;
+                        }
+                    }
+                }
+                shares.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                if let Some(med) = shares.get(shares.len() / 2) {
+                    let verdict = if *med <= 0.40 { "ok" } else { "BUSY" };
+                    println!("  churn {:<12} {:>5.1}% of cells per frame at 60 fps  {verdict}", meta.themes[ti], med * 100.0);
+                    worst = worst.max(*med);
+                }
+            }
+            if worst > 0.40 {
+                failures += 1;
+            }
+            continue;
+        }
         if o.desk {
             let t = o.times.get(1).copied().unwrap_or(o.times[0]);
             render_desk(&mut g, &name, &composed, themes, t, &o.out);

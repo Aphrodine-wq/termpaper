@@ -266,8 +266,8 @@ impl Scene for Aurora {
         self.next_meteor -= dt;
         if self.next_meteor <= 0.0 && self.meteor.is_none() {
             self.meteor = Some(Meteor {
-                x: self.rng.random_range(w as f32 * 0.3..w as f32),
-                y: self.rng.random_range(0.0..h as f32 * 0.2),
+                x: self.rng.random_range(w as f32 * 0.3..(w as f32).max(w as f32 * 0.3 + 1.0)),
+                y: self.rng.random_range(0.0..(h as f32 * 0.2).max(1.0)),
                 vx: -self.rng.random_range(60.0..100.0),
                 vy: self.rng.random_range(15.0..30.0),
                 life: 0.7,

@@ -9,7 +9,7 @@
 //! one bob: it swings wide, flares, and settles back on a decaying impulse.
 
 use super::{Detail, Scene};
-use crate::canvas::{density_for, ease_smooth, glow, lerp, scale, Canvas};
+use crate::canvas::{density_for, ease_smooth, lerp, scale, Canvas, dot, glow_f};
 use rand::{rngs::StdRng, RngExt};
 use std::f32::consts::TAU;
 
@@ -276,19 +276,10 @@ impl Scene for Pendulum {
                 (255, 255, 255),
                 (0.30 + build * 0.15 + flash * 0.55 + kick * 0.3).min(0.9),
             );
-            let (bxi, byi) = (bx as i32, by as i32);
-            canvas.set(bxi, byi, core);
-            let gr = (1.0 + p.near * 1.5 + flash * 1.5 + kick * 1.2)
-                .round()
-                .clamp(1.0, 4.0) as i32;
-            glow(
-                canvas,
-                bxi,
-                byi,
-                gr,
-                self.accent,
-                (0.26 * bright + flash * 0.5).min(1.2),
-            );
+            // the bob at its true position: a swinging bob glides
+            dot(canvas, bx, by, core, 1.0);
+            let gr = (1.0 + p.near * 1.5 + flash * 1.5 + kick * 1.2).clamp(1.0, 4.0);
+            glow_f(canvas, bx, by, gr, self.accent, (0.26 * bright + flash * 0.5).min(1.2));
         }
 
         // crisp flash: a white shimmer racing left-to-right along the

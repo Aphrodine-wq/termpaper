@@ -163,7 +163,7 @@ impl Ribbons {
         }
         // far first, near last so near ribbons weave over distant ones
         self.ribbons
-            .sort_by(|a, b| a.depth.partial_cmp(&b.depth).unwrap());
+            .sort_by(|a, b| a.depth.total_cmp(&b.depth));
     }
 
     /// Gust envelope 0..1: a low trembling anticipation, a fast ramp to the

@@ -99,6 +99,9 @@ pub struct SettingsMsg {
     /// false: the sender keeps a look of its own (Sync look off), which
     /// receivers leave alone
     pub look_shared: bool,
+    /// the Tune sliders of the scene on show (proto 4): every pane of a
+    /// wall draws the same picture
+    pub tune: Option<[f32; 4]>,
 }
 
 /// Just the `look` and `display` of a settings message, read with serde
@@ -130,6 +133,7 @@ impl Default for SettingsMsg {
             transition: None,
             display: None,
             look_shared: true,
+            tune: None,
         }
     }
 }
@@ -379,6 +383,9 @@ impl SettingsMsg {
         if let Some(t) = self.transition {
             theme.push_str(&format!(",\"transition\":\"{}\"", t.name()));
         }
+        if let Some(p) = self.tune {
+            theme.push_str(&format!(",\"tune\":[{},{},{},{}]", p[0], p[1], p[2], p[3]));
+        }
         if let Some(d) = self.display.as_ref().and_then(|d| serde_json::to_string(d).ok()) {
             theme.push_str(&format!(",\"display\":{d}"));
         }
@@ -419,8 +426,18 @@ impl SettingsMsg {
             transition: json_get(text, "transition").and_then(crate::prefs::TransitionStyle::parse),
             look_shared: json_get(text, "look_shared") != Some("false"),
             display: parts.and_then(|p| p.display),
+            tune: parse_f32_array(text, "tune").and_then(|v| (v.len() == 4).then(|| [v[0], v[1], v[2], v[3]])),
         }
     }
+}
+
+/// `"key":[1.0,0.5,…]` as numbers; None when absent or malformed.
+fn parse_f32_array(text: &str, key: &str) -> Option<Vec<f32>> {
+    let pat = format!("\"{key}\":[");
+    let start = text.find(&pat)?;
+    let rest = &text[start + pat.len()..];
+    let end = rest.find(']')?;
+    rest[..end].split(',').map(|p| p.trim().parse::<f32>().ok()).collect()
 }
 
 pub struct InstanceInfo {
@@ -1669,6 +1686,7 @@ mod settings_sync_tests {
             transition: None,
             display: None,
             look_shared: true,
+            tune: Some([0.5, 0.8, 0.25, 1.0]),
         };
         let text = format!("{{\"kind\":\"settings\",{},\"epoch\":7,\"seq\":2,\"from_pid\":5}}", m.fields_json());
         let c = parse_control(&text).unwrap();

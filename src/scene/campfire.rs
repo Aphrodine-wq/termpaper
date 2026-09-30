@@ -288,7 +288,7 @@ impl Campfire {
             let wd = hero * (0.012 + 0.04 * depth * depth) + 1.0;
             placed.push((x, wd, depth));
         }
-        placed.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+        placed.sort_by(|a, b| a.2.total_cmp(&b.2));
         for &(x, wd, depth) in &placed {
             let base = self.ground_y + (st.hf - self.ground_y) * (0.05 + 0.5 * depth);
             let top = -2.0;
