@@ -52,7 +52,7 @@ mod shader_scene;
 mod world;
 
 pub use shader_scene::{
-    shader_time, uniforms, FrameDesc, FrameUniforms, Pixels as ShaderPixels, ShaderTime, ShaderView,
+    portal_eye, shader_time, uniforms, DepthInput, FrameDesc, FrameUniforms, Pixels as ShaderPixels, ShaderTime, ShaderView,
     Status as ShaderStatus,
 };
 

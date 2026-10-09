@@ -14,6 +14,7 @@ pub mod fullscreen;
 pub mod gallery;
 pub mod governor;
 pub mod hypr;
+pub mod interaction;
 pub mod launch;
 pub mod link;
 pub mod look;

@@ -120,6 +120,12 @@ pub struct Config {
     /// (what `--wall` takes), set from the Wall page
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wall_grid: Option<String>,
+    /// Studio wall camera mapping (panorama by default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wall_view: Option<crate::prefs::WallView>,
+    /// Reaction to the focused monitor on Hyprland.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wall_focus: Option<crate::prefs::Response>,
     /// take the group's look when linked (default true); false keeps this
     /// pane's own
     #[serde(skip_serializing_if = "Option::is_none")]

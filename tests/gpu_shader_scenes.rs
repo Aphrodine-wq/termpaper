@@ -33,6 +33,7 @@ fn desc(size: (usize, usize), win: (usize, usize), window: (usize, usize), theme
         kaleido: false,
         exposure: 0.0,
         params: [shader::PARAM_NEUTRAL; 4],
+        depth: gpu::DepthInput::default(),
     }
 }
 
@@ -288,6 +289,7 @@ fn the_worker_delivers_cells_for_a_studio_scene() {
             prefetch: None,
             hysteresis: 3,
             params: [shader::PARAM_NEUTRAL; 4],
+            depth: gpu::DepthInput::default(),
         };
         if let Some(frame) = worker.submit(req) {
             let cells = frame.cells.expect("GPU cells");

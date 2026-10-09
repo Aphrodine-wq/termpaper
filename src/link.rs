@@ -96,6 +96,9 @@ pub struct SettingsMsg {
     /// the sender's display settings; receivers take the parts a wall shows
     /// alike (clock, scene name, night dimming)
     pub display: Option<crate::prefs::DisplayPrefs>,
+    /// Studio wall perspective and focused-monitor response.
+    pub wall_view: Option<crate::prefs::WallView>,
+    pub wall_focus: Option<crate::prefs::Response>,
     /// false: the sender keeps a look of its own (Sync look off), which
     /// receivers leave alone
     pub look_shared: bool,
@@ -132,6 +135,8 @@ impl Default for SettingsMsg {
             look_only: false,
             transition: None,
             display: None,
+            wall_view: None,
+            wall_focus: None,
             look_shared: true,
             tune: None,
         }
@@ -389,6 +394,8 @@ impl SettingsMsg {
         if let Some(d) = self.display.as_ref().and_then(|d| serde_json::to_string(d).ok()) {
             theme.push_str(&format!(",\"display\":{d}"));
         }
+        if let Some(v) = self.wall_view { theme.push_str(&format!(",\"wall_view\":\"{}\"", v.name())); }
+        if let Some(v) = self.wall_focus { theme.push_str(&format!(",\"wall_focus\":\"{}\"", v.name())); }
         format!(
             "\"filters\":[{}],\"fps\":{},\"smooth\":{},\"dim\":{},\"fade\":{},\"clock\":{},\"quick\":{},\"hue_shift\":{},\"saturation\":{},\"contrast\":{}{}",
             filters,
@@ -426,6 +433,8 @@ impl SettingsMsg {
             transition: json_get(text, "transition").and_then(crate::prefs::TransitionStyle::parse),
             look_shared: json_get(text, "look_shared") != Some("false"),
             display: parts.and_then(|p| p.display),
+            wall_view: json_get(text, "wall_view").and_then(crate::prefs::WallView::parse),
+            wall_focus: json_get(text, "wall_focus").and_then(crate::prefs::Response::parse),
             tune: parse_f32_array(text, "tune").and_then(|v| (v.len() == 4).then(|| [v[0], v[1], v[2], v[3]])),
         }
     }
@@ -1685,6 +1694,8 @@ mod settings_sync_tests {
             look_only: false,
             transition: None,
             display: None,
+            wall_view: Some(crate::prefs::WallView::Portals),
+            wall_focus: Some(crate::prefs::Response::Strong),
             look_shared: true,
             tune: Some([0.5, 0.8, 0.25, 1.0]),
         };

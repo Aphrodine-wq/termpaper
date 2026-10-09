@@ -241,6 +241,9 @@ pub struct Request {
     pub hysteresis: u8,
     /// the scene's Tune sliders (`ctx.params`), 0..1 each
     pub params: [f32; 4],
+    /// Interactive camera state for new Studio depth scenes.
+    #[cfg(feature = "gpu")]
+    pub depth: crate::gpu::DepthInput,
 }
 
 /// Studio scenes render this many extra pixels around the pane's window when
@@ -560,6 +563,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
                 }
                 None => crate::gpu::ShaderView::for_window(v.canvas, origin, v.pixel_aspect() as f64),
             };
+            let view = if request.depth.portals { view.off_axis(request.depth.portal_offset) } else { view };
             let u = crate::gpu::uniforms(&crate::gpu::FrameDesc {
                 view,
                 window,
@@ -573,6 +577,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
                 kaleido,
                 exposure: 0.0,
                 params: request.params,
+                depth: request.depth,
             });
             let hash = frame_hash(&u, &request);
             // the scene pass mirrors itself (seamless on a wall); the post
@@ -827,6 +832,8 @@ mod tests {
             prefetch: None,
             hysteresis: 0,
             params: [crate::scene::shader::PARAM_NEUTRAL; 4],
+            #[cfg(feature = "gpu")]
+            depth: crate::gpu::DepthInput::default(),
         }
     }
 

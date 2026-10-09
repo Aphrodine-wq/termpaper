@@ -62,6 +62,27 @@ time, so a pure function is what makes walls line up exactly.
   hard-coded pixel sizes. The output is small (a 1080p terminal is ~213x112
   pixels), so soft edges and big shapes read best.
 
+### Depth-scene input
+
+The six opt-in depth scenes also receive desk input in `Ctx`. `ctx.pointer`
+and `ctx.focus` are y-up composition positions. The leader publishes the
+previous and target positions with an epoch timestamp; every pane evaluates
+the same finite easing curve at its shared frame time. New targets have a
+short future effective time so followers receive them before they can alter
+a frame. `ctx.focus_pulse` also comes from a shared focus-event timestamp and
+reaches zero exactly.
+`ctx.parallax` and `ctx.reaction` are 0 when their controls are off, 0.5 for
+Subtle, and 1 for Strong; `ctx.depth` is the global 0..1 depth amount.
+`ctx.motion` is 0 by default, with optional slow or cinematic camera drift.
+Pointer parallax and camera motion default off so an idle desk is static.
+
+In Portals view, `ctx.portal_mode` is true and `ctx.portal` is that pane's
+off-axis eye in composition units, computed from its `WallPlan` monitor and
+frame rectangles in millimetres. The scene's `p` already uses the shifted
+frustum; a 3D scene can call `cam_portal(cam, ctx, focal_distance)` to move
+the eye correspondingly in world space. Panorama uses the unshifted physical
+desk mapping. Older scenes do not use these fields and keep their old view.
+
 ### Determinism (required)
 
 - No state, storage buffers, atomics or workgroup memory. The lint in

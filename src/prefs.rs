@@ -296,6 +296,32 @@ choice!(
     }
 );
 
+choice!(
+    /// Camera mapping for Studio scenes on a wall.
+    WallView {
+        Panorama => "panorama", "one world";
+        Portals => "portals", "separate portals";
+    }
+);
+
+choice!(
+    /// Strength of cursor and focus response.
+    Response {
+        Off => "off", "off";
+        Subtle => "subtle", "subtle";
+        Strong => "strong", "strong";
+    }
+);
+
+choice!(
+    /// Automatic camera motion in depth scenes.
+    CameraMotion {
+        Still => "still", "still";
+        Slow => "slow", "slow drift";
+        Cinematic => "cinematic", "cinematic";
+    }
+);
+
 /// Manual wall grids the Grid row steps through, (columns, rows).
 pub const GRIDS: &[(u8, u8)] = &[(2, 1), (1, 2), (3, 1), (2, 2), (4, 1), (3, 2), (4, 2), (3, 3)];
 
@@ -305,6 +331,8 @@ pub const GRIDS: &[(u8, u8)] = &[(2, 1), (1, 2), (3, 1), (2, 2), (4, 1), (3, 2),
 #[derive(Clone, Debug, PartialEq)]
 pub struct WallPrefs {
     pub mode: WallMode,
+    pub view: WallView,
+    pub focus: Response,
     /// the manual grid: columns, rows, and this pane's cell (row by row)
     pub grid: (u8, u8, u8),
     /// the terminal's inner padding, px
@@ -320,6 +348,8 @@ impl Default for WallPrefs {
     fn default() -> Self {
         WallPrefs {
             mode: WallMode::Auto,
+            view: WallView::Panorama,
+            focus: Response::Subtle,
             grid: (2, 1, 0),
             pad: 0.0,
             placement: crate::wall::Placement::TopLeft,
@@ -373,6 +403,12 @@ pub struct PlaybackPrefs {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DisplayPrefs {
+    #[serde(skip_serializing_if = "is_depth_strength")]
+    pub depth_strength: f32,
+    #[serde(skip_serializing_if = "is_still_motion")]
+    pub camera_motion: CameraMotion,
+    #[serde(skip_serializing_if = "is_off_response")]
+    pub pointer_parallax: Response,
     #[serde(skip_serializing_if = "is_default")]
     pub colors: Colors,
     /// lower the frame rate while the terminal cannot keep up, and raise it
@@ -451,6 +487,13 @@ pub struct DisplayPrefs {
 }
 
 pub const CLOCK_LEVEL: f32 = 1.0;
+pub const DEPTH_STRENGTH: f32 = 0.5;
+fn is_still_motion(v: &CameraMotion) -> bool { *v == CameraMotion::Still }
+fn is_off_response(v: &Response) -> bool { *v == Response::Off }
+
+fn is_depth_strength(v: &f32) -> bool {
+    (*v - DEPTH_STRENGTH).abs() < 1e-6
+}
 pub const CAPTION_SECS: f32 = 4.0;
 
 fn is_clock_level(v: &f32) -> bool {
@@ -491,6 +534,9 @@ fn is_night_level(v: &f32) -> bool {
 impl Default for DisplayPrefs {
     fn default() -> Self {
         DisplayPrefs {
+            depth_strength: DEPTH_STRENGTH,
+            camera_motion: CameraMotion::Still,
+            pointer_parallax: Response::Off,
             colors: Colors::Auto,
             adapt_fps: true,
             unfocused: Unfocused::Keep,
@@ -526,6 +572,8 @@ impl Default for DisplayPrefs {
 impl DisplayPrefs {
     /// Clamp what a hand-edited file may have out of range.
     pub fn sanitize(&mut self) {
+        if !self.depth_strength.is_finite() { self.depth_strength = DEPTH_STRENGTH; }
+        self.depth_strength = self.depth_strength.clamp(0.0, 1.0);
         self.night_from %= 24;
         self.night_to %= 24;
         if !self.night_level.is_finite() {
@@ -552,6 +600,9 @@ impl DisplayPrefs {
     /// clock, the scene name, night dimming), keeping this pane's own
     /// (colours, power, mouse, GPU…).
     pub fn adopt_shared(&mut self, peer: &DisplayPrefs) {
+        self.depth_strength = peer.depth_strength;
+        self.camera_motion = peer.camera_motion;
+        self.pointer_parallax = peer.pointer_parallax;
         self.clock_style = peer.clock_style;
         self.clock_format = peer.clock_format;
         self.clock_corner = peer.clock_corner;
