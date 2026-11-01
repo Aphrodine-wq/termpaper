@@ -2098,6 +2098,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
+ "unicode-width",
  "ureq",
  "wgpu",
  "windows-sys 0.61.2",

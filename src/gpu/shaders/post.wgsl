@@ -1000,3 +1000,18 @@ fn sextant_glyph(mask: u32) -> u32 {
 
 // `render::RAMP`
 const RAMP = array<u32, 10>(0x20u, 0x2eu, 0x3au, 0x2du, 0x3du, 0x2bu, 0x2au, 0x23u, 0x25u, 0x40u);
+
+// Kitty graphics: the crop's pixels as RGBA words (R in the low byte), row
+// by row, for the terminal to show as an image. No glyphs and no
+// hysteresis: an image costs the same bytes however much of it changed.
+@compute @workgroup_size(8, 8)
+fn pack_pixels(@builtin(global_invocation_id) g: vec3<u32>) {
+    let w = P.grid.x * P.dims.z;
+    let h = P.grid.y * P.dims.w;
+    if (g.x >= w || g.y >= h) { return; }
+    let x = P.grid.z + g.x;
+    let y = P.grid.w + g.y;
+    var rgb = 0u;
+    if (x < W() && y < H()) { rgb = src[idx(x, y)] & 0xffffffu; }
+    cells[g.y * w + g.x] = rgb | 0xff000000u;
+}

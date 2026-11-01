@@ -121,6 +121,7 @@ impl Check {
         let [_, quad, sext, braille] = self.answers;
         match p {
             Pixels::Half | Pixels::Ascii | Pixels::Blocks => true,
+            Pixels::Kitty | Pixels::KittyHd => crate::render::kitty_graphics(),
             Pixels::Quad => quad != Some(false),
             Pixels::Sextant => sext != Some(false),
             Pixels::Braille => braille != Some(false),
