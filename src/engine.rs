@@ -241,6 +241,9 @@ pub struct Request {
     pub hysteresis: u8,
     /// the scene's Tune sliders (`ctx.params`), 0..1 each
     pub params: [f32; 4],
+    /// Interactive camera state for new Studio depth scenes.
+    #[cfg(feature = "gpu")]
+    pub depth: crate::gpu::DepthInput,
 }
 
 /// Studio scenes render this many extra pixels around the pane's window when
@@ -261,6 +264,9 @@ pub struct Frame {
     pub cells: Option<Vec<u32>>,
     /// terminal grid `cells` were packed for
     pub grid: (usize, usize),
+    /// the pixel mode the frame was made in: for kitty pixels `cells` holds
+    /// one RGBA word per pixel of the grid instead of packed cells
+    pub pixels: Pixels,
     /// the scene clock this frame shows (the request it was rendered for,
     /// which for pipelined GPU readback is an earlier one than the request
     /// that returned it)
@@ -528,7 +534,13 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
                 }
                 ShaderStatus::Ready => {}
             }
-            let (pw, ph) = v.pixels.cell_size();
+            // kitty pixels: the governor may render a coarser rung than the
+            // mode asks for; kitty scales it over the same cells
+            governor.set_max_rung(v.pixels.kitty_rungs());
+            let render_px = v.pixels.kitty_rung(governor.rung());
+            let (pw, ph) = render_px.cell_size();
+            // how much coarser than the view's own pixels (1, 2 or 4)
+            let coarse = (v.pixels.cell_size().0 / pw.max(1)).max(1);
             // the pane's window: every pixel its cells show, starting at the
             // crop — rendered even where it overhangs the wall canvas, since
             // a Studio scene is defined everywhere — plus an apron all round
@@ -536,8 +548,9 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
             let look = request.look.get();
             let apron = if needs_apron(&look.effects.stack, request.quick.as_deref()) { APRON } else { 0 };
             let window = ((v.grid.0 * pw).max(1) + 2 * apron, (v.grid.1 * ph).max(1) + 2 * apron);
-            let origin = (v.crop.0 as i64 - apron as i64, v.crop.1 as i64 - apron as i64);
-            g.resize(window.0, window.1, v.grid.0 * v.grid.1);
+            // (in the view's own pixels; the apron is render pixels)
+            let origin = (v.crop.0 as i64 - (apron * coarse) as i64, v.crop.1 as i64 - (apron * coarse) as i64);
+            g.resize(window.0, window.1, crate::gpu::out_units(render_px, v.grid.0, v.grid.1));
             governor.set_budget(request.budget_ms);
             let mirror = look.effects.stack.iter().any(|f| f == "mirror");
             let kaleido = look.effects.stack.iter().any(|f| f == "kaleido");
@@ -558,8 +571,13 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
                         half: c.half,
                     }
                 }
-                None => crate::gpu::ShaderView::for_window(v.canvas, origin, v.pixel_aspect() as f64),
+                None => {
+                    let full = crate::gpu::ShaderView::for_window(v.canvas, origin, v.pixel_aspect() as f64);
+                    // a coarser rung covers the same window with fewer, larger pixels
+                    crate::gpu::ShaderView { step: [full.step[0] * coarse as f64, full.step[1] * coarse as f64], ..full }
+                }
             };
+            let view = if request.depth.portals { view.off_axis(request.depth.portal_offset) } else { view };
             let u = crate::gpu::uniforms(&crate::gpu::FrameDesc {
                 view,
                 window,
@@ -573,6 +591,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
                 kaleido,
                 exposure: 0.0,
                 params: request.params,
+                depth: request.depth,
             });
             let hash = frame_hash(&u, &request);
             // the scene pass mirrors itself (seamless on a wall); the post
@@ -599,28 +618,29 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
                     dim: request.dim,
                     mask: request.mask,
                     smooth,
-                    pixels: v.pixels,
+                    pixels: render_px,
                     cols: v.grid.0,
                     rows: v.grid.1,
                     // cells start past the apron
                     crop: (apron, apron),
                     // position-dependent filters work in wall coordinates
+                    // (a coarser rung: in its own pixels)
                     virt: Some([
-                        origin.0 as i32,
-                        origin.1 as i32,
-                        v.canvas.0 as i32,
-                        v.canvas.1 as i32,
+                        (origin.0 / coarse as i64) as i32,
+                        (origin.1 / coarse as i64) as i32,
+                        (v.canvas.0 / coarse) as i32,
+                        (v.canvas.1 / coarse) as i32,
                     ]),
                     hysteresis: request.hysteresis,
                 };
-                g.poll_cells(v.grid.0, v.grid.1);
+                g.poll_units(crate::gpu::out_units(render_px, v.grid.0, v.grid.1));
                 if g.submit_tagged(&raw, &plan, request.elapsed_ms) {
                     last_hash = Some(hash);
                 } else {
                     governor.on_backpressure();
                 }
             }
-            if let Some(done) = g.poll_cells(v.grid.0, v.grid.1) {
+            if let Some(done) = g.poll_units(crate::gpu::out_units(render_px, v.grid.0, v.grid.1)) {
                 cells = Some(done.words.to_vec());
             }
             shown_ms = g.readback_tag();
@@ -630,6 +650,9 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
             } else {
                 label = format!("{label} · {spp} spp");
             }
+            if render_px != v.pixels {
+                label = format!("{label} · {}", render_px.name());
+            }
             if cells.is_none() {
                 continue;
             }
@@ -638,6 +661,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
                 canvas: Canvas::new(1, 1),
                 cells,
                 grid: v.grid,
+                pixels: render_px,
                 elapsed_ms: shown_ms,
                 backend: label,
                 render_ms: start.elapsed().as_secs_f32() * 1000.0,
@@ -699,7 +723,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
         last = Instant::now();
         #[cfg(feature = "gpu")]
         if let Some(g) = gpu.as_mut().filter(|_| gpu_post) {
-            g.resize(size.0, size.1, v.grid.0 * v.grid.1);
+            g.resize(size.0, size.1, crate::gpu::out_units(v.pixels, v.grid.0, v.grid.1));
             if gpu_world {
                 g.scene_frame(&sim.name, &opts, sim.seed, t, sim.speed);
             } else {
@@ -723,9 +747,9 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
                 hysteresis: 0,
             };
             // Reclaim completed slots before trying to submit into the ring.
-            g.poll_cells(v.grid.0, v.grid.1);
+            g.poll_units(crate::gpu::out_units(v.pixels, v.grid.0, v.grid.1));
             g.submit_tagged(&raw, &plan, request.elapsed_ms);
-            if let Some(done) = g.poll_cells(v.grid.0, v.grid.1) {
+            if let Some(done) = g.poll_units(crate::gpu::out_units(v.pixels, v.grid.0, v.grid.1)) {
                 cells = Some(done.words.to_vec());
             }
             shown_ms = g.readback_tag();
@@ -752,6 +776,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
             canvas,
             cells,
             grid: v.grid,
+            pixels: v.pixels,
             elapsed_ms: shown_ms,
             backend: label,
             render_ms: start.elapsed().as_secs_f32() * 1000.0,
@@ -827,6 +852,8 @@ mod tests {
             prefetch: None,
             hysteresis: 0,
             params: [crate::scene::shader::PARAM_NEUTRAL; 4],
+            #[cfg(feature = "gpu")]
+            depth: crate::gpu::DepthInput::default(),
         }
     }
 
@@ -904,6 +931,7 @@ mod tests {
             canvas: Canvas::new(24, 24),
             cells: None,
             grid: (24, 12),
+            pixels: Pixels::Half,
             elapsed_ms: 999,
             backend: "test".into(),
             render_ms: 0.0,
@@ -951,6 +979,7 @@ mod tests {
             canvas: Canvas::new(24, 24),
             cells: None,
             grid: (24, 12),
+            pixels: Pixels::Half,
             elapsed_ms: 5_000,
             backend: "test".into(),
             render_ms: 0.0,

@@ -34,6 +34,15 @@ struct Ctx {
     sample: u32,
     spp: u32,
     params: vec4f,
+    pointer: vec2f,
+    focus: vec2f,
+    depth: f32,
+    motion: f32,
+    parallax: f32,
+    reaction: f32,
+    portal: vec2f,
+    portal_mode: bool,
+    focus_pulse: f32,
 }
 
 fn saturate(x: f32) -> f32 { return clamp(x, 0.0, 1.0); }

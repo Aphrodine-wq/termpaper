@@ -22,6 +22,29 @@ pub enum Pixels {
     Ascii,
     /// 1x1 px per cell as a background colour: the fewest bytes a frame.
     Blocks,
+    /// 2x4 px per cell as a real image, through the kitty graphics protocol
+    /// and shared memory: kitty smooths it to the window, and a frame costs
+    /// the terminal one short escape instead of a screenful of colours. Only
+    /// in a local kitty; anywhere else it falls back to half blocks.
+    Kitty,
+    /// `Kitty` at 4x8 px per cell: razor sharp, at four times the GPU work.
+    KittyHd,
+    /// `Kitty` at 1x2 px per cell: the coarsest rung the governor steps a
+    /// kitty mode down to when the GPU cannot keep up. Not offered in the
+    /// menu; a frame rendered at it still shows under the mode that asked.
+    KittyLo,
+}
+
+/// Whether this terminal shows kitty graphics through shared memory. Set
+/// once at startup from the environment (see `term_caps`).
+static KITTY_GRAPHICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_kitty_graphics(on: bool) {
+    KITTY_GRAPHICS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn kitty_graphics() -> bool {
+    KITTY_GRAPHICS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Pixels {
@@ -34,11 +57,58 @@ impl Pixels {
             Pixels::Sextant => (2, 3),
             Pixels::Ascii => (1, 2),
             Pixels::Blocks => (1, 1),
+            Pixels::Kitty => (2, 4),
+            Pixels::KittyHd => (4, 8),
+            Pixels::KittyLo => (1, 2),
         }
     }
 
     /// Every mode, in menu order.
-    pub const ALL: [Pixels; 6] = [Pixels::Half, Pixels::Quad, Pixels::Braille, Pixels::Sextant, Pixels::Ascii, Pixels::Blocks];
+    pub const ALL: [Pixels; 8] = [
+        Pixels::Half,
+        Pixels::Quad,
+        Pixels::Braille,
+        Pixels::Sextant,
+        Pixels::Ascii,
+        Pixels::Blocks,
+        Pixels::Kitty,
+        Pixels::KittyHd,
+    ];
+
+    /// A kitty graphics mode: the picture is an image, not cells.
+    pub fn is_kitty(self) -> bool {
+        matches!(self, Pixels::Kitty | Pixels::KittyHd | Pixels::KittyLo)
+    }
+
+    /// How many coarser kitty rungs lie below this mode (`kitty_rung`).
+    pub fn kitty_rungs(self) -> u32 {
+        match self {
+            Pixels::KittyHd => 2,
+            Pixels::Kitty => 1,
+            _ => 0,
+        }
+    }
+
+    /// This kitty mode rendered `down` rungs coarser: 4x8 → 2x4 → 1x2 px per
+    /// cell. kitty scales the image over the same cells, so the framing and
+    /// the wall's seams do not move; only the sharpness does.
+    pub fn kitty_rung(self, down: u32) -> Self {
+        let mut p = self;
+        for _ in 0..down {
+            p = match p {
+                Pixels::KittyHd => Pixels::Kitty,
+                Pixels::Kitty => Pixels::KittyLo,
+                other => other,
+            };
+        }
+        p
+    }
+
+    /// The mode this terminal can show: kitty pixels fall back to half
+    /// blocks where kitty graphics are not available.
+    pub fn effective(self) -> Self {
+        if self.is_kitty() && !kitty_graphics() { Pixels::Half } else { self }
+    }
 
     /// The mode's number in the GPU `pack_cells` pass.
     pub fn code(self) -> u32 {
@@ -49,6 +119,8 @@ impl Pixels {
             Pixels::Sextant => 3,
             Pixels::Ascii => 4,
             Pixels::Blocks => 5,
+            // never reaches `pack_cells`: kitty frames take `pack_pixels`
+            Pixels::Kitty | Pixels::KittyHd | Pixels::KittyLo => 6,
         }
     }
 
@@ -71,19 +143,25 @@ impl Pixels {
             Pixels::Sextant => "sextant",
             Pixels::Ascii => "ascii",
             Pixels::Blocks => "blocks",
+            Pixels::Kitty => "kitty",
+            Pixels::KittyHd => "kitty-hd",
+            Pixels::KittyLo => "kitty-lo",
         }
     }
 
-    /// The next mode in menu order, wrapping.
+    /// The next mode in menu order, wrapping (past kitty pixels where the
+    /// terminal cannot show them).
     pub fn next(self) -> Self {
         let i = Pixels::ALL.iter().position(|p| *p == self).unwrap_or(0);
-        Pixels::ALL[(i + 1) % Pixels::ALL.len()]
+        let n = Pixels::ALL[(i + 1) % Pixels::ALL.len()];
+        if n.effective() != n { n.next() } else { n }
     }
 
     /// The previous mode in menu order, wrapping.
     pub fn prev(self) -> Self {
         let i = Pixels::ALL.iter().position(|p| *p == self).unwrap_or(0);
-        Pixels::ALL[(i + Pixels::ALL.len() - 1) % Pixels::ALL.len()]
+        let n = Pixels::ALL[(i + Pixels::ALL.len() - 1) % Pixels::ALL.len()];
+        if n.effective() != n { n.prev() } else { n }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -223,6 +301,23 @@ fn mean2(a: (u8, u8, u8), b: (u8, u8, u8)) -> (u8, u8, u8) {
     (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
 }
 
+/// A crop of the canvas as RGBA bytes, `cols` by `rows` cells of a kitty
+/// mode's pixels, for kitty graphics. Pixels outside the canvas are black, as
+/// in `draw_crop`.
+#[allow(clippy::too_many_arguments)]
+pub fn kitty_rgba(canvas: &Canvas, mode: Pixels, crop_x: i32, crop_y: i32, cols: usize, rows: usize, out: &mut Vec<u8>) {
+    let (pw, ph) = mode.cell_size();
+    let (w, h) = (cols * pw, rows * ph);
+    out.clear();
+    out.reserve(w * h * 4);
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let (r, g, b) = canvas.get(crop_x + x, crop_y + y).color;
+            out.extend_from_slice(&[r, g, b, 255]);
+        }
+    }
+}
+
 /// Paint the canvas into a ratatui buffer in the given pixel mode.
 /// Canvas dims must be (area.width*pw, area.height*ph).
 pub fn draw(canvas: &Canvas, area: Rect, buf: &mut Buffer, truecolor: bool, mode: Pixels) {
@@ -260,6 +355,8 @@ pub fn draw_crop(
                 continue;
             }
             match mode {
+                // the picture is an image under the text layer (`kitty_rgba`)
+                Pixels::Kitty | Pixels::KittyHd | Pixels::KittyLo => {}
                 Pixels::Half => {
                     let bottom = canvas.get(crop_x + col as i32, crop_y + (row * 2 + 1) as i32);
                     cell.set_char('▀');
@@ -610,10 +707,17 @@ mod mode_tests {
     fn modes_round_trip_by_name_and_cycle() {
         for p in Pixels::ALL {
             assert_eq!(Pixels::parse(p.name()), Some(p));
-            assert_eq!(p.next().prev(), p);
+            if p.effective() == p {
+                assert_eq!(p.next().prev(), p);
+            }
         }
+        // without kitty graphics (as in tests) the cycle steps past kitty
+        // pixels, and asking for them gets half blocks
         assert_eq!(Pixels::Blocks.next(), Pixels::Half);
         assert_eq!(Pixels::Half.prev(), Pixels::Blocks);
+        assert_eq!(Pixels::Kitty.effective(), Pixels::Half);
+        assert_eq!(Pixels::KittyHd.effective(), Pixels::Half);
+        assert_eq!(Pixels::parse("kitty-hd"), Some(Pixels::KittyHd));
         assert_eq!(Pixels::parse("sixel"), None);
     }
 

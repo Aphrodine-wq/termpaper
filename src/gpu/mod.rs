@@ -52,7 +52,7 @@ mod shader_scene;
 mod world;
 
 pub use shader_scene::{
-    shader_time, uniforms, FrameDesc, FrameUniforms, Pixels as ShaderPixels, ShaderTime, ShaderView,
+    portal_eye, shader_time, uniforms, DepthInput, FrameDesc, FrameUniforms, Pixels as ShaderPixels, ShaderTime, ShaderView,
     Status as ShaderStatus,
 };
 
@@ -84,6 +84,18 @@ const SLOTS: usize = 3;
 
 /// Cell readback stride, in u32: codepoint, packed fg, packed bg.
 const CELL_WORDS: usize = 3;
+
+/// Readback units a frame needs (`CELL_WORDS` words each): one per cell, or,
+/// for kitty pixels, enough for one RGBA word per pixel of the grid.
+pub fn out_units(pixels: crate::render::Pixels, cols: usize, rows: usize) -> usize {
+    match pixels {
+        p if p.is_kitty() => {
+            let (pw, ph) = pixels.cell_size();
+            (cols * rows * pw * ph).div_ceil(CELL_WORDS)
+        }
+        _ => cols * rows,
+    }
+}
 
 /// `pack_cells` writes this codepoint when the cell carries a glyph the CPU
 /// owns; fg/bg are still valid and only the character is substituted.
@@ -118,6 +130,9 @@ enum Target {
     Aux,
     /// Writes the cell buffer, and dispatches over the cell grid.
     Cells,
+    /// Writes the cell buffer with one RGBA word per pixel of the crop, and
+    /// dispatches over those pixels (kitty graphics).
+    Pixels,
 }
 
 struct Pass {
@@ -470,6 +485,7 @@ impl Gpu {
             "palette_snap",
             "temporal_smooth",
             "pack_cells",
+            "pack_pixels",
         ];
         let mut pipelines = std::collections::HashMap::new();
         for name in ENTRIES {
@@ -843,7 +859,11 @@ impl Gpu {
             pack.flags[1] = plan.hysteresis as u32;
             pack.flags[2] = (self.hist_grid == Some((plan.cols, plan.rows))) as u32;
         }
-        push("pack_cells", pack, Target::Cells);
+        if plan.pixels.is_kitty() {
+            push("pack_pixels", base, Target::Pixels);
+        } else {
+            push("pack_cells", pack, Target::Cells);
+        }
         passes
     }
 
@@ -864,7 +884,7 @@ impl Gpu {
         if !shader {
             debug_assert_eq!((canvas.width(), canvas.height()), (w, h));
         }
-        let cells = plan.cols * plan.rows;
+        let cells = out_units(plan.pixels, plan.cols, plan.rows);
         if cells == 0 || cells > self.cell_capacity {
             return false;
         }
@@ -982,6 +1002,10 @@ impl Gpu {
                 cp.set_bind_group(0, &self.bind[bg], &[(i * stride) as u32]);
                 let (gx, gy) = match pass.target {
                     Target::Cells => (plan.cols, plan.rows),
+                    Target::Pixels => {
+                        let (pw, ph) = plan.pixels.cell_size();
+                        (plan.cols * pw, plan.rows * ph)
+                    }
                     _ => (w, h),
                 };
                 cp.dispatch_workgroups(gx.div_ceil(8) as u32, gy.div_ceil(8) as u32, 1);
@@ -1040,6 +1064,12 @@ impl Gpu {
     /// Returns `None` on the first frame after a resize — there is nothing in
     /// flight yet — and the caller draws that one on the CPU.
     pub fn poll_cells(&mut self, cols: usize, rows: usize) -> Option<FrameCells<'_>> {
+        self.poll_units(cols * rows).map(|f| FrameCells { cols, rows, ..f })
+    }
+
+    /// `poll_cells` for a frame of `units` readback units (see [`out_units`]).
+    pub fn poll_units(&mut self, units: usize) -> Option<FrameCells<'_>> {
+        let (cols, rows) = (units, 1);
         let _ = self.device.poll(wgpu::PollType::Poll);
         let mut ready: Vec<_> = (0..self.slots.len())
             .filter(|&i| self.slots[i].pending.is_some()

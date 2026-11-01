@@ -25,8 +25,28 @@ pub struct FrameUniforms {
     pub ids: [u32; 4],
     pub qual: [f32; 4],
     pub params: [[f32; 4]; 2],
+    /// pointer xy, focused-monitor xy in composition coordinates
+    pub interaction: [f32; 4],
+    /// depth, camera drift, pointer response, focus response
+    pub depth: [f32; 4],
+    /// physical off-axis eye xy, portal flag, recent focus pulse
+    pub portal: [f32; 4],
 }
-const _: () = assert!(std::mem::size_of::<FrameUniforms>() == 128);
+const _: () = assert!(std::mem::size_of::<FrameUniforms>() == 176);
+
+/// Transient camera controls shared by the panes of a wall.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DepthInput {
+    pub pointer: [f32; 2],
+    pub focus: [f32; 2],
+    pub strength: f32,
+    pub motion: f32,
+    pub parallax: f32,
+    pub reaction: f32,
+    pub portal_offset: [f32; 2],
+    pub portals: bool,
+    pub focus_pulse: f32,
+}
 
 /// How a pane's pixels map into composition space (y up, the frame's short
 /// side spanning [-0.5, 0.5]). `origin` is the point at the top-left corner of
@@ -58,6 +78,28 @@ impl ShaderView {
         let origin = [-half[0] + win.0 as f64 * step[0], half[1] - win.1 as f64 * step[1]];
         Self { origin, step, half }
     }
+
+    /// A portal shifts the eye in a shared physical desk plane. Keep the
+    /// pane's millimetre-derived pixel pitch and subtract the eye from its
+    /// frustum, instead of recentering every pane on a local canvas.
+    pub fn off_axis(mut self, eye: [f32; 2]) -> Self {
+        self.origin[0] -= eye[0] as f64;
+        self.origin[1] -= eye[1] as f64;
+        self
+    }
+}
+
+/// Portal eye position in composition units, derived from the actual desk
+/// frame and this pane's monitor rectangle (both millimetres). The pixel
+/// frustum still comes from the pane's measured content rectangle.
+/// A partial shift makes distinct views while keeping the same world.
+pub fn portal_eye(frame: crate::desk::RectMm, content: crate::desk::RectMm) -> [f32; 2] {
+    let short = frame.w.min(frame.h).max(1.0);
+    let fx = frame.x + frame.w * 0.5;
+    let fy = frame.y + frame.h * 0.5;
+    let cx = content.x + content.w * 0.5;
+    let cy = content.y + content.h * 0.5;
+    [((cx - fx) / short * 0.35) as f32, ((fy - cy) / short * 0.35) as f32]
 }
 
 /// Scene time from the shared clock. Continuous (ms resolution): a Studio
@@ -113,6 +155,7 @@ pub struct FrameDesc {
     pub exposure: f32,
     /// the Tune sliders, 0..1 each (`shader::PARAM_NEUTRAL` at rest)
     pub params: [f32; 4],
+    pub depth: DepthInput,
 }
 
 pub fn uniforms(d: &FrameDesc) -> FrameUniforms {
@@ -127,6 +170,9 @@ pub fn uniforms(d: &FrameDesc) -> FrameUniforms {
         ids: [d.seed as u32, (d.seed >> 32) as u32, d.theme, shader::detail_index(d.detail)],
         qual: [shader::march_scale(d.detail), d.exposure, 0.0, 0.0],
         params: [d.params, [0.0; 4]],
+        interaction: [d.depth.pointer[0], d.depth.pointer[1], d.depth.focus[0], d.depth.focus[1]],
+        depth: [d.depth.strength, d.depth.motion, d.depth.parallax, d.depth.reaction],
+        portal: [d.depth.portal_offset[0], d.depth.portal_offset[1], d.depth.portals as u32 as f32, d.depth.focus_pulse],
     }
 }
 
@@ -588,6 +634,21 @@ mod tests {
         // the crop's first pixel is the full view's pixel (150, 60)
         assert!((crop.origin[0] - (full.origin[0] + 150.0 * full.step[0])).abs() < 1e-12);
         assert!((crop.origin[1] - (full.origin[1] - 60.0 * full.step[1])).abs() < 1e-12);
+    }
+
+    #[test]
+    fn portal_eyes_follow_physical_monitor_centres() {
+        let frame = crate::desk::RectMm { x: 0.0, y: 0.0, w: 600.0, h: 300.0 };
+        let left = crate::desk::RectMm { x: 0.0, y: 0.0, w: 300.0, h: 300.0 };
+        let right = crate::desk::RectMm { x: 300.0, y: 0.0, w: 300.0, h: 300.0 };
+        let a = portal_eye(frame, left);
+        let b = portal_eye(frame, right);
+        assert!(a[0] < 0.0 && b[0] > 0.0);
+        assert!((a[0] + b[0]).abs() < 1e-6);
+        let base = ShaderView::for_canvas((600, 300), (0, 0), 1.0);
+        let shifted = base.off_axis(a);
+        assert_eq!(base.step, shifted.step);
+        assert!((shifted.origin[0] - base.origin[0] + a[0] as f64).abs() < 1e-8);
     }
 
     #[test]

@@ -3,8 +3,8 @@
 **Wallpaper Engine for the terminal.** Real places, rendered live on your GPU —
 Big Sur at sunset, a Shinjuku alley in the rain, the aurora over Tromsø, a
 ramen stall under paper lanterns, a black hole bending its own light — in
-the terminal you already use, on **Linux, macOS and Windows**. **62 Studio
-scenes** are GPU-rendered places, aerial views and games with 3–4 variants each; the **51 Classic** hand-animated CPU scenes are
+the terminal you already use, on **Linux, macOS and Windows**. **68 Studio
+scenes** are GPU-rendered places, aerial views, surreal spaces and games with variants; the **51 Classic** hand-animated CPU scenes are
 still here. Give any of them a **theme** — a colour grade, a palette and a
 few effects in one small file — pick from 34, make your own, or install one
 someone shared. Run one terminal per monitor and they become **one
@@ -29,10 +29,14 @@ termpaper                            # press ? — browse, preview, tune
 
 ## New in 0.3 (local preview)
 
-113 scenes: 62 Studio and all 51 Classic originals. The new **Drone & Aerial**
+119 scenes: 68 Studio and all 51 Classic originals. The new **Drone & Aerial**
 category has Coastline, Rice Terraces, Canyon Flight, Braided River, Atoll and
 City Grid. **Video Games** adds Voxel Valley, Outrun Highway, Arcade Hall,
 Pong, Snake and Falling Blocks.
+Six depth scenes add a Fish Tank Wall, Sky Islands, a Wormhole Mouth, Penrose
+Stairs, Hypercube Chamber and Hopf Fibration. Hyprland walls can show one
+continuous panorama or physical off-axis portal views, with optional pointer
+parallax and focused-monitor lighting.
 
 - **Fullscreen** is on by default; `F` toggles it and `--no-fullscreen` leaves
   the window as it is. The previous window state is restored on quit.
@@ -58,11 +62,12 @@ time budget), tonemapped with AgX, and dithered once, statically, so they
 cost the terminal as little bandwidth as possible.
 
 <!-- studio-catalog:begin -->
-**Coast & Water** (8)
+**Coast & Water** (9)
 
 | scene | | variants |
 |---|---|---|
 | `bigsur` | Big Sur Coast — headlands of the Big Sur coast dropping into Pacific swells as marine fog rolls in | sunset · fog · noon · moonlight |
+| `fishtank` | Fish Tank Wall — a long reef tank at the glass: caustics on the sand, swaying plants, fish crossing panes | daylight · evening · moonlit |
 | `harbor` | Fishing Harbor at Dawn — lobster boats riding at their moorings in a misty cove of fish shacks and a wooden pier | dawn · dusk · night |
 | `icebergs` | Jökulsárlón — blue icebergs drift in a glacier lagoon below Vatnajökull, ice glinting on black sand | day · twilight · aurora |
 | `jellyfish` | Moon Jelly Gallery — translucent moon jellies pulse and drift through the blue of an aquarium gallery tank | blue · sunset · deep |
@@ -126,7 +131,7 @@ cost the terminal as little bandwidth as possible.
 | `porch` | Summer Storm Porch — a screened Southern porch at dusk: rain off the eaves, a rocking chair, fireflies after | storm · fireflies · night |
 | `ramen` | Ramen Counter — a bowl steaming on a ramen counter under paper lanterns, rain beyond the noren | rain · night · snow |
 
-**Space** (7)
+**Space** (8)
 
 | scene | | variants |
 |---|---|---|
@@ -137,8 +142,9 @@ cost the terminal as little bandwidth as possible.
 | `moonrise` | Moonrise over the Ocean — a huge orange moon lifting off the sea, its glittering path running in to a dark shore | harvest · full · crescent |
 | `saturn` | Cassini at Saturn — Saturn and its rings from Cassini: ring shadows on the clouds, a moon on its orbit | sunlit · backlit · equinox |
 | `tromso` | Aurora over Tromsø — green aurora curtains rippling over a snowy Norwegian fjord and its village lights | green · vivid · faint |
+| `wormhole` | Wormhole Mouth — a wormhole from outside: another universe through the throat, our own sky bent round its r | aurora · ember · ghost |
 
-**Drone & Aerial** (6)
+**Drone & Aerial** (7)
 
 | scene | | variants |
 |---|---|---|
@@ -147,6 +153,7 @@ cost the terminal as little bandwidth as possible.
 | `canyonfly` | Canyon Flight — a slow drone flight up a sandstone canyon, the river winding below, one wall in sun | noon · sunset · dawn |
 | `coastline` | Drone over the Shore — a drone hanging over a beach, lines of surf rolling onto the sand from above | golden · noon · storm |
 | `metrogrid` | City Grid at Night — straight down on a city at night: dark blocks, lamp-dotted streets, a river, headlights | night · rain · dusk |
+| `skyislands` | Sky Islands — grass-topped islands floating over a sea of cloud, a waterfall pouring off the nearest | sunrise · noon · dusk · storm |
 | `terraces` | Rice Terraces — a drone over stepped rice terraces, each paddy a mirror of the sky, mist in the valley | dawn · green · mist |
 
 **Video Games** (6)
@@ -159,6 +166,14 @@ cost the terminal as little bandwidth as possible.
 | `snake` | Snake — a snake that mows the board row by row, eating as it grows, on a glowing grid | classic · neon · handheld |
 | `stackfall` | Falling Blocks — blocks fall into a well and stack up, rows flash and clear, and it starts again | classic · pastel · mono |
 | `voxelvalley` | Voxel Valley — a blocky voxel valley: cube terrain, square trees, a flat lake, a square sun over it all | day · sunset · night · snow |
+
+**Abstract** (3)
+
+| scene | | variants |
+|---|---|---|
+| `hopffibration` | Hopf Fibration — linked rings of lit glass, fibres of the three-sphere, turning on a plinth in a gallery | ultraviolet · pearl · gold |
+| `hypercube` | Hypercube Chamber — a tesseract of glowing glass rods turning in four dimensions in a concrete gallery | violet · ice · ember |
+| `penrosestairs` | Penrose Stairs — sandstone stairs that climb forever around a courtyard, one lantern walking the loop | noon · evening · moonlit · rain |
 <!-- studio-catalog:end -->
 
 No GPU? Studio scenes fall back to a related Classic scene, and linked
@@ -789,6 +804,8 @@ link = true               # false = solo art
 group = "wallpaper"       # sync cluster
 wall = true               # false = never crop into a video wall
 wall_grid = "2x1:0"       # a manual wall: COLSxROWS:INDEX
+wall_view = "panorama"    # panorama|portals (physical Hyprland wall)
+wall_focus = "subtle"     # off|subtle|strong
 pad = 0                   # terminal padding: px, "3.5pt", or [x, y]
 placement = "top-left"    # top-left|center
 sync_look = true          # take the group's look
@@ -810,6 +827,9 @@ time_of_day = true        # follow the clock through a scene's variants
 on_launch = "favorite"    # last|favorite|random
 
 [display]
+depth_strength = 0.5      # 0–1, for depth scenes
+camera_motion = "still"  # still|slow|cinematic
+pointer_parallax = "off" # off|subtle|strong (Hyprland)
 colors = "auto"           # auto|truecolor|256
 adapt_fps = true
 unfocused = "30"          # keep|30|15|pause

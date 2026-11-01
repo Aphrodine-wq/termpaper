@@ -381,7 +381,7 @@ fn switch_remote(scene: &str, group: Option<&str>, all: bool, args: &Args) -> st
         detail: args.detail.as_deref().or(cfg.detail.as_deref()).and_then(Detail::parse)
             .unwrap_or_else(platform_default_detail).name().to_string(),
         pixels: args.pixels.as_deref().or(cfg.pixels.as_deref()).and_then(Pixels::parse)
-            .unwrap_or_else(platform_default_pixels).name().to_string(),
+            .unwrap_or_else(platform_default_pixels).effective().name().to_string(),
         text_scale: args.text_scale.or(cfg.text_scale),
         proto: link::PROTO,
     };
@@ -421,6 +421,8 @@ fn wall_prefs(settings: &Settings) -> termpaper::prefs::WallPrefs {
             (false, None) => WallMode::Off,
         },
         grid: grid.unwrap_or((2, 1, 0)),
+        view: settings.cfg.wall_view.unwrap_or_default(),
+        focus: settings.cfg.wall_focus.unwrap_or(termpaper::prefs::Response::Subtle),
         pad: settings.pad.0,
         placement: settings.placement,
         bezel_mm: settings.bezel_mm,
@@ -879,6 +881,11 @@ fn main() -> std::io::Result<()> {
     // crossterm honors NO_COLOR by stripping all colors, which would render
     // every scene as blank gray blocks — explicitly re-enable colors.
     crossterm::style::Colored::set_ansi_color_disabled(false);
+    // kitty pixels need a local kitty; everywhere else they fall back
+    if termpaper::kitty::supported() {
+        termpaper::render::set_kitty_graphics(true);
+        termpaper::kitty::sweep();
+    }
 
     // the old flags map onto the subcommands (same precedence as before)
     let command = args.command.take().or_else(|| {
@@ -985,7 +992,8 @@ fn main() -> std::io::Result<()> {
         .as_deref()
         .or(cfg.pixels.as_deref())
         .and_then(Pixels::parse)
-        .unwrap_or_else(platform_default_pixels);
+        .unwrap_or_else(platform_default_pixels)
+        .effective();
     let keymap = config::KeyMap::new(&cfg);
     let themes = termpaper::theme::Store::load();
     let (variant_arg, cli_theme) = resolve_theme_args(&args, &scene_name, &themes);
@@ -1126,7 +1134,7 @@ fn main() -> std::io::Result<()> {
 /// that `ratatui::init` uses would split it into hundreds of writes the
 /// terminal can render half-way through (tearing).
 type Term = ratatui::Terminal<
-    ratatui::backend::CrosstermBackend<std::io::BufWriter<termpaper::pace::Meter<std::io::Stdout>>>,
+    termpaper::lean::LeanBackend<std::io::BufWriter<termpaper::pace::Meter<std::io::Stdout>>>,
 >;
 
 /// Frame output buffer. Big enough for a full braille frame of a large
@@ -1147,10 +1155,13 @@ fn init_terminal() -> std::io::Result<(Term, termpaper::pace::Reading)> {
     // took and how long it blocked
     let (meter, reading) = termpaper::pace::Meter::new(std::io::stdout());
     let out = std::io::BufWriter::with_capacity(OUT_BUFFER, meter);
-    Ok((ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(out))?, reading))
+    Ok((ratatui::Terminal::new(termpaper::lean::LeanBackend::new(out))?, reading))
 }
 
 fn restore_terminal() {
+    if termpaper::render::kitty_graphics() {
+        let _ = termpaper::kitty::forget(&mut std::io::stdout());
+    }
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(
         std::io::stdout(),
@@ -1312,6 +1323,11 @@ fn frame_period_ms(settings: &Settings, focused: bool, scene_name: &str) -> f64 
     if let Some(cap) = settings.fps_cap {
         fps = fps.min(cap);
     }
+    // a kitty image is a texture upload for the terminal every frame: 60 is
+    // plenty, and leaves the GPU to the compositor
+    if settings.pixels.is_kitty() {
+        fps = fps.min(60);
+    }
     if scene::lookup(scene_name).is_some_and(|e| e.needs_gpu()) {
         fps = fps.min(settings.display.studio_fps);
     } else {
@@ -1342,6 +1358,8 @@ fn settings_msg(settings: &Settings, _opts: &SceneOptions, quick: &Option<String
         look_only: false,
         transition: Some(settings.playback.transition),
         display: Some(settings.display.clone()),
+        wall_view: Some(wall_prefs(settings).view),
+        wall_focus: Some(wall_prefs(settings).focus),
         look_shared: settings.sync_look,
         tune: Some(config::tune_for(&settings.cfg, &settings.current_scene)),
     }
@@ -1396,6 +1414,8 @@ fn apply_appearance(
     if let Some(d) = &m.display {
         settings.display.adopt_shared(d);
     }
+    if let Some(view) = m.wall_view { settings.cfg.wall_view = (view != termpaper::prefs::WallView::Panorama).then_some(view); }
+    if let Some(focus) = m.wall_focus { settings.cfg.wall_focus = (focus != termpaper::prefs::Response::Subtle).then_some(focus); }
     if let Some(t) = m.tune {
         let scene = settings.current_scene.clone();
         config::set_tune(&mut settings.cfg, &scene, t);
@@ -1483,7 +1503,7 @@ fn adopt_settings(a: &link::Anchor, settings: &mut Settings, opts: &mut SceneOpt
     opts.text_scale = a.text_scale;
     settings.text_scale = a.text_scale;
     settings.speed = a.speed;
-    if let Some(p) = Pixels::parse(&a.pixels) {
+    if let Some(p) = Pixels::parse(&a.pixels).map(Pixels::effective) {
         settings.pixels = p;
         opts.pixels = p;
     }
@@ -2209,6 +2229,8 @@ fn run(
     let mut calib_watcher: Option<termpaper::calibrate::Watcher> = None;
     let mut wall_plan: Option<termpaper::wallplan::WallPlan> = None;
     let mut plan_group = String::new();
+    let mut interaction_watcher: Option<termpaper::interaction::Watcher> = None;
+    let mut interaction_group = String::new();
     // resampling buffer for Classic panes whose cells differ from the canvas
     let mut classic_scratch = termpaper::canvas::Canvas::new(1, 1);
     // monitors for the calibration pattern, refreshed with the wall
@@ -2252,6 +2274,11 @@ fn run(
     let mut held_since: Option<Instant> = None;
     // Light output on Classic scenes: the cells last sent
     let mut sent_cells: Vec<ratatui::buffer::Cell> = Vec::new();
+    // kitty pixels: the picture as one image under the text, its pixels, and
+    // what it last showed (a frame already up is not sent again)
+    let mut kitty_image = termpaper::kitty::Image::default();
+    let mut kitty_rgba: Vec<u8> = Vec::new();
+    let mut kitty_shown: Option<(u64, u64, Rect)> = None;
     let power = termpaper::platform::PowerWatcher::spawn();
     // Pause behind apps: our own window (and its terminal) never count
     let mut fullscreen_watcher = None;
@@ -2434,7 +2461,7 @@ fn run(
                     save.mark(now);
                 }
                 Effect::SetPixels(p) => {
-                    settings.pixels = p;
+                    settings.pixels = p.effective();
                     save.mark(now);
                 }
                 Effect::SetDetail(d) => {
@@ -2551,6 +2578,8 @@ fn run(
                         }
                     }
                     settings.sync_look = w.sync_look;
+                    settings.cfg.wall_view = (w.view != termpaper::prefs::WallView::Panorama).then_some(w.view);
+                    settings.cfg.wall_focus = (w.focus != termpaper::prefs::Response::Subtle).then_some(w.focus);
                     // re-lay the wall (and republish geometry) next frame
                     wall_refresh = Instant::now() - Duration::from_secs(10);
                     save.mark(now);
@@ -3325,6 +3354,21 @@ fn run(
             }
         }
         let calib_state = calib_watcher.as_mut().and_then(|w| w.poll().cloned());
+        if hypr_ok {
+            let solo = format!("solo-{}", std::process::id());
+            let group = if settings.link_enabled { settings.link_group.as_str() } else { solo.as_str() };
+            if interaction_watcher.is_none() || interaction_group != group {
+                interaction_group = group.to_string();
+                interaction_watcher = link::group_dir(group).map(termpaper::interaction::Watcher::spawn);
+            }
+            if let Some(w) = &interaction_watcher {
+                let me = std::process::id();
+                let input_leader = !settings.link_enabled
+                    || peers.list.iter().map(|p| p.pid).chain(std::iter::once(me)).min() == Some(me);
+                w.set_leader(input_leader);
+                w.set_pointer_enabled(settings.display.pointer_parallax != termpaper::prefs::Response::Off);
+            }
+        }
 
         // unfocused with Pause: hold the picture and keep listening. A
         // scene of its own resumes where it stopped; one the group runs
@@ -3358,7 +3402,7 @@ fn run(
             crossterm::queue!(terminal.backend_mut(), crossterm::terminal::BeginSynchronizedUpdate)?;
             // what is on screen comes from the running anchor; `settings` may
             // already hold the next one's values while a switch is pending
-            let shown_pixels = Pixels::parse(&st.cur.pixels).unwrap_or(settings.pixels);
+            let shown_pixels = Pixels::parse(&st.cur.pixels).unwrap_or(settings.pixels).effective();
             let shown_opts = SceneOptions {
                 theme: st.cur.theme.clone(),
                 detail: Detail::parse(&st.cur.detail).unwrap_or(opts.detail),
@@ -3370,6 +3414,7 @@ fn run(
                 Some(at) => at.saturating_sub(st.cur.t0_ms),
                 None => termpaper::sync::slot_elapsed_ms(target, period),
             };
+            let mut kitty_frame: Option<(usize, usize, u16, u16, u16, u16)> = None;
             terminal.draw(|f| {
                 let area = f.area();
                 let (pw, ph) = shown_pixels.cell_size();
@@ -3406,6 +3451,36 @@ fn run(
                     size.1 as u32,
                 );
                 let dim = if mask.is_some() { settings.dim * night } else { fade * settings.dim * night };
+                #[cfg(feature = "gpu")]
+                let depth = {
+                    use termpaper::prefs::{CameraMotion, Response, WallView};
+                    let snap = interaction_watcher.as_ref().map(|w| w.latest()).unwrap_or_default();
+                    let fresh = snap.fresh(link::epoch_now_ms());
+                    let response = |r| match r { Response::Off => 0.0, Response::Subtle => 0.5, Response::Strong => 1.0 };
+                    let shared_frame_ms = st.cur.t0_ms.saturating_add(elapsed_ms);
+                    let wp = wall_prefs(&settings);
+                    let depth_scene = matches!(st.cur.scene.as_str(),
+                        "fishtank" | "hopffibration" | "hypercube" | "penrosestairs" | "skyislands" | "wormhole");
+                    let portal_offset = match (wall_plan.as_ref(), my_plan.as_ref()) {
+                        (Some(plan), Some((_, pp))) => {
+                            let monitor = plan.desk.iter().find(|(name, _, _)| name == &pp.monitor)
+                                .map(|(_, rect, _)| *rect).unwrap_or(pp.content);
+                            termpaper::gpu::portal_eye(plan.frame, monitor)
+                        }
+                        _ => [0.0, 0.0],
+                    };
+                    termpaper::gpu::DepthInput {
+                        pointer: if fresh { snap.pointer_at(shared_frame_ms) } else { [0.0; 2] },
+                        focus: if fresh { snap.focus_at(shared_frame_ms) } else { [0.0; 2] },
+                        strength: settings.display.depth_strength,
+                        motion: match settings.display.camera_motion { CameraMotion::Still => 0.0, CameraMotion::Slow => 0.5, CameraMotion::Cinematic => 1.0 },
+                        parallax: if fresh { response(settings.display.pointer_parallax) } else { 0.0 },
+                        reaction: if fresh { response(wp.focus) } else { 0.0 },
+                        portal_offset,
+                        portals: depth_scene && wp.view == WallView::Portals && my_plan.is_some(),
+                        focus_pulse: if fresh { snap.focus_pulse_at(shared_frame_ms) } else { 0.0 },
+                    }
+                };
                 let request = termpaper::engine::Request {
                     generation: 0,
                     // what is simulated: a change rebuilds (and replays out of sight)
@@ -3430,7 +3505,12 @@ fn run(
                     // replaying up to it (a pane joining a paused wall catches up)
                     elapsed_ms, paused: false, look: settings.look.clone(),
                     quick: quick_filter.clone(), dim, mask, smooth: settings.smooth,
-                    budget_ms: settings.display.studio_budget_ms,
+                    // one GPU serves every pane of a wall (and the compositor):
+                    // each pane gets its share of the budget
+                    budget_ms: {
+                        let panes = if settings.link_enabled { peers.list.len() + 1 } else { 1 };
+                        (settings.display.studio_budget_ms / panes as f32).max(0.8)
+                    },
                     prefetch: transition.pending().map(|i| names[i % names.len()].to_string()),
                     // Studio scenes only: Classic GPU output stays identical to
                     // the CPU path, which has no hysteresis
@@ -3440,6 +3520,8 @@ fn run(
                         0
                     },
                     params: config::tune_for(&settings.cfg, &st.cur.scene),
+                    #[cfg(feature = "gpu")]
+                    depth,
                 };
                 if let Some(frame) = worker.submit(request) {
                     lead.on_frame(frame.elapsed_ms, slot);
@@ -3499,8 +3581,48 @@ fn run(
                 if let Some(frame) = rendered.as_ref().filter(|_| !calib_drawn) {
                     #[allow(unused_mut)]
                     let mut drawn = false;
+                    // kitty pixels: the cells stay blank and the picture goes
+                    // out as an image once the frame is drawn
+                    // (the GPU may have rendered a coarser rung than the mode
+                    // asks for; kitty scales it over the same cells)
+                    if frame.pixels.is_kitty() && shown_pixels.is_kitty() {
+                        let key = (frame.generation, frame.elapsed_ms, area);
+                        if kitty_shown != Some(key) {
+                            let (pw, ph) = match &frame.cells {
+                                Some(_) => frame.pixels.cell_size(),
+                                None => shown_pixels.cell_size(),
+                            };
+                            let (cols, rows) = match &frame.cells {
+                                // the GPU packed the crop's pixels already
+                                Some(_) => frame.grid,
+                                None => (area.width as usize, area.height as usize),
+                            };
+                            match &frame.cells {
+                                Some(words) => {
+                                    // the pass packed RGBA little-endian words: on a
+                                    // little-endian machine their bytes are the image
+                                    let n = cols * rows * pw * ph;
+                                    kitty_rgba.resize(n * 4, 0);
+                                    if cfg!(target_endian = "little") {
+                                        // SAFETY: u32 → u8 reinterpretation of an initialised
+                                        // slice; n*4 bytes lie inside words[..n]
+                                        let bytes = unsafe { std::slice::from_raw_parts(words[..n].as_ptr() as *const u8, n * 4) };
+                                        kitty_rgba.copy_from_slice(bytes);
+                                    } else {
+                                        for (dst, w) in kitty_rgba.chunks_exact_mut(4).zip(&words[..n]) {
+                                            dst.copy_from_slice(&w.to_le_bytes());
+                                        }
+                                    }
+                                }
+                                None => render::kitty_rgba(&frame.canvas, shown_pixels, crop.0 as i32, crop.1 as i32, cols, rows, &mut kitty_rgba),
+                            }
+                            kitty_frame = Some((cols * pw, rows * ph, area.x, area.y, cols as u16, rows as u16));
+                            kitty_shown = Some(key);
+                        }
+                        drawn = true;
+                    }
                     #[cfg(feature = "gpu")]
-                    if let Some(words) = &frame.cells {
+                    if let Some(words) = frame.cells.as_ref().filter(|_| !drawn && !frame.pixels.is_kitty()) {
                         // the frame's own grid: after a resize the last frame
                         // (same simulation, old view) stays up until the next
                         let cells = termpaper::gpu::FrameCells {
@@ -3605,6 +3727,17 @@ fn run(
                     termpaper::check::render(f, area, &check, &check_ctx(&settings));
                 }
             })?;
+            match kitty_frame {
+                // a full /dev/shm or a refused write costs this frame, not the program
+                Some((w, h, x, y, cols, rows)) => {
+                    let _ = kitty_image.show(terminal.backend_mut(), &kitty_rgba, w, h, x, y, cols, rows);
+                }
+                None if !shown_pixels.is_kitty() => {
+                    kitty_image.clear(terminal.backend_mut())?;
+                    kitty_shown = None;
+                }
+                None => {}
+            }
             crossterm::execute!(terminal.backend_mut(), crossterm::terminal::EndSynchronizedUpdate)?;
             // what reaching the terminal cost: Adapt FPS and the readout
             let (bytes, busy) = meter.take();

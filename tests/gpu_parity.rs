@@ -235,7 +235,8 @@ fn transition_masks_match_the_cpu() {
 fn every_pixel_mode_packs_like_the_cpu() {
     let (cols, rows) = (96usize, 30usize);
     let mut failures = Vec::new();
-    for mode in Pixels::ALL {
+    // kitty pixels are not packed into cells (see the test below)
+    for mode in Pixels::ALL.into_iter().filter(|m| !m.is_kitty()) {
         let (pw, ph) = mode.cell_size();
         let c = canvas(cols * pw, rows * ph);
         let area = Rect::new(0, 0, cols as u16, rows as u16);
@@ -280,4 +281,44 @@ fn every_pixel_mode_packs_like_the_cpu() {
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// Kitty pixels come back as the crop's own pixels, one RGBA word each (R in
+/// the low byte, alpha opaque), row by row.
+#[test]
+#[ignore = "requires a GPU; run with -- --ignored"]
+fn kitty_pixels_read_back_as_the_canvas() {
+    for mode in [Pixels::Kitty, Pixels::KittyHd] {
+        let (cols, rows) = (40usize, 12usize);
+        let (pw, ph) = mode.cell_size();
+        let c = canvas(cols * pw + 6, rows * ph + 4);
+        let units = termpaper::gpu::out_units(mode, cols, rows);
+        let mut gpu = Gpu::new(c.width(), c.height(), units).expect("a GPU adapter");
+        let look = Look::default();
+        let plan = Plan {
+            look: &look,
+            lut: None,
+            quick_filter: None,
+            t: 0.0,
+            dim: 1.0,
+            mask: None,
+            smooth: 0.0,
+            pixels: mode,
+            cols,
+            rows,
+            crop: (3, 2),
+            virt: None,
+            hysteresis: 0,
+        };
+        let words = gpu.run_blocking(&c, &plan).expect("GPU frame");
+        let (w, h) = (cols * pw, rows * ph);
+        assert!(words.len() >= w * h);
+        for y in 0..h {
+            for x in 0..w {
+                let (r, g, b) = c.get(3 + x as i32, 2 + y as i32).color;
+                let want = r as u32 | (g as u32) << 8 | (b as u32) << 16 | 0xff00_0000;
+                assert_eq!(words[y * w + x], want, "{} pixel ({x}, {y})", mode.name());
+            }
+        }
+    }
 }

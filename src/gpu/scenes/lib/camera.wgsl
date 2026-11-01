@@ -29,3 +29,23 @@ fn cam_sway(t: f32, amp: f32, salt: u32) -> vec3f {
     let s = f32(salt % 97u);
     return amp * vec3f(sin(t * 0.071 + s), sin(t * 0.053 + s * 1.7) * 0.6, sin(t * 0.037 + s * 2.3) * 0.4);
 }
+
+// A restrained optional camera offset. Both controls default to off; older
+// scenes do not call it, and an idle desk has a perfectly static camera.
+fn cam_depth_offset(ctx: Ctx) -> vec3f {
+    let drift = vec3f(sin(ctx.t * 0.12), sin(ctx.t * 0.09) * 0.55, cos(ctx.t * 0.07) * 0.4)
+        * ctx.motion * 0.07;
+    let pointer = vec3f(ctx.pointer, 0.0) * ctx.parallax * 0.09;
+    return (drift + pointer) * ctx.depth;
+}
+
+// A portal's physical off-axis eye: the shader's p was shifted by this
+// amount in composition space. Moving the eye by the corresponding world
+// distance preserves the chosen focal plane while changing near/far parallax.
+fn cam_portal(cam: Cam, ctx: Ctx, focal_distance: f32) -> Cam {
+    if (!ctx.portal_mode) { return cam; }
+    var out = cam;
+    out.ro += (cam.rt * ctx.portal.x + cam.up * ctx.portal.y)
+        * focal_distance / cam.zoom;
+    return out;
+}

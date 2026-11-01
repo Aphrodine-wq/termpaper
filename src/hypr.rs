@@ -115,6 +115,57 @@ fn via_socket(request: &str) -> Option<String> {
     Some(out)
 }
 
+/// Background interaction sampling uses only the compositor socket. If IPC
+/// is unavailable it skips the sample; it must never spawn `hyprctl`.
+pub(crate) fn socket_json(what: &str) -> Option<String> {
+    via_socket(&format!("j/{what}"))
+}
+
+#[cfg(unix)]
+pub struct EventStream {
+    stream: std::os::unix::net::UnixStream,
+    pending: Vec<u8>,
+}
+
+#[cfg(unix)]
+impl EventStream {
+    pub fn connect() -> Option<Self> {
+        let path = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?)
+            .join("hypr").join(signature()?).join(".socket2.sock");
+        let stream = std::os::unix::net::UnixStream::connect(path).ok()?;
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(100)));
+        Some(Self { stream, pending: Vec::new() })
+    }
+
+    /// None means the read timed out; a closed socket reconnects on the next
+    /// loop iteration. Unknown event lines can safely be ignored.
+    pub fn next_line(&mut self) -> Result<Option<String>, ()> {
+        use std::io::Read;
+        loop {
+            if let Some(end) = self.pending.iter().position(|&b| b == b'\n') {
+                let line = self.pending.drain(..=end).collect::<Vec<_>>();
+                return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+            }
+            let mut buf = [0u8; 1024];
+            match self.stream.read(&mut buf) {
+                Ok(0) => return Err(()),
+                Ok(n) => self.pending.extend_from_slice(&buf[..n]),
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return Ok(None),
+                Err(_) => return Err(()),
+            }
+            if self.pending.len() > 8192 { self.pending.clear(); }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub struct EventStream;
+#[cfg(not(unix))]
+impl EventStream {
+    pub fn connect() -> Option<Self> { None }
+    pub fn next_line(&mut self) -> Result<Option<String>, ()> { Err(()) }
+}
+
 /// Hyprland only runs on Unix; elsewhere there is no socket to ask.
 #[cfg(not(unix))]
 fn via_socket(_request: &str) -> Option<String> {
@@ -165,6 +216,22 @@ pub fn parse_client(json: &str) -> Option<HyprClient> {
 /// The focused window, or None when not under Hyprland or nothing is focused.
 pub fn active_window() -> Option<HyprClient> {
     parse_client(&query("activewindow")?)
+}
+
+/// Pointer in compositor logical coordinates. Queried only by the background
+/// interaction watcher, never by the render loop.
+pub fn cursorpos() -> Option<[f64; 2]> {
+    #[derive(Deserialize)]
+    struct Pos { x: f64, y: f64 }
+    let p: Pos = serde_json::from_str(&query("cursorpos")?).ok()?;
+    (p.x.is_finite() && p.y.is_finite()).then_some([p.x, p.y])
+}
+
+pub(crate) fn cursorpos_ipc() -> Option<[f64; 2]> {
+    #[derive(Deserialize)]
+    struct Pos { x: f64, y: f64 }
+    let p: Pos = serde_json::from_str(&socket_json("cursorpos")?).ok()?;
+    (p.x.is_finite() && p.y.is_finite()).then_some([p.x, p.y])
 }
 
 /// Run a dispatcher: the Lua spelling first (Hyprland 0.55+ with a Lua

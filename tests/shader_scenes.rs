@@ -33,7 +33,11 @@ fn library_compiles_with_every_module() {
         "//! name: probe\n//! title: Probe\n//! category: coast\n//! desc: probe\n//! themes: a, b\n\
          //! uses: {}\n//! fallback: ocean\n\
          fn map(p: vec3f, ctx: Ctx) -> vec2f {{ return vec2f(sdf_sphere(p, 1.0), 1.0); }}\n\
-         fn scene(p: vec2f, ctx: Ctx) -> vec3f {{ return vec3f(p, 0.0); }}\n",
+         fn scene(p: vec2f, ctx: Ctx) -> vec3f {{
+             let input = ctx.pointer.x + ctx.focus.y + ctx.depth + ctx.motion + ctx.parallax
+                 + ctx.reaction + ctx.portal.x + select(0.0, 1.0, ctx.portal_mode) + ctx.focus_pulse;
+             return vec3f(p, input * 0.0);
+         }}\n",
         all.join(", ")
     );
     let (c, _) = shader::compose_text("probe.wgsl", "probe", &text).unwrap();

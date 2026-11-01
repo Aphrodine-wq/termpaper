@@ -175,7 +175,7 @@ fn mask_of_glyph(cp: u32, pixels: Pixels) -> Option<u8> {
         Pixels::Quad => (0u8..16).find(|&m| render::quad_glyph(m) == ch),
         Pixels::Braille => (0u8..=255).find(|&m| render::braille_glyph(m) == ch),
         Pixels::Sextant => (0u8..64).find(|&m| render::sextant_glyph(m) == ch),
-        Pixels::Half | Pixels::Ascii | Pixels::Blocks => None,
+        Pixels::Half | Pixels::Ascii | Pixels::Blocks | Pixels::Kitty | Pixels::KittyHd | Pixels::KittyLo => None,
     }
 }
 
@@ -207,7 +207,7 @@ fn block_lums(c: &Canvas, ox: usize, oy: usize, pixels: Pixels) -> (Vec<u32>, u3
                 }
             }
         }
-        Pixels::Half | Pixels::Ascii | Pixels::Blocks => {}
+        Pixels::Half | Pixels::Ascii | Pixels::Blocks | Pixels::Kitty | Pixels::KittyHd | Pixels::KittyLo => {}
     }
     let avg = lums.iter().sum::<u32>() / lums.len().max(1) as u32;
     (lums, avg)

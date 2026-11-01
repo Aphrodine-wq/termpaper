@@ -785,7 +785,7 @@ fn every_setting_steps_both_ways() {
                         s.id
                     );
                     // a choice of two lands on the other either way
-                    let two_way = matches!(s.id, SettingId::Order | SettingId::Battery | SettingId::MenuSide | SettingId::Placement);
+                    let two_way = matches!(s.id, SettingId::Order | SettingId::Battery | SettingId::MenuSide | SettingId::Placement | SettingId::WallView);
                     assert!(two_way || back != fwd, "{:?}: ← and → should differ", s.id);
                 }
                 Kind::Toggle => {

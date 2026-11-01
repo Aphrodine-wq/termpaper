@@ -9,6 +9,7 @@
 //!   --spp N          samples per pixel for the hi-res sheet (default 16)
 //!   --desk           render across this machine's monitors (Hyprland), to
 //!                    scale in millimetres: `<name>_desk.png`, one row per theme
+//!   --portals        with --desk, give each monitor its measured off-axis eye
 //!   --bench          GPU time per frame at 544x132, 1 spp, medium detail,
 //!                    cycling through the themes (needs timestamps)
 //!   --churn          terminal bandwidth: the share of half-block cells that
@@ -33,6 +34,7 @@ struct Opts {
     spp: u32,
     bench: bool,
     desk: bool,
+    portals: bool,
     churn: bool,
 }
 
@@ -45,6 +47,7 @@ fn parse() -> Opts {
         spp: 16,
         bench: false,
         desk: false,
+        portals: false,
         churn: false,
     };
     let mut args = std::env::args().skip(1);
@@ -63,6 +66,7 @@ fn parse() -> Opts {
             "--spp" => o.spp = args.next().expect("--spp N").parse().expect("number"),
             "--bench" => o.bench = true,
             "--desk" => o.desk = true,
+            "--portals" => o.portals = true,
             "--churn" => o.churn = true,
             s if !s.starts_with("--") => o.which = s.to_string(),
             s => panic!("unknown option {s}"),
@@ -151,13 +155,14 @@ fn render_at(
         kaleido: false,
         exposure: 0.0,
         params: [shader::PARAM_NEUTRAL; 4],
+        depth: gpu::DepthInput::default(),
     });
     g.render_shader_pixels(name, composed, &u)
 }
 
 /// Render a scene across the desk: every monitor a fullscreen pane, placed by
 /// the physical wall plan's own mapping, composited to scale (px per mm).
-fn render_desk(g: &mut Gpu, name: &str, composed: &shader::Composed, themes: usize, t: f64, out: &Path) {
+fn render_desk(g: &mut Gpu, name: &str, composed: &shader::Composed, themes: usize, t: f64, out: &Path, portals: bool) {
     use termpaper::desk::{comp_view, Desk, DeskConfig};
     let mons = termpaper::hypr::monitors().unwrap_or_default();
     if mons.is_empty() {
@@ -177,8 +182,9 @@ fn render_desk(g: &mut Gpu, name: &str, composed: &shader::Composed, themes: usi
         for d in &desk.monitors {
             let px = ((d.rect.w * ppm).round().max(1.0) as usize, (d.rect.h * ppm).round().max(1.0) as usize);
             let v = comp_view(frame, d.rect, px);
+            let eye = if portals { gpu::portal_eye(frame, d.rect) } else { [0.0; 2] };
             let u = gpu::uniforms(&gpu::FrameDesc {
-                view: gpu::ShaderView { origin: v.origin, step: v.step, half: v.half },
+                view: gpu::ShaderView { origin: v.origin, step: v.step, half: v.half }.off_axis(eye),
                 window: px,
                 time: gpu::shader_time((t * 1000.0) as u64, 1.0),
                 speed: 1.0,
@@ -190,6 +196,7 @@ fn render_desk(g: &mut Gpu, name: &str, composed: &shader::Composed, themes: usi
                 kaleido: false,
                 exposure: 0.0,
                 params: [shader::PARAM_NEUTRAL; 4],
+                depth: gpu::DepthInput { portal_offset: eye, portals, ..gpu::DepthInput::default() },
             });
             match g.render_shader_pixels(name, composed, &u) {
                 Ok(p) => {
@@ -204,7 +211,8 @@ fn render_desk(g: &mut Gpu, name: &str, composed: &shader::Composed, themes: usi
             }
         }
     }
-    sheet.save(&out.join(format!("{name}_desk.png")));
+    let suffix = if portals { "portals" } else { "desk" };
+    sheet.save(&out.join(format!("{name}_{suffix}.png")));
 }
 
 /// The share of half-block cells (1x2 px) whose colour moves by more than
@@ -288,7 +296,7 @@ fn main() {
             samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
             if let Some(med) = samples.get(samples.len() / 2) {
                 // at 544x132 (about three 1080p half-block panes) and 1 spp;
-                // a pane then fits several samples in the 3 ms governor budget
+                // a pane then fits several samples in the 2.5 ms heavy budget
                 let budget = match meta.cost.as_str() {
                     "light" => 0.8,
                     "medium" => 1.6,
@@ -334,7 +342,7 @@ fn main() {
         }
         if o.desk {
             let t = o.times.get(1).copied().unwrap_or(o.times[0]);
-            render_desk(&mut g, &name, &composed, themes, t, &o.out);
+            render_desk(&mut g, &name, &composed, themes, t, &o.out, o.portals);
             continue;
         }
         // hi-res sheet

@@ -20,6 +20,9 @@ struct Frame {
     // march scale, exposure (stops), unused, unused
     qual: vec4f,
     params: array<vec4f, 2>,
+    interaction: vec4f,
+    depth: vec4f,
+    portal: vec4f,
 }
 
 @group(0) @binding(0) var<storage, read_write> out_px: array<u32>;
@@ -40,6 +43,15 @@ fn entry_ctx() -> Ctx {
     c.sample = 0u;
     c.spp = max(F.size.z, 1u);
     c.params = F.params[0];
+    c.pointer = F.interaction.xy;
+    c.focus = F.interaction.zw;
+    c.depth = F.depth.x;
+    c.motion = F.depth.y;
+    c.parallax = F.depth.z;
+    c.reaction = F.depth.w;
+    c.portal = F.portal.xy;
+    c.portal_mode = F.portal.z > 0.5;
+    c.focus_pulse = F.portal.w;
     return c;
 }
 

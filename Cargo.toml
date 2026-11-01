@@ -21,6 +21,8 @@ clap = { version = "4.6.4", features = ["derive"] }
 crossterm = "0.29.0"
 rand = "0.10.2"
 ratatui = "0.30.2"
+# glyph widths, so the lean backend knows where the cursor ends up
+unicode-width = "0.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 toml = "1.1.3"
@@ -94,3 +96,9 @@ opt-level = 3
 
 [profile.dev.package.wgpu-core]
 opt-level = 2
+
+# one codegen unit and whole-program LTO: a slower release build for a
+# faster, smaller binary (the frame loop crosses ratatui, crossterm and wgpu)
+[profile.release]
+lto = "fat"
+codegen-units = 1
