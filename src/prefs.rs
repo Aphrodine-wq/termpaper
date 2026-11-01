@@ -654,7 +654,10 @@ impl DisplayPrefs {
     pub fn hysteresis(&self) -> (u8, u8) {
         match self.bandwidth {
             Bandwidth::Full => (0, 0),
-            Bandwidth::Balanced => (3, 0),
+            // a change of one or two levels in 255 is invisible, and the
+            // hold compares against what was last sent, so slow fades still
+            // arrive; on Classic scenes it skips about a fifth of the writes
+            Bandwidth::Balanced => (3, 2),
             Bandwidth::Light => (8, 6),
         }
     }

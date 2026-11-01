@@ -264,6 +264,9 @@ pub struct Frame {
     pub cells: Option<Vec<u32>>,
     /// terminal grid `cells` were packed for
     pub grid: (usize, usize),
+    /// the pixel mode the frame was made in: for kitty pixels `cells` holds
+    /// one RGBA word per pixel of the grid instead of packed cells
+    pub pixels: Pixels,
     /// the scene clock this frame shows (the request it was rendered for,
     /// which for pipelined GPU readback is an earlier one than the request
     /// that returned it)
@@ -540,7 +543,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
             let apron = if needs_apron(&look.effects.stack, request.quick.as_deref()) { APRON } else { 0 };
             let window = ((v.grid.0 * pw).max(1) + 2 * apron, (v.grid.1 * ph).max(1) + 2 * apron);
             let origin = (v.crop.0 as i64 - apron as i64, v.crop.1 as i64 - apron as i64);
-            g.resize(window.0, window.1, v.grid.0 * v.grid.1);
+            g.resize(window.0, window.1, crate::gpu::out_units(v.pixels, v.grid.0, v.grid.1));
             governor.set_budget(request.budget_ms);
             let mirror = look.effects.stack.iter().any(|f| f == "mirror");
             let kaleido = look.effects.stack.iter().any(|f| f == "kaleido");
@@ -618,14 +621,14 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
                     ]),
                     hysteresis: request.hysteresis,
                 };
-                g.poll_cells(v.grid.0, v.grid.1);
+                g.poll_units(crate::gpu::out_units(v.pixels, v.grid.0, v.grid.1));
                 if g.submit_tagged(&raw, &plan, request.elapsed_ms) {
                     last_hash = Some(hash);
                 } else {
                     governor.on_backpressure();
                 }
             }
-            if let Some(done) = g.poll_cells(v.grid.0, v.grid.1) {
+            if let Some(done) = g.poll_units(crate::gpu::out_units(v.pixels, v.grid.0, v.grid.1)) {
                 cells = Some(done.words.to_vec());
             }
             shown_ms = g.readback_tag();
@@ -643,6 +646,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
                 canvas: Canvas::new(1, 1),
                 cells,
                 grid: v.grid,
+                pixels: v.pixels,
                 elapsed_ms: shown_ms,
                 backend: label,
                 render_ms: start.elapsed().as_secs_f32() * 1000.0,
@@ -704,7 +708,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
         last = Instant::now();
         #[cfg(feature = "gpu")]
         if let Some(g) = gpu.as_mut().filter(|_| gpu_post) {
-            g.resize(size.0, size.1, v.grid.0 * v.grid.1);
+            g.resize(size.0, size.1, crate::gpu::out_units(v.pixels, v.grid.0, v.grid.1));
             if gpu_world {
                 g.scene_frame(&sim.name, &opts, sim.seed, t, sim.speed);
             } else {
@@ -728,9 +732,9 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
                 hysteresis: 0,
             };
             // Reclaim completed slots before trying to submit into the ring.
-            g.poll_cells(v.grid.0, v.grid.1);
+            g.poll_units(crate::gpu::out_units(v.pixels, v.grid.0, v.grid.1));
             g.submit_tagged(&raw, &plan, request.elapsed_ms);
-            if let Some(done) = g.poll_cells(v.grid.0, v.grid.1) {
+            if let Some(done) = g.poll_units(crate::gpu::out_units(v.pixels, v.grid.0, v.grid.1)) {
                 cells = Some(done.words.to_vec());
             }
             shown_ms = g.readback_tag();
@@ -757,6 +761,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, renderer: Renderer, low_power: bo
             canvas,
             cells,
             grid: v.grid,
+            pixels: v.pixels,
             elapsed_ms: shown_ms,
             backend: label,
             render_ms: start.elapsed().as_secs_f32() * 1000.0,
@@ -911,6 +916,7 @@ mod tests {
             canvas: Canvas::new(24, 24),
             cells: None,
             grid: (24, 12),
+            pixels: Pixels::Half,
             elapsed_ms: 999,
             backend: "test".into(),
             render_ms: 0.0,
@@ -958,6 +964,7 @@ mod tests {
             canvas: Canvas::new(24, 24),
             cells: None,
             grid: (24, 12),
+            pixels: Pixels::Half,
             elapsed_ms: 5_000,
             backend: "test".into(),
             render_ms: 0.0,

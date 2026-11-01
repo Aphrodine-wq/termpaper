@@ -381,7 +381,7 @@ fn switch_remote(scene: &str, group: Option<&str>, all: bool, args: &Args) -> st
         detail: args.detail.as_deref().or(cfg.detail.as_deref()).and_then(Detail::parse)
             .unwrap_or_else(platform_default_detail).name().to_string(),
         pixels: args.pixels.as_deref().or(cfg.pixels.as_deref()).and_then(Pixels::parse)
-            .unwrap_or_else(platform_default_pixels).name().to_string(),
+            .unwrap_or_else(platform_default_pixels).effective().name().to_string(),
         text_scale: args.text_scale.or(cfg.text_scale),
         proto: link::PROTO,
     };
@@ -881,6 +881,11 @@ fn main() -> std::io::Result<()> {
     // crossterm honors NO_COLOR by stripping all colors, which would render
     // every scene as blank gray blocks — explicitly re-enable colors.
     crossterm::style::Colored::set_ansi_color_disabled(false);
+    // kitty pixels need a local kitty; everywhere else they fall back
+    if termpaper::kitty::supported() {
+        termpaper::render::set_kitty_graphics(true);
+        termpaper::kitty::sweep();
+    }
 
     // the old flags map onto the subcommands (same precedence as before)
     let command = args.command.take().or_else(|| {
@@ -987,7 +992,8 @@ fn main() -> std::io::Result<()> {
         .as_deref()
         .or(cfg.pixels.as_deref())
         .and_then(Pixels::parse)
-        .unwrap_or_else(platform_default_pixels);
+        .unwrap_or_else(platform_default_pixels)
+        .effective();
     let keymap = config::KeyMap::new(&cfg);
     let themes = termpaper::theme::Store::load();
     let (variant_arg, cli_theme) = resolve_theme_args(&args, &scene_name, &themes);
@@ -1128,7 +1134,7 @@ fn main() -> std::io::Result<()> {
 /// that `ratatui::init` uses would split it into hundreds of writes the
 /// terminal can render half-way through (tearing).
 type Term = ratatui::Terminal<
-    ratatui::backend::CrosstermBackend<std::io::BufWriter<termpaper::pace::Meter<std::io::Stdout>>>,
+    termpaper::lean::LeanBackend<std::io::BufWriter<termpaper::pace::Meter<std::io::Stdout>>>,
 >;
 
 /// Frame output buffer. Big enough for a full braille frame of a large
@@ -1149,10 +1155,13 @@ fn init_terminal() -> std::io::Result<(Term, termpaper::pace::Reading)> {
     // took and how long it blocked
     let (meter, reading) = termpaper::pace::Meter::new(std::io::stdout());
     let out = std::io::BufWriter::with_capacity(OUT_BUFFER, meter);
-    Ok((ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(out))?, reading))
+    Ok((ratatui::Terminal::new(termpaper::lean::LeanBackend::new(out))?, reading))
 }
 
 fn restore_terminal() {
+    if termpaper::render::kitty_graphics() {
+        let _ = termpaper::kitty::forget(&mut std::io::stdout());
+    }
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(
         std::io::stdout(),
@@ -1489,7 +1498,7 @@ fn adopt_settings(a: &link::Anchor, settings: &mut Settings, opts: &mut SceneOpt
     opts.text_scale = a.text_scale;
     settings.text_scale = a.text_scale;
     settings.speed = a.speed;
-    if let Some(p) = Pixels::parse(&a.pixels) {
+    if let Some(p) = Pixels::parse(&a.pixels).map(Pixels::effective) {
         settings.pixels = p;
         opts.pixels = p;
     }
@@ -2260,6 +2269,11 @@ fn run(
     let mut held_since: Option<Instant> = None;
     // Light output on Classic scenes: the cells last sent
     let mut sent_cells: Vec<ratatui::buffer::Cell> = Vec::new();
+    // kitty pixels: the picture as one image under the text, its pixels, and
+    // what it last showed (a frame already up is not sent again)
+    let mut kitty_image = termpaper::kitty::Image::default();
+    let mut kitty_rgba: Vec<u8> = Vec::new();
+    let mut kitty_shown: Option<(u64, u64, Rect)> = None;
     let power = termpaper::platform::PowerWatcher::spawn();
     // Pause behind apps: our own window (and its terminal) never count
     let mut fullscreen_watcher = None;
@@ -2442,7 +2456,7 @@ fn run(
                     save.mark(now);
                 }
                 Effect::SetPixels(p) => {
-                    settings.pixels = p;
+                    settings.pixels = p.effective();
                     save.mark(now);
                 }
                 Effect::SetDetail(d) => {
@@ -3383,7 +3397,7 @@ fn run(
             crossterm::queue!(terminal.backend_mut(), crossterm::terminal::BeginSynchronizedUpdate)?;
             // what is on screen comes from the running anchor; `settings` may
             // already hold the next one's values while a switch is pending
-            let shown_pixels = Pixels::parse(&st.cur.pixels).unwrap_or(settings.pixels);
+            let shown_pixels = Pixels::parse(&st.cur.pixels).unwrap_or(settings.pixels).effective();
             let shown_opts = SceneOptions {
                 theme: st.cur.theme.clone(),
                 detail: Detail::parse(&st.cur.detail).unwrap_or(opts.detail),
@@ -3395,6 +3409,7 @@ fn run(
                 Some(at) => at.saturating_sub(st.cur.t0_ms),
                 None => termpaper::sync::slot_elapsed_ms(target, period),
             };
+            let mut kitty_frame: Option<(usize, usize, u16, u16, u16, u16)> = None;
             terminal.draw(|f| {
                 let area = f.area();
                 let (pw, ph) = shown_pixels.cell_size();
@@ -3556,8 +3571,31 @@ fn run(
                 if let Some(frame) = rendered.as_ref().filter(|_| !calib_drawn) {
                     #[allow(unused_mut)]
                     let mut drawn = false;
+                    // kitty pixels: the cells stay blank and the picture goes
+                    // out as an image once the frame is drawn
+                    if frame.pixels.is_kitty() && frame.pixels == shown_pixels {
+                        let key = (frame.generation, frame.elapsed_ms, area);
+                        if kitty_shown != Some(key) {
+                            let (pw, ph) = shown_pixels.cell_size();
+                            let (cols, rows) = match &frame.cells {
+                                // the GPU packed the crop's pixels already
+                                Some(_) => frame.grid,
+                                None => (area.width as usize, area.height as usize),
+                            };
+                            match &frame.cells {
+                                Some(words) => {
+                                    kitty_rgba.clear();
+                                    kitty_rgba.extend(words[..cols * rows * pw * ph].iter().flat_map(|w| w.to_le_bytes()));
+                                }
+                                None => render::kitty_rgba(&frame.canvas, shown_pixels, crop.0 as i32, crop.1 as i32, cols, rows, &mut kitty_rgba),
+                            }
+                            kitty_frame = Some((cols * pw, rows * ph, area.x, area.y, cols as u16, rows as u16));
+                            kitty_shown = Some(key);
+                        }
+                        drawn = true;
+                    }
                     #[cfg(feature = "gpu")]
-                    if let Some(words) = &frame.cells {
+                    if let Some(words) = frame.cells.as_ref().filter(|_| !drawn && !frame.pixels.is_kitty()) {
                         // the frame's own grid: after a resize the last frame
                         // (same simulation, old view) stays up until the next
                         let cells = termpaper::gpu::FrameCells {
@@ -3662,6 +3700,17 @@ fn run(
                     termpaper::check::render(f, area, &check, &check_ctx(&settings));
                 }
             })?;
+            match kitty_frame {
+                // a full /dev/shm or a refused write costs this frame, not the program
+                Some((w, h, x, y, cols, rows)) => {
+                    let _ = kitty_image.show(terminal.backend_mut(), &kitty_rgba, w, h, x, y, cols, rows);
+                }
+                None if !shown_pixels.is_kitty() => {
+                    kitty_image.clear(terminal.backend_mut())?;
+                    kitty_shown = None;
+                }
+                None => {}
+            }
             crossterm::execute!(terminal.backend_mut(), crossterm::terminal::EndSynchronizedUpdate)?;
             // what reaching the terminal cost: Adapt FPS and the readout
             let (bytes, busy) = meter.take();
